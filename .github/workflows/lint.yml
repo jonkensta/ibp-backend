@@ -1,0 +1,36 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv venv
+          source .venv/bin/activate
+          uv sync
+
+      - name: Check formatting
+        run: |
+          source .venv/bin/activate
+          black ibp --check
+
+      - name: Lint
+        run: |
+          source .venv/bin/activate
+          pylint ibp
+
+      - name: Typecheck
+        run: |
+          source .venv/bin/activate
+          mypy ibp

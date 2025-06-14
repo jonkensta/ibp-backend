@@ -89,19 +89,21 @@ class CommentCreate(CommentBase):
     """Schema for creating a new Comment."""
 
 
-class UnitUpdate(UnitBase):
+class UnitUpdate(BaseModel):
     """Schema for updating an existing Unit."""
 
     name: Optional[str] = None
     street1: Optional[str] = None
+    street2: Optional[str] = None
     city: Optional[str] = None
     zipcode: Optional[str] = None
     state: Optional[str] = None
+    url: Optional[str] = None
     jurisdiction: Optional[JurisdictionEnum] = None
     shipping_method: Optional[ShippingMethodEnum] = None
 
 
-class RequestUpdate(RequestBase):
+class RequestUpdate(BaseModel):
     """Schema for updating an existing Request."""
 
     date_processed: Optional[datetime.date] = None
@@ -109,7 +111,7 @@ class RequestUpdate(RequestBase):
     action: Optional[ActionEnum] = None
 
 
-class CommentUpdate(CommentBase):
+class CommentUpdate(BaseModel):
     """Schema for updating an existing Comment."""
 
     author: Optional[str] = None

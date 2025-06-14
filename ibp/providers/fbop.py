@@ -1,14 +1,15 @@
 """FBOP inmate query implementation."""
 
-import asyncio
 import datetime
 import json
 import logging
+import re
 import typing
 
-from .decorators import log_query_by_inmate_id, log_query_by_name
+from .misc import run_curl_exec
+from .types import QueryResult
 
-LOGGER = logging.getLogger(__name__)
+LOGGER: logging.Logger = logging.getLogger(__name__)
 
 URL = "https://www.bop.gov/PublicInfo/execute/inmateloc"
 
@@ -49,26 +50,6 @@ def format_inmate_id(inmate_id: typing.Union[str, int]) -> str:
     return inmate_id[0:5] + "-" + inmate_id[5:8]
 
 
-class QueryResult(typing.TypedDict):
-    """Result of a FBOP query."""
-
-    id: str
-    jurisdiction: typing.Literal["Federal"]
-
-    first_name: str
-    last_name: str
-
-    unit: str
-
-    race: typing.Optional[str]
-    sex: typing.Optional[str]
-
-    url: typing.Literal[None]
-    release: typing.Optional[str | datetime.date]
-
-    datetime_fetched: datetime.datetime
-
-
 async def _curl_search_url(
     last_name: str = "",
     first_name: str = "",
@@ -77,9 +58,9 @@ async def _curl_search_url(
 ) -> dict:
     """Query FBOP using a curl subprocess call."""
 
-    command = ["curl", "-G", "-f", "-s"]
+    args = ["curl", "-G", "-f", "-s"]
 
-    command.append(URL)
+    args.append(URL)
 
     params = {
         "age": "",
@@ -94,33 +75,14 @@ async def _curl_search_url(
     }
 
     for key, value in params.items():
-        command.append("--data-urlencode")
-        command.append(f"{key}={value}")
+        args.append("--data-urlencode")
+        args.append(f"{key}={value}")
 
-    if timeout is not None:
-        command.extend(["--max-time", str(float(timeout))])
-
-    process = await asyncio.create_subprocess_exec(
-        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-
-    try:
-        stdout, *_ = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except asyncio.TimeoutError as error:
-        if process.returncode is None:  # Check if process is still running
-            process.terminate()
-            await process.wait()  # Wait for the process to actually terminate
-        message = f"curl command timed out after {timeout} seconds."
-        raise TimeoutError(message) from error
-
-    if process.returncode != 0:
-        message = f"curl command failed with exit code {process.returncode}"
-        raise RuntimeError(message)
-
+    stdout = await run_curl_exec(args, timeout=timeout)
     return json.loads(stdout.decode("utf-8").strip())
 
 
-async def _query(
+async def query(
     last_name: str = "",
     first_name: str = "",
     inmate_id: str = "",
@@ -136,6 +98,12 @@ async def _query(
         return []
 
     def data_to_inmate(entry):
+
+        def parse_inmate_id(inmate_id: str) -> int:
+            return int(re.sub(r"\D", "", inmate_id))
+
+        inmate_id = parse_inmate_id(entry["inmateNum"])
+
         def parse_date(datestr):
             return datetime.datetime.strptime(datestr, "%m/%d/%Y").date()
 
@@ -167,7 +135,7 @@ async def _query(
             LOGGER.debug("Failed to retrieve any release date.")
 
         return QueryResult(
-            id=entry["inmateNum"],
+            id=inmate_id,
             jurisdiction="Federal",
             first_name=entry["nameFirst"],
             last_name=entry["nameLast"],
@@ -198,21 +166,3 @@ async def _query(
     inmates = filter(has_not_been_released, inmates)  # type: ignore
 
     return list(inmates)
-
-
-@log_query_by_name(LOGGER)
-async def query_by_name(first, last, **kwargs):
-    """Query the FBOP database with an inmate name."""
-    return await _query(first_name=first, last_name=last, **kwargs)
-
-
-@log_query_by_inmate_id(LOGGER)
-async def query_by_inmate_id(inmate_id: str | int, **kwargs):
-    """Query the FBOP database with an inmate id."""
-    try:
-        inmate_id = format_inmate_id(inmate_id)
-    except ValueError as exc:
-        msg = f"'{inmate_id}' is not a valid Texas inmate number"
-        raise ValueError(msg) from exc
-
-    return await _query(inmate_id=inmate_id, **kwargs)

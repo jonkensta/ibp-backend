@@ -11,13 +11,21 @@ keywords = ["fastapi", "sqlalchemy", "api", "database"]
 license = { text = "MIT" } # Or choose another appropriate license
 
 dependencies = [
-    "alembic>=1.8", # Specify a reasonable minimum version
     "fastapi>=0.100", # Specify a reasonable minimum version
     "uvicorn[standard]>=0.20", # Include standard extras for common use cases
     "aiosqlite>=0.17",
     "SQLAlchemy[asyncio]>=2.0", # Include asyncio extra for async support
     "nameparser>=1.1",
-    "pymates @ git+https://github.com/jonkensta/inmate-providers@curl",
+    "beautifulsoup4>=4.13.4",
+]
+
+[dependency-groups]
+dev = [
+    "alembic>=1.8",
+    "black>=23.7",
+    "mypy>=1.5",
+    "pylint>=3.0",
+    "types-beautifulsoup4",
 ]
 
 [project.urls]
@@ -31,6 +39,8 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."] # Search for packages in the current directory
 include = ["ibp"] # Include the 'ibp' package
+
+[tool.setuptools]
 
 [tool.setuptools.package-data]
 "ibp" = ["conf/*.conf"]
@@ -576,4 +586,3 @@ redefining-builtins-modules = ["six.moves", "past.builtins", "future.builtins", 
 line-length = 88
 
 [tool.mypy]
-python_executable = "venv/bin/python"

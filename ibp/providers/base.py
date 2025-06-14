@@ -18,8 +18,6 @@ LOGGERS: dict[Jurisdiction, logging.Logger] = {
     "Federal": fbop.LOGGER,
 }
 
-QueryResult = tdcj.QueryResult | fbop.QueryResult
-
 
 def wrap_query(wrapped):
     """query function."""
@@ -63,9 +61,29 @@ async def query_by_inmate_id(
     jurisdiction: Jurisdiction,
     timeout: typing.Optional[float] = 10.0,
 ):
-    """Query jurisdictions with an inmate ID."""
+    """Query jurisdiction with an inmate ID."""
     provider = PROVIDERS[jurisdiction]
-    return await provider.query_by_inmate_id(inmate_id=inmate_id, timeout=timeout)
+    logger = LOGGERS[jurisdiction]
+
+    try:
+        inmate_id = provider.format_inmate_id(inmate_id)
+    except ValueError as exc:
+        msg = f"'{inmate_id}' is not a valid Texas inmate number"
+        raise ValueError(msg) from exc
+
+    logger.debug("Querying with ID '%s'", inmate_id)
+    matches = await provider.query(inmate_id=inmate_id, timeout=timeout)
+
+    if not matches:
+        logger.debug("No results returned")
+
+    if len(matches) == 1:
+        logger.debug("A single result was returned")
+
+    if len(matches) > 1:
+        logger.error("Multiple results were returned for an ID query")
+
+    return matches
 
 
 @wrap_query
@@ -75,6 +93,24 @@ async def query_by_name(
     jurisdiction: Jurisdiction,
     timeout: typing.Optional[float] = 10.0,
 ):
-    """Query jurisdictions with an inmate name."""
+    """Query jurisdiction with an inmate name."""
     provider = PROVIDERS[jurisdiction]
-    return await provider.query_by_name(first=first, last=last, timeout=timeout)
+    logger = LOGGERS[jurisdiction]
+
+    logger.debug("Querying with name '%s, %s'", last, first)
+    matches = await provider.query(first_name=first, last_name=last, timeout=timeout)
+
+    if not matches:
+        logger.debug("No results were returned")
+        return matches
+
+    for inmate in matches:
+        logger.debug(
+            "%s, %s #%s: MATCHES",
+            inmate["last_name"],
+            inmate["first_name"],
+            inmate["id"],
+        )
+
+    logger.debug("%d result(s) returned", len(matches))
+    return matches

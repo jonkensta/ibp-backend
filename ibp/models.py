@@ -17,7 +17,7 @@ from .base import config
 from .db import Base
 
 
-class ReleaseDate(sqlalchemy.types.TypeDecorator):
+class ReleaseDate(sqlalchemy.types.TypeDecorator):  # pylint: disable=too-many-ancestors
     """Inmate release date SQLAlchemy column type."""
 
     impl = sqlalchemy.types.String

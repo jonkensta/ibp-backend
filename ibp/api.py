@@ -5,8 +5,8 @@ import itertools
 import logging
 
 import sqlalchemy
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from nameparser import HumanName
+from fastapi import Depends, HTTPException, Query, status
+from nameparser import HumanName  # type: ignore[import]
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -78,7 +78,9 @@ async def search_inmates(
 
     except ValueError:
         name = HumanName(query)
-        if not (name.first and name.last):
+        first: str = name.first
+        last: str = name.last
+        if not (first and last):
             logger.debug("Failed to parse query: %s", query)
 
             # pylint: disable=raise-missing-from
@@ -86,9 +88,9 @@ async def search_inmates(
             detail = "Query must be an inmate name or ID."
             raise HTTPException(status_code=status_code, detail=detail)
 
-        logger.debug("querying inmates by name: %s %s", name.first, name.last)
-        errors = await upsert_inmates_by_name(session, name.first, name.last)
-        inmates = await query_inmates_by_name(session, name.first, name.last)
+        logger.debug("querying inmates by name: %s %s", first, last)
+        errors = await upsert_inmates_by_name(session, first, last)
+        inmates = await query_inmates_by_name(session, first, last)
 
     else:
         logger.debug("querying inmates by ID: %d", inmate_id)

@@ -15,10 +15,13 @@ def main():
     args = parser.parse_args()
 
     # Use uvicorn to run the FastAPI app
-    uvicorn.run(app, host=args.host, port=args.port, log_level=config.get("logging", "level").lower())
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=config.get("logging", "level").lower(),
+    )
 
 
 if __name__ == "__main__":
     main()
-
-

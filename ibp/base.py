@@ -74,6 +74,3 @@ def configure_external_loggers(handlers):
         logger.setLevel(logging.ERROR)
         for handler in handlers:
             logger.addHandler(handler)
-
-
-from ibp import models  # pylint: disable=wrong-import-position, unused-import
