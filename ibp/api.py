@@ -275,9 +275,9 @@ async def add_comment(
     used_indices = (
         (
             await session.execute(
-                select(models.Request.index).where(
-                    models.Request.inmate_jurisdiction == jurisdiction,
-                    models.Request.inmate_id == inmate_id,
+                select(models.Comment.index).where(
+                    models.Comment.inmate_jurisdiction == jurisdiction,
+                    models.Comment.inmate_id == inmate_id,
                 )
             )
         )
