@@ -1,77 +1,76 @@
 """Methods for generating warnings for inmates and requests."""
 
+import datetime
+import itertools
 import logging
-from datetime import date, datetime, timedelta
+import typing
 
+from . import models
 from .base import config
 
-logger = logging.getLogger("warnings")
 
-
-def _inmate_entry_age_warning(inmate_):
-    """Return an entry age warning for an inmate if any."""
+def _inmate_entry_age_warning(
+    inmate_: models.Inmate,
+) -> typing.Iterable[typing.Tuple[str, str]]:
+    """Yield an entry age warning for an inmate if any."""
     jurisdiction = inmate_.jurisdiction
     id_ = inmate_.id
 
+    key = "entry age"
     try:
-        age = datetime.now() - inmate_.datetime_fetched
+        age = datetime.datetime.now() - inmate_.datetime_fetched
     except TypeError:
         msg = f"Data entry for {jurisdiction} inmate #{id_:08d} has never been verified"
-        logger.debug(msg)
-        return msg
-
-    inmates_cache_ttl = config.getint("warnings", "inmates_cache_ttl")
-    ttl = timedelta(hours=inmates_cache_ttl)
-    if age > ttl:
-        msg = (
-            f"Data entry for {jurisdiction} inmate #{id_:08d} is {age.days} day(s) old"
-        )
-        logger.debug(msg)
-        return msg
-
-    return None
+        yield key, msg
+    else:
+        inmates_cache_ttl = config.getint("warnings", "inmates_cache_ttl")
+        ttl = datetime.timedelta(hours=inmates_cache_ttl)
+        if age > ttl:
+            msg = f"Data entry for {jurisdiction} inmate #{id_:08d} is {age.days} day(s) old"
+            yield key, msg
 
 
-def _inmate_release_warning(inmate_):
-    """Return a release warning for an inmate if any."""
+def _inmate_release_warning(
+    inmate_: models.Inmate,
+) -> typing.Iterable[typing.Tuple[str, str]]:
+    """Yield a release warning for an inmate if any."""
     try:
-        to_release = inmate_.release - date.today()
+        to_release = inmate_.release - datetime.date.today()
     except TypeError:
-        return None
+        return
+
+    key = "release"
 
     days = config.getint("warnings", "min_release_timedelta")
-    min_timedelta = timedelta(days=days)
+    min_timedelta = datetime.timedelta(days=days)
 
     jurisdiction = inmate_.jurisdiction
     id_ = inmate_.id
 
-    if to_release <= timedelta(0):
+    if to_release <= datetime.timedelta(0):
         msg = f"{jurisdiction} inmate #{id_:08d} is marked as released"
-        logger.debug(msg)
-        return msg
+        yield key, msg
 
-    if to_release <= min_timedelta:
+    elif to_release <= min_timedelta:
         msg = (
             f"{jurisdiction} inmate #{id_:08d} is {to_release.days} days from release."
         )
-        logger.debug(msg)
-        return msg
-
-    return None
+        yield key, msg
 
 
-def inmate(inmate_):
+def inmate(inmate_: models.Inmate) -> dict[str, str]:
     """Generate warnings about a given inmate."""
-    messages = []
-    messages.append(_inmate_entry_age_warning(inmate_))
-    messages.append(_inmate_release_warning(inmate_))
-    messages = filter(None, messages)
-    return messages
+    return dict(
+        itertools.chain(
+            _inmate_entry_age_warning(inmate_), _inmate_release_warning(inmate_)
+        )
+    )
 
 
-def request(inmate_, postmarkdate):
-    """Generate warnings about a given request."""
-    messages = []
+def _request_postmarkdate_warning(
+    inmate_: models.Inmate, postmarkdate: datetime.date
+) -> typing.Iterable[typing.Tuple[str, str]]:
+    "Yield a postmarkdate warning about a request if any." ""
 
     def was_filled(request_):
         return request_.action == "Filled"
@@ -79,27 +78,23 @@ def request(inmate_, postmarkdate):
     requests = filter(was_filled, inmate_.requests)
 
     try:
-        last_filled_request = next(requests)
-    except StopIteration:
-        return messages
+        last_filled_request = max(requests, key=lambda request: request.date_postmarked)
+    except ValueError:
+        return
 
     td = postmarkdate - last_filled_request.date_postmarked
     days = config.getint("warnings", "min_postmark_timedelta")
-    min_td = timedelta(days=days)
+    min_td = datetime.timedelta(days=days)
 
-    msg = None
-
+    key = "postmarkdate"
     if td.days < 0:
-        msg = "There is a request with a postmark after this one."
-        messages.append(msg)
+        yield key, "There is a request with a postmark after this one."
     elif td.days == 0:
-        msg = "No time has transpired since the last postmark."
-        messages.append(msg)
+        yield key, "No time has transpired since the last postmark."
     elif td < min_td:
-        msg = f"Only {td.days} days since last postmark."
-        messages.append(msg)
+        yield key, f"Only {td.days} days since last postmark."
 
-    if msg is not None:
-        logger.debug(msg)
 
-    return messages
+def request(inmate_: models.Inmate, postmarkdate: datetime.date) -> dict[str, str]:
+    """Generate warnings about a given request."""
+    return dict(itertools.chain(_request_postmarkdate_warning(inmate_, postmarkdate)))
