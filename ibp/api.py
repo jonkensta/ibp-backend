@@ -97,7 +97,8 @@ async def search_inmates(
         errors = await upsert_inmates_by_inmate_id(session, inmate_id)
         inmates = await query_inmates_by_inmate_id(session, inmate_id)
 
-    return schemas.InmateSearchResults(inmates=inmates, errors=errors)
+    errors_as_strings = list(map(str, errors))
+    return schemas.InmateSearchResults(inmates=inmates, errors=errors_as_strings)
 
 
 @app.get("/inmates/{jurisdiction}/{inmate_id}", response_model=schemas.Inmate)
