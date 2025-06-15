@@ -8,5 +8,8 @@ venv
 server.log
 node_modules
 package-lock.json
-npm-degug.log
+npm-debug.log
 data.db
+data.db.*
+build
+ibp_server.egg-info
