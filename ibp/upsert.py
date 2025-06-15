@@ -9,7 +9,6 @@ from .base import config
 async def _build_inmate_from_response(session, response):
     """Create an Inmate instance from a provider response."""
     kwargs = dict(response)
-    kwargs["id"] = int(kwargs["id"].replace("-", ""))
 
     unit = (
         await session.execute(
