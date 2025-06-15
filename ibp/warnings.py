@@ -2,7 +2,6 @@
 
 import datetime
 import itertools
-import logging
 import typing
 
 from . import models
@@ -17,12 +16,12 @@ def _inmate_entry_age_warning(
     id_ = inmate_.id
 
     key = "entry age"
-    try:
-        age = datetime.datetime.now() - inmate_.datetime_fetched
-    except TypeError:
+    if inmate_.datetime_fetched is None:
         msg = f"Data entry for {jurisdiction} inmate #{id_:08d} has never been verified"
         yield key, msg
+
     else:
+        age = datetime.datetime.now() - inmate_.datetime_fetched
         inmates_cache_ttl = config.getint("warnings", "inmates_cache_ttl")
         ttl = datetime.timedelta(hours=inmates_cache_ttl)
         if age > ttl:
@@ -34,12 +33,8 @@ def _inmate_release_warning(
     inmate_: models.Inmate,
 ) -> typing.Iterable[typing.Tuple[str, str]]:
     """Yield a release warning for an inmate if any."""
-    try:
-        to_release = inmate_.release - datetime.date.today()
-    except TypeError:
+    if inmate_.release is None:
         return
-
-    key = "release"
 
     days = config.getint("warnings", "min_release_timedelta")
     min_timedelta = datetime.timedelta(days=days)
@@ -47,6 +42,8 @@ def _inmate_release_warning(
     jurisdiction = inmate_.jurisdiction
     id_ = inmate_.id
 
+    key = "release"
+    to_release = inmate_.release - datetime.date.today()
     if to_release <= datetime.timedelta(0):
         msg = f"{jurisdiction} inmate #{id_:08d} is marked as released"
         yield key, msg
