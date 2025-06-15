@@ -101,7 +101,7 @@ async def query(  # pylint: disable=too-many-locals
         def parse_inmate_id(inmate_id: str) -> int:
             return int(re.sub(r"\D", "", inmate_id))
 
-        inmate_id = parse_inmate_id(entry["inmateNum"])
+        inmate_id = parse_inmate_id(entry["TDCJ Number"])
 
         name = HumanName(entry.get("Name", ""))
         first: str = name.first
