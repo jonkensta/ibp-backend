@@ -3,10 +3,10 @@ name = "ibp-server"
 version = "0.1.0"
 description = "Inside Books Project database API interface"
 authors = [
-    { name = "Jon Starr", email = "github@jstarr.me" }, # Replace with your actual name and email
+    { name = "Jon Starr", email = "github@jstarr.me" },
 ]
 readme = "README.md"
-requires-python = ">=3.9" # Assuming Python 3.9+ for modern type hints and features
+requires-python = ">=3.11"
 keywords = ["fastapi", "sqlalchemy", "api", "database"]
 license = { text = "MIT" } # Or choose another appropriate license
 
