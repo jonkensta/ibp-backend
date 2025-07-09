@@ -6,8 +6,7 @@ from typing import Optional
 import sqlalchemy
 import sqlalchemy.orm
 import sqlalchemy.types
-from sqlalchemy import Enum  # type: ignore
-from sqlalchemy import Date, DateTime, Integer, String, Text
+from sqlalchemy import Date, DateTime, Enum, Integer, String, Text
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.orm import mapped_column  # pylint: disable=no-name-in-module
 from sqlalchemy.orm import Mapped, relationship
@@ -15,6 +14,11 @@ from sqlalchemy.schema import ForeignKeyConstraint, PrimaryKeyConstraint
 
 from .base import config
 from .db import Base
+
+# Disable common pylint false-positives for sqlalchemy ORM classes.
+# pylint: disable=too-few-public-methods
+# pylint: disable=too-many-instance-attributes
+# pylint: disable=unsubscriptable-object
 
 
 class ReleaseDate(sqlalchemy.types.TypeDecorator):  # pylint: disable=too-many-ancestors
@@ -56,7 +60,7 @@ class ReleaseDate(sqlalchemy.types.TypeDecorator):  # pylint: disable=too-many-a
 Jurisdiction = Enum("Texas", "Federal", name="jurisdiction_enum")
 
 
-class HasInmateIndex:  # pylint: disable=too-few-public-methods
+class HasInmateIndex:
     """Mixin for models associated with an Inmate."""
 
     inmate_jurisdiction: Mapped[str] = mapped_column(Jurisdiction, nullable=False)
@@ -83,7 +87,7 @@ class HasInmateIndex:  # pylint: disable=too-few-public-methods
         return relationship("Inmate", uselist=False)
 
 
-class Inmate(Base):  # pylint: disable=too-many-instance-attributes
+class Inmate(Base):
     """Inmate sqlalchemy model."""
 
     __tablename__ = "inmates"
@@ -151,7 +155,7 @@ class Inmate(Base):  # pylint: disable=too-many-instance-attributes
         return age < ttl
 
 
-class Lookup(HasInmateIndex, Base):  # pylint: disable=too-few-public-methods
+class Lookup(HasInmateIndex, Base):
     """Sqlalchemy for IBP lookups."""
 
     __tablename__ = "lookups"
@@ -161,7 +165,7 @@ class Lookup(HasInmateIndex, Base):  # pylint: disable=too-few-public-methods
     )
 
 
-class Request(HasInmateIndex, Base):  # pylint: disable=too-few-public-methods
+class Request(HasInmateIndex, Base):
     """Sqlalchemy model for IBP requests."""
 
     __tablename__ = "requests"
@@ -174,7 +178,7 @@ class Request(HasInmateIndex, Base):  # pylint: disable=too-few-public-methods
     )
 
 
-class Comment(HasInmateIndex, Base):  # pylint: disable=too-few-public-methods
+class Comment(HasInmateIndex, Base):
     """Sqlalchemy model for IBP comments."""
 
     __tablename__ = "comments"
@@ -186,9 +190,7 @@ class Comment(HasInmateIndex, Base):  # pylint: disable=too-few-public-methods
     body: Mapped[str] = mapped_column(Text, nullable=False)
 
 
-class Unit(
-    Base
-):  # pylint: disable=too-many-instance-attributes, too-few-public-methods
+class Unit(Base):
     """Sqlalchemy model for IBP units."""
 
     __tablename__ = "units"
