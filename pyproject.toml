@@ -104,7 +104,7 @@ ignore-patterns = ["^\\.#"]
 
 # Python code to execute, usually for sys.path manipulation such as
 # pygtk.require().
-init-hook = 'import sys; sys.path.extend(["venv/lib/python3.11/site-packages"])'
+# init-hook = 'import sys; sys.path.extend(["venv/lib/python3.11/site-packages"])'
 
 # Use multiple processes to speed up Pylint. Specifying 0 will auto-detect the
 # number of processors available to use, and will cap the count on Windows to
