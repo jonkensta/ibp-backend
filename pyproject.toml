@@ -29,8 +29,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jonkensta" # Replace with your actual GitHub repo link
-"Bug Tracker" = "https://github.com/jonkensta/issues" # Replace with your actual GitHub repo link
+Homepage = "https://github.com/jonkensta/ibp-server" # Replace with your actual GitHub repo link
+"Bug Tracker" = "https://github.com/jonkensta/ibp-server/issues" # Replace with your actual GitHub repo link
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
