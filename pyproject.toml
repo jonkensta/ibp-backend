@@ -11,10 +11,10 @@ keywords = ["fastapi", "sqlalchemy", "api", "database"]
 license = { text = "MIT" } # Or choose another appropriate license
 
 dependencies = [
-    "fastapi>=0.100", # Specify a reasonable minimum version
-    "uvicorn[standard]>=0.20", # Include standard extras for common use cases
+    "fastapi[standard]>=0.100",
+    "uvicorn[standard]>=0.20",
     "aiosqlite>=0.17",
-    "SQLAlchemy[asyncio]>=2.0", # Include asyncio extra for async support
+    "SQLAlchemy[asyncio]>=2.0",
     "nameparser>=1.1",
     "beautifulsoup4>=4.13.4",
 ]
