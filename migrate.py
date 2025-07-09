@@ -15,6 +15,7 @@ local_dir = os.path.dirname(os.path.realpath(__file__))  # noqa
 sys.path.append(os.path.join(local_dir, os.path.pardir))  # noqa
 
 import ibp  # pylint: disable=import-error, wrong-import-position
+import ibp.db
 
 
 def parse_date(date: str) -> datetime.date:
@@ -131,8 +132,8 @@ def generate_inmates(connection) -> typing.Iterable[dict]:
 
 async def create_db():
     """Create the sqlalchemy database."""
-    async with ibp.engine.begin() as conn:
-        await conn.run_sync(ibp.Base.metadata.create_all)
+    async with ibp.db.build_engine().begin() as conn:
+        await conn.run_sync(ibp.db.Base.metadata.create_all)
 
 
 async def main():
@@ -152,7 +153,7 @@ async def main():
         progress = ProgressBar(max_value=units_length(connection))
         units = progress(units)
 
-        async with ibp.AsyncSessionLocal() as session:
+        async with ibp.db.async_session() as session:
             units = (ibp.models.Unit(**unit) for unit in units)
             session.add_all(units)
             await session.commit()
