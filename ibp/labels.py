@@ -146,7 +146,9 @@ def add_text(draw: ImageDraw.ImageDraw, box: Box, text: typing.Any) -> None:
     draw.text((x0, y0), text, font=font)
 
 
-def render_request_label(request: typing.Any, size: tuple[int, int] = (1300, 500)) -> Image.Image:
+def render_request_label(
+    request: typing.Any, size: tuple[int, int] = (1300, 500)
+) -> Image.Image:
     """Render a request label image."""
     width, height = size
 

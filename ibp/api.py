@@ -277,7 +277,9 @@ async def get_request_label(
     ).scalar_one_or_none()
 
     if request is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Request not found."
+        )
 
     image = render_request_label(request)
     buffer = io.BytesIO()
