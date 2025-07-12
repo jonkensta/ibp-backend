@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import typing
 import itertools
+import typing
 
 import barcode  # type: ignore
 from barcode.writer import ImageWriter  # type: ignore
