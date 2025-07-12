@@ -26,9 +26,12 @@ def get_next_available_index(indices: typing.Iterable[int]) -> int:
 def code39(text: typing.Any, size: tuple[int, int], dpi: int = 300) -> Image.Image:
     """Create a barcode image for given text within the provided size."""
     writer = ImageWriter()
-    options: dict[str, typing.Any] = dict(
-        write_text=False, writer=writer, dpi=int(dpi), quiet_zone=0
-    )
+    options: dict[str, typing.Any] = {
+        "write_text": False,
+        "writer": writer,
+        "dpi": int(dpi),
+        "quiet_zone": 0,
+    }
 
     def px2mm(px: int) -> float:  # pylint: disable=invalid-name
         """Convert pixels to millimeters for the given DPI."""
