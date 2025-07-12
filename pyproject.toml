@@ -17,6 +17,8 @@ dependencies = [
     "SQLAlchemy[asyncio]>=2.0",
     "nameparser>=1.1",
     "beautifulsoup4>=4.13.4",
+    "python-barcode>=0.15.1",
+    "pillow>=11.3.0",
 ]
 
 [dependency-groups]
