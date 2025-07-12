@@ -65,7 +65,10 @@ def build_font_fitter(min_font: int = 1, max_font: int = 100):
             font_size = int(round((max_ - min_) / 2)) + min_
 
             font = fonts[font_size]
-            text_h, text_w = font.getsize(text)
+
+            left, top, right, bottom = font.getbbox(text)
+            text_w = right - left
+            text_h = bottom - top
 
             if text_h < size_h and text_w < size_w:
                 min_ = font_size
