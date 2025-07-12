@@ -3,15 +3,17 @@
 import datetime
 import itertools
 import logging
+import io
 
 import sqlalchemy
-from fastapi import Depends, HTTPException, Query, status
+from fastapi import Depends, HTTPException, Query, Response, status
 from nameparser import HumanName  # type: ignore[import]
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from . import base, db, models, schemas
+from .labels import render_request_label
 from .base import app
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
 from .upsert import inmates_by_name as upsert_inmates_by_name
@@ -247,6 +249,40 @@ async def delete_request(
     )
     await session.delete(request)
     await session.commit()
+
+
+@app.get(
+    "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}/label",
+    response_class=Response,
+)
+async def get_request_label(
+    jurisdiction: schemas.JurisdictionEnum,
+    inmate_id: int,
+    request_index: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a PNG label image for a request."""
+    request = (
+        await session.execute(
+            select(models.Request)
+            .options(
+                selectinload(models.Request.inmate).selectinload(models.Inmate.unit)
+            )
+            .where(
+                models.Request.inmate_jurisdiction == jurisdiction,
+                models.Request.inmate_id == inmate_id,
+                models.Request.index == request_index,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if request is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Request not found.")
+
+    image = render_request_label(request)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return Response(content=buffer.getvalue(), media_type="image/png")
 
 
 @app.post(
