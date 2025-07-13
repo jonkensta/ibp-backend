@@ -138,10 +138,10 @@ def render_request_label(
         )
 
     # package ID barcode
-    box = build_box_from_percentages(1, 1, 99, 50)
+    box = build_box_from_percentages(3, 3, 97, 50)
     image.paste(code39(id_, box.size), (box.x0, box.y0))
 
-    box = build_box_from_percentages(1, 50, 99, 60)
+    box = build_box_from_percentages(3, 50, 97, 60)
     add_text(draw, box, id_)
 
     # inmate name
@@ -150,23 +150,23 @@ def render_request_label(
             return "Name: N/A"
         return " ".join([inmate.first_name, inmate.last_name])
 
-    box = build_box_from_percentages(1, 60, 99, 90)
+    box = build_box_from_percentages(3, 60, 97, 90)
     add_text(draw, box, get_inmate_name(request.inmate))
 
     # other info at bottom
-    box = build_box_from_percentages(1, 90, 33, 98)
+    box = build_box_from_percentages(3, 90, 33, 97)
     add_text(draw, box, request.inmate.jurisdiction)
 
     def get_unit_name(unit: typing.Any) -> str:
         return unit.name if unit is not None else "Unit: N/A"
 
-    box = build_box_from_percentages(33, 90, 67, 99)
+    box = build_box_from_percentages(33, 90, 67, 97)
     add_text(draw, box, get_unit_name(request.inmate.unit))
 
     def get_shipping_method(unit: typing.Any) -> str:
         return unit.shipping_method if unit is not None else "Shipping: N/A"
 
-    box = build_box_from_percentages(67, 90, 99, 99)
+    box = build_box_from_percentages(67, 90, 97, 97)
     add_text(draw, box, get_shipping_method(request.inmate.unit))
 
     return image
