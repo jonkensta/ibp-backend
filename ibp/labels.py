@@ -1,12 +1,14 @@
 """Utilities for rendering request labels as images."""
 
 import typing
+from dataclasses import dataclass
 
 import barcode  # type: ignore
 from barcode.writer import ImageWriter  # type: ignore
 from PIL import Image, ImageDraw, ImageFont  # type: ignore
 
 # pylint: disable=invalid-name
+from .models import Request
 
 
 def code39(text: typing.Any, size: tuple[int, int], dpi: int = 300) -> Image.Image:
@@ -71,53 +73,28 @@ fit_font = build_font_fitter()  # pylint: disable=invalid-name
 """Returns a font that best fits text to a box."""
 
 
+@dataclass(frozen=True)
 class Box:
-    """Utility class for modelling a textbox."""
+    """Utility class for modeling a textbox."""
 
-    def __init__(self, x0: float, y0: float, x1: float, y1: float):
-        """Initialize our textbox."""
-        x0 = int(round(x0))
-        y0 = int(round(y0))
-        x1 = int(round(x1))
-        y1 = int(round(y1))
+    x0: int
+    y0: int
+    x1: int
+    y1: int
 
-        x0, x1 = min(x0, x1), max(x0, x1)
-        y0, y1 = min(y0, y1), max(y0, y1)
-
-        self._x0 = x0
-        self._y0 = y0
-        self._x1 = x1
-        self._y1 = y1
-
-    @property
-    def x0(self) -> int:
-        """x-component of bottom-left point."""
-        return self._x0
-
-    @property
-    def y0(self) -> int:
-        """y-component of bottom-left point."""
-        return self._y0
-
-    @property
-    def x1(self) -> int:
-        """x-component of top-right point."""
-        return self._x1
-
-    @property
-    def y1(self) -> int:
-        """y-component of top-right point."""
-        return self._y1
+    def __post_init__(self):
+        self.x0, self.x1 = sorted((self.x0, self.x1))
+        self.y0, self.y1 = sorted((self.y0, self.y1))
 
     @property
     def width(self) -> int:
         """Width of the textbox."""
-        return self._x1 - self._x0
+        return self.x1 - self.x0
 
     @property
     def height(self) -> int:
         """Height of the textbox."""
-        return self._y1 - self._y0
+        return self.y1 - self.y0
 
     @property
     def size(self) -> tuple[int, int]:
@@ -139,7 +116,7 @@ def add_text(draw: ImageDraw.ImageDraw, box: Box, text: typing.Any) -> None:
 
 
 def render_request_label(
-    request: typing.Any, size: tuple[int, int] = (1300, 500)
+    request: Request, size: tuple[int, int] = (1300, 500)
 ) -> Image.Image:
     """Render a request label image."""
     width, height = size
@@ -149,11 +126,19 @@ def render_request_label(
 
     id_ = f"{request.inmate_jurisdiction}-{request.inmate_id}-{request.index}"
 
+    def build_box_from_percentages(x0: int, y0: int, x1: int, y1: int):
+        return Box(
+            (x0 * width + 50) // 100,
+            (y0 * height + 50) // 100,
+            (x1 * width + 50) // 100,
+            (y1 * height + 50) // 100,
+        )
+
     # package ID barcode
-    box = Box(0.01 * width, 0.01 * height, 0.99 * width, 0.50 * height)
+    box = build_box_from_percentages(1, 1, 99, 50)
     image.paste(code39(id_, box.size), (box.x0, box.y0))
 
-    box = Box(0.01 * width, 0.50 * height, 0.99 * width, 0.60 * height)
+    box = build_box_from_percentages(1, 50, 99, 60)
     add_text(draw, box, id_)
 
     # inmate name
@@ -162,23 +147,23 @@ def render_request_label(
             return "Name: N/A"
         return " ".join([inmate.first_name, inmate.last_name])
 
-    box = Box(0.01 * width, 0.60 * height, 0.99 * width, 0.90 * height)
+    box = build_box_from_percentages(1, 60, 99, 90)
     add_text(draw, box, get_inmate_name(request.inmate))
 
     # other info at bottom
-    box = Box(0.01 * width, 0.90 * height, 0.33 * width, 0.98 * height)
+    box = build_box_from_percentages(1, 90, 33, 98)
     add_text(draw, box, request.inmate.jurisdiction)
 
     def get_unit_name(unit: typing.Any) -> str:
         return unit.name if unit is not None else "Unit: N/A"
 
-    box = Box(0.33 * width, 0.90 * height, 0.67 * width, 0.99 * height)
+    box = build_box_from_percentages(33, 90, 67, 99)
     add_text(draw, box, get_unit_name(request.inmate.unit))
 
     def get_shipping_method(unit: typing.Any) -> str:
         return unit.shipping_method if unit is not None else "Shipping: N/A"
 
-    box = Box(0.67 * width, 0.90 * height, 0.99 * width, 0.99 * height)
+    box = build_box_from_percentages(67, 90, 99, 99)
     add_text(draw, box, get_shipping_method(request.inmate.unit))
 
     return image
