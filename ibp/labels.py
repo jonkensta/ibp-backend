@@ -45,17 +45,17 @@ def build_font_fitter(min_font: int = 1, max_font: int = 100):
     }
 
     def wrapped(size: tuple[int, int], text: str) -> ImageFont.FreeTypeFont:
-        size_h, size_w = size
+        size_w, size_h = size
 
         min_, max_ = min_font, max_font
         while abs(max_ - min_) > 1:
-            font_size = int(round((max_ - min_) / 2)) + min_
+            font_size = (max_ - min_ + 1) // 2 + min_
 
             font = fonts[font_size]
 
-            left, top, right, bottom = font.getbbox(text)
-            text_w = right - left
-            text_h = bottom - top
+            text_x0, text_y0, text_x1, text_y1 = font.getbbox(text)
+            text_w = text_x1 - text_x0
+            text_h = text_y1 - text_y0
 
             if text_h < size_h and text_w < size_w:
                 min_ = font_size
