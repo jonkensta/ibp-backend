@@ -105,11 +105,15 @@ def add_text(draw: ImageDraw.ImageDraw, box: Box, text: typing.Any) -> None:
     """Add text to a box with a fitted font."""
     text = str(text)
 
-    font = fit_font(box.size, text)
-    text_size = font.getsize(text)
+    box_w, box_h = box.size
 
-    x0 = box.x0 + int((box.size[0] - text_size[0] + 1) / 2)
-    y0 = box.y0 + int((box.size[1] - text_size[1] + 1) / 2)
+    font = fit_font(box.size, text)
+    text_x0, text_y0, text_x1, text_y1 = font.getbbox(text)
+    text_w = text_x1 - text_x0
+    text_h = text_y1 - text_y0
+
+    x0 = box.x0 + (box_w - text_w + 1) // 2
+    y0 = box.y0 + (box_h - text_h + 1) // 2
 
     draw.text((x0, y0), text, font=font)
 
