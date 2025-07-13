@@ -1,7 +1,5 @@
 """Utilities for rendering request labels as images."""
 
-from __future__ import annotations
-
 import typing
 
 import barcode  # type: ignore
