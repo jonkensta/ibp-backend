@@ -1,4 +1,4 @@
-"""Utilities for rendering request labels as images."""
+"""Utilities for creating request labels."""
 
 import typing
 from dataclasses import dataclass
