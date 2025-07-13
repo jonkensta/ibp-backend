@@ -72,7 +72,7 @@ fit_font = build_font_fitter()  # pylint: disable=invalid-name
 """Returns a font that best fits text to a box."""
 
 
-@dataclass(frozen=True)
+@dataclass
 class Box:
     """Utility class for modeling a textbox."""
 
