@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from . import base, db, models, schemas
+from . import base, db, locks, models, schemas
 from .labels import render_request_label
 from .base import app
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
@@ -143,18 +143,23 @@ async def get_inmate(
         detail = "Inmate not found."
         raise HTTPException(status_code=status_code, detail=detail)
 
-    used_indices = [lookup.index for lookup in inmate.lookups]
-    next_index = next(index for index in itertools.count() if index not in used_indices)
+    async with locks.inmate_lock(jurisdiction, inmate_id):
+        used_indices = [lookup.index for lookup in inmate.lookups]
+        next_index = next(
+            index for index in itertools.count() if index not in used_indices
+        )
 
-    lookup = models.Lookup(datetime_created=datetime.datetime.now(), index=next_index)
-    inmate.lookups.append(lookup)
-    inmate.lookups.sort(key=lambda lookup: lookup.datetime_created)
+        lookup = models.Lookup(
+            datetime_created=datetime.datetime.now(), index=next_index
+        )
+        inmate.lookups.append(lookup)
+        inmate.lookups.sort(key=lambda lookup: lookup.datetime_created)
 
-    session.add(lookup)
-    del inmate.lookups[:-3]
+        session.add(lookup)
+        del inmate.lookups[:-3]
 
-    await session.commit()
-    await session.refresh(inmate)
+        await session.commit()
+        await session.refresh(inmate)
 
     return inmate
 
