@@ -1,24 +1,28 @@
 """Types for IBP inmate providers."""
 
+from __future__ import annotations
+
 import datetime
-import typing
+from typing import Literal, Optional
+
+from pydantic import BaseModel
 
 
-class QueryResult(typing.TypedDict):
-    """Base result of a query."""
+class QueryResult(BaseModel):
+    """Base result of a provider query."""
 
     id: int
-    jurisdiction: typing.Literal["Federal"] | typing.Literal["Texas"]
+    jurisdiction: Literal["Federal", "Texas"]
 
     first_name: str
     last_name: str
 
     unit: str
 
-    race: typing.Optional[str]
-    sex: typing.Optional[str]
+    race: Optional[str] = None
+    sex: Optional[str] = None
 
-    url: typing.Literal[None]
-    release: typing.Optional[str | datetime.date]
+    url: Optional[str] = None
+    release: Optional[str | datetime.date] = None
 
     datetime_fetched: datetime.datetime

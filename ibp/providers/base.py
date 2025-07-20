@@ -107,9 +107,9 @@ async def query_by_name(
     for inmate in matches:
         logger.debug(
             "%s, %s #%s: MATCHES",
-            inmate["last_name"],
-            inmate["first_name"],
-            inmate["id"],
+            inmate.last_name,
+            inmate.first_name,
+            inmate.id,
         )
 
     logger.debug("%d result(s) returned", len(matches))

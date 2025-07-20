@@ -90,6 +90,9 @@ async def query(
 ) -> list[QueryResult]:
     """Private helper for querying FBOP."""
 
+    if not inmate_id and not (first_name and last_name):
+        return []
+
     data = await _curl_search_url(last_name, first_name, inmate_id, timeout)
 
     try:
@@ -147,22 +150,21 @@ async def query(
             datetime_fetched=datetime.datetime.now(),
         )
 
-    inmates = map(data_to_inmate, data)
+    inmates: typing.Iterable[QueryResult] = map(data_to_inmate, data)
 
-    def is_in_texas(inmate):
-        return inmate["unit"] in TEXAS_UNITS
+    def is_in_texas(inmate: QueryResult) -> bool:
+        return inmate.unit in TEXAS_UNITS
 
-    inmates = filter(is_in_texas, inmates)  # type: ignore
+    inmates = filter(is_in_texas, inmates)
 
-    def has_not_been_released(inmate):
-        try:
-            released = datetime.date.today() >= inmate["release"]
-        except TypeError:
-            # release can be a string for life sentence, etc
+    def has_not_been_released(inmate: QueryResult) -> bool:
+        if isinstance(inmate.release, datetime.date):
+            released = datetime.date.today() >= inmate.release
+        else:
             released = False
 
         return not released
 
-    inmates = filter(has_not_been_released, inmates)  # type: ignore
+    inmates = filter(has_not_been_released, inmates)
 
     return list(inmates)

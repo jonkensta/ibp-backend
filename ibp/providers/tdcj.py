@@ -63,6 +63,9 @@ async def query(  # pylint: disable=too-many-locals
 ) -> list[QueryResult]:
     """Private helper for querying TDCJ."""
 
+    if not inmate_id and not (first_name and last_name):
+        return []
+
     html = await _curl_search_url(last_name, first_name, inmate_id, timeout)
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table", {"class": "tdcj_table"})
@@ -71,7 +74,7 @@ async def query(  # pylint: disable=too-many-locals
         return []
 
     for linebreak in table.find_all("br"):
-        linebreak.replace_with(" ")
+        linebreak.replace_with(" ")  # type: ignore[arg-type]
 
     header_tag = table.find("thead")
     body_tag = table.find("tbody")
@@ -90,10 +93,10 @@ async def query(  # pylint: disable=too-many-locals
 
     keys = [th.get_text(" ", strip=True) for th in header.find_all("th")]
 
-    rows: list[Tag] = body_tag.find_all("tr")
+    rows: list[Tag] = typing.cast(list[Tag], body_tag.find_all("tr"))
 
     def row_to_inmate(row: Tag):
-        """Convert TDCJ table row to inmate dictionary."""
+        """Convert TDCJ table row to an inmate model."""
 
         cells = row.find_all(["th", "td"])
         values = [c.get_text(" ", strip=True) for c in cells]
@@ -102,7 +105,7 @@ async def query(  # pylint: disable=too-many-locals
 
         entry = dict(zip(keys, values))
         anchor = row.find("a")
-        entry["href"] = anchor.get("href") if isinstance(anchor, Tag) else None
+        href = anchor.get("href") if isinstance(anchor, Tag) else None
 
         def parse_inmate_id(inmate_id: str) -> int:
             return int(re.sub(r"\D", "", inmate_id))
@@ -116,7 +119,7 @@ async def query(  # pylint: disable=too-many-locals
         def build_url(href):
             return urljoin(BASE_URL, href)
 
-        url = build_url(str(entry["href"])) if "href" in entry else None
+        url = build_url(str(href)) if href else None
 
         def parse_release_date(release):
             return datetime.datetime.strptime(release, "%Y-%m-%d").date()
