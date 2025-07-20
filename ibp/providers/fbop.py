@@ -58,8 +58,7 @@ async def _curl_search_url(
 ) -> dict:
     """Query FBOP using a curl subprocess call."""
 
-    args = ["curl", "-G", "-f", "-s"]
-
+    args = ["-G", "-f", "-s"]
     args.append(URL)
 
     params = {
