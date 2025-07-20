@@ -121,10 +121,7 @@ async def query(
         first: str = name.first
         last: str = name.last
 
-        def build_url(href):
-            return urljoin(BASE_URL, href)
-
-        url = build_url(str(href)) if href else None
+        url = urljoin(BASE_URL, str(href)) if href else None
 
         def parse_release_date(release):
             return datetime.datetime.strptime(release, "%Y-%m-%d").date()
