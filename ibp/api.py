@@ -145,9 +145,6 @@ async def get_inmate(
         detail = "Inmate not found."
         raise HTTPException(status_code=status_code, detail=detail)
 
-    if not hasattr(get_inmate, "locks"):
-        get_inmate.locks = WeakValueDictionary()
-
     locks: WeakValueDictionary[tuple[str, int], asyncio.Lock] = get_inmate.locks
     key = (jurisdiction, inmate_id)
     lock = locks.get(key)
@@ -155,8 +152,7 @@ async def get_inmate(
         lock = asyncio.Lock()
         locks[key] = lock
 
-    await lock.acquire()
-    try:
+    async with lock:
         used_indices = [lookup.index for lookup in inmate.lookups]
         next_index = next(
             index for index in itertools.count() if index not in used_indices
@@ -172,11 +168,14 @@ async def get_inmate(
         del inmate.lookups[:-3]
 
         await session.commit()
-        await session.refresh(inmate)
-    finally:
-        lock.release()
+    await session.refresh(inmate)
 
     return inmate
+
+
+get_inmate.locks: WeakValueDictionary[tuple[str, int], asyncio.Lock] = (
+    WeakValueDictionary()
+)
 
 
 @app.post(
