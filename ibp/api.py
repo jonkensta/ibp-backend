@@ -112,20 +112,6 @@ async def get_inmate(
     """Retrieve an inmate by jurisdiction and inmate ID."""
     logger.debug("Loading inmate view for %s inmate #%08d", jurisdiction, inmate_id)
 
-    statement = (
-        select(models.Inmate)
-        .where(
-            models.Inmate.jurisdiction == jurisdiction,
-            models.Inmate.id == inmate_id,
-        )
-        .options(
-            selectinload(models.Inmate.unit),
-            selectinload(models.Inmate.requests),
-            selectinload(models.Inmate.comments),
-            selectinload(models.Inmate.lookups),
-        )
-    )
-
     async with session.begin():
         statement = (
             select(models.Inmate)
