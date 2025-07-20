@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, DefaultDict
+from typing import AsyncIterator
+from weakref import WeakValueDictionary
 
 
-_LOCKS: DefaultDict[tuple[str, int], asyncio.Lock] = defaultdict(asyncio.Lock)
+_LOCKS: WeakValueDictionary[tuple[str, int], asyncio.Lock] = WeakValueDictionary()
 
 
 @asynccontextmanager
 async def inmate_lock(jurisdiction: str, inmate_id: int) -> AsyncIterator[None]:
     """Async context manager providing a lock for a specific inmate."""
 
-    lock = _LOCKS[(jurisdiction, inmate_id)]
+    key = (jurisdiction, inmate_id)
+    lock = _LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _LOCKS[key] = lock
     await lock.acquire()
     try:
         yield
