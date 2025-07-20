@@ -71,7 +71,7 @@ async def query(
 
     html = await _curl_search_url(last_name, first_name, inmate_id, timeout)
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", {"class": "tdcj_table"})
+    table = soup.find("table", class_="tdcj_table")
 
     if table is None or not isinstance(table, Tag):
         return []
