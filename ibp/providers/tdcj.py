@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
 from nameparser import HumanName  # type: ignore[import]
 
+from .errors import ProviderError
 from .misc import run_curl_exec
 from .types import QueryResult
 
@@ -17,6 +18,8 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 BASE_URL = "https://inmate.tdcj.texas.gov"
 SEARCH_PATH = "InmateSearch/search.action"
 SEARCH_URL = urljoin(BASE_URL, SEARCH_PATH)
+
+REQUIRED_FIELDS = {"TDCJ Number", "Name", "Unit of Assignment"}
 
 
 def format_inmate_id(inmate_id: typing.Union[int, str]) -> str:
@@ -92,6 +95,8 @@ async def query(  # pylint: disable=too-many-locals
         return []
 
     keys = [th.get_text(" ", strip=True) for th in header.find_all("th")]
+    if not set(keys).issuperset(REQUIRED_FIELDS):
+        raise ProviderError("all required fields not found")
 
     rows: list[Tag] = typing.cast(list[Tag], body_tag.find_all("tr"))
 
