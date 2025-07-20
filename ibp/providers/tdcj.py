@@ -73,24 +73,33 @@ async def query(  # pylint: disable=too-many-locals
     for linebreak in table.find_all("br"):
         linebreak.replace_with(" ")
 
-    rows = iter(table.find_all("tr"))
+    header_tag = table.find("thead")
+    body_tag = table.find("tbody")
 
-    try:
-        next(rows)  # First row contains nothing.
-        header = next(rows)
-    except StopIteration:
+    if (
+        header_tag is None
+        or body_tag is None
+        or not isinstance(header_tag, Tag)
+        or not isinstance(body_tag, Tag)
+    ):
         return []
 
-    # Second row contains the column names.
-    keys = [ele.text.strip() for ele in header.find_all("th")]
+    header = header_tag.find("tr")
+    if header is None or not isinstance(header, Tag):
+        return []
 
-    def row_to_entry(row):
-        values = [ele.get_text().strip() for ele in row.find_all("td")]
+    keys = [th.get_text(" ", strip=True) for th in header.find_all("th")]
+
+    rows: list[Tag] = body_tag.find_all("tr")
+
+    def row_to_entry(row: Tag):
+        cells = row.find_all(["th", "td"])
+        values = [c.get_text(" ", strip=True) for c in cells]
         if not values:
             return None
         entry = dict(zip(keys, values))
         anchor = row.find("a")
-        entry["href"] = anchor.get("href") if anchor is not None else None
+        entry["href"] = anchor.get("href") if isinstance(anchor, Tag) else None
         return entry
 
     entries: typing.Iterable[dict[str, str]] = filter(None, map(row_to_entry, rows))
