@@ -58,7 +58,7 @@ async def _curl_search_url(
     return await run_curl_exec(args, timeout=timeout)
 
 
-async def query(  # pylint: disable=too-many-locals
+async def query(
     last_name: str = "",
     first_name: str = "",
     inmate_id: str = "",
@@ -77,7 +77,7 @@ async def query(  # pylint: disable=too-many-locals
         return []
 
     for linebreak in table.find_all("br"):
-        linebreak.replace_with(" ")  # type: ignore[arg-type]
+        linebreak.replace_with(" ")
 
     header_tag = table.find("thead")
     body_tag = table.find("tbody")
@@ -98,7 +98,7 @@ async def query(  # pylint: disable=too-many-locals
     if not set(keys).issuperset(REQUIRED_FIELDS):
         raise ProviderError("all required fields not found")
 
-    rows: list[Tag] = typing.cast(list[Tag], body_tag.find_all("tr"))
+    rows = body_tag.find_all("tr")
 
     def row_to_inmate(row: Tag):
         """Convert TDCJ table row to an inmate model."""
