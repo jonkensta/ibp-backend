@@ -4,6 +4,8 @@ import datetime
 import itertools
 import logging
 import io
+import asyncio
+from weakref import WeakValueDictionary
 
 import sqlalchemy
 from fastapi import Depends, HTTPException, Query, Response, status
@@ -12,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from . import base, db, locks, models, schemas
+from . import base, db, models, schemas
 from .labels import render_request_label
 from .base import app
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
@@ -143,7 +145,18 @@ async def get_inmate(
         detail = "Inmate not found."
         raise HTTPException(status_code=status_code, detail=detail)
 
-    async with locks.inmate_lock(jurisdiction, inmate_id):
+    if not hasattr(get_inmate, "locks"):
+        get_inmate.locks = WeakValueDictionary()
+
+    locks: WeakValueDictionary[tuple[str, int], asyncio.Lock] = get_inmate.locks
+    key = (jurisdiction, inmate_id)
+    lock = locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[key] = lock
+
+    await lock.acquire()
+    try:
         used_indices = [lookup.index for lookup in inmate.lookups]
         next_index = next(
             index for index in itertools.count() if index not in used_indices
@@ -160,6 +173,8 @@ async def get_inmate(
 
         await session.commit()
         await session.refresh(inmate)
+    finally:
+        lock.release()
 
     return inmate
 
