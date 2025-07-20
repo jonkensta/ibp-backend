@@ -92,20 +92,17 @@ async def query(  # pylint: disable=too-many-locals
 
     rows: list[Tag] = body_tag.find_all("tr")
 
-    def row_to_entry(row: Tag):
+    def row_to_inmate(row: Tag):
+        """Convert TDCJ table row to inmate dictionary."""
+
         cells = row.find_all(["th", "td"])
         values = [c.get_text(" ", strip=True) for c in cells]
         if not values:
             return None
+
         entry = dict(zip(keys, values))
         anchor = row.find("a")
         entry["href"] = anchor.get("href") if isinstance(anchor, Tag) else None
-        return entry
-
-    entries: typing.Iterable[dict[str, str]] = filter(None, map(row_to_entry, rows))
-
-    def entry_to_inmate(entry: dict):
-        """Convert TDCJ inmate entry to inmate dictionary."""
 
         def parse_inmate_id(inmate_id: str) -> int:
             return int(re.sub(r"\D", "", inmate_id))
@@ -144,4 +141,4 @@ async def query(  # pylint: disable=too-many-locals
             datetime_fetched=datetime.datetime.now(),
         )
 
-    return list(map(entry_to_inmate, entries))
+    return [inmate for row in rows if (inmate := row_to_inmate(row)) is not None]
