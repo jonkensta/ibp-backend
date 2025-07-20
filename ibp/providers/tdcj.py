@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
 from nameparser import HumanName  # type: ignore[import]
 
+from .errors import ProviderError
 from .misc import run_curl_exec
 from .types import QueryResult
 
@@ -17,6 +18,8 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 BASE_URL = "https://inmate.tdcj.texas.gov"
 SEARCH_PATH = "InmateSearch/search.action"
 SEARCH_URL = urljoin(BASE_URL, SEARCH_PATH)
+
+REQUIRED_FIELDS = {"TDCJ Number", "Name", "Unit of Assignment"}
 
 
 def format_inmate_id(inmate_id: typing.Union[int, str]) -> str:
@@ -55,7 +58,7 @@ async def _curl_search_url(
     return await run_curl_exec(args, timeout=timeout)
 
 
-async def query(  # pylint: disable=too-many-locals
+async def query(
     last_name: str = "",
     first_name: str = "",
     inmate_id: str = "",
@@ -63,9 +66,12 @@ async def query(  # pylint: disable=too-many-locals
 ) -> list[QueryResult]:
     """Private helper for querying TDCJ."""
 
+    if not inmate_id and not (first_name and last_name):
+        return []
+
     html = await _curl_search_url(last_name, first_name, inmate_id, timeout)
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", {"class": "tdcj_table"})
+    table = soup.find("table", class_="tdcj_table")
 
     if table is None or not isinstance(table, Tag):
         return []
@@ -89,11 +95,13 @@ async def query(  # pylint: disable=too-many-locals
         return []
 
     keys = [th.get_text(" ", strip=True) for th in header.find_all("th")]
+    if not set(keys).issuperset(REQUIRED_FIELDS):
+        raise ProviderError("all required fields not found")
 
-    rows: list[Tag] = body_tag.find_all("tr")
+    rows = body_tag.find_all("tr")
 
     def row_to_inmate(row: Tag):
-        """Convert TDCJ table row to inmate dictionary."""
+        """Convert TDCJ table row to an inmate model."""
 
         cells = row.find_all(["th", "td"])
         values = [c.get_text(" ", strip=True) for c in cells]
@@ -102,7 +110,7 @@ async def query(  # pylint: disable=too-many-locals
 
         entry = dict(zip(keys, values))
         anchor = row.find("a")
-        entry["href"] = anchor.get("href") if isinstance(anchor, Tag) else None
+        href = anchor.get("href") if isinstance(anchor, Tag) else None
 
         def parse_inmate_id(inmate_id: str) -> int:
             return int(re.sub(r"\D", "", inmate_id))
@@ -113,10 +121,7 @@ async def query(  # pylint: disable=too-many-locals
         first: str = name.first
         last: str = name.last
 
-        def build_url(href):
-            return urljoin(BASE_URL, href)
-
-        url = build_url(str(entry["href"])) if "href" in entry else None
+        url = urljoin(BASE_URL, str(href)) if href else None
 
         def parse_release_date(release):
             return datetime.datetime.strptime(release, "%Y-%m-%d").date()

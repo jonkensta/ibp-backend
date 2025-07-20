@@ -8,7 +8,7 @@ from .base import config
 
 async def _build_inmate_from_response(session, response):
     """Create an Inmate instance from a provider response."""
-    kwargs = dict(response)
+    kwargs = response.model_dump()
 
     unit = (
         await session.execute(
