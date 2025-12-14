@@ -84,7 +84,7 @@ class HasInmateIndex:
     @declared_attr
     def inmate(cls) -> Mapped["Inmate"]:  # pylint: disable=no-self-argument
         """Declare the relationship to the Inmate model."""
-        return relationship("Inmate", uselist=False)
+        return relationship("Inmate", uselist=False, viewonly=True)
 
 
 class Inmate(Base):
@@ -110,7 +110,7 @@ class Inmate(Base):
 
     unit_name: Mapped[Optional[str]] = mapped_column(String)
     unit: Mapped[Optional["Unit"]] = relationship(
-        "Unit", foreign_keys=[jurisdiction, unit_name], uselist=False
+        "Unit", foreign_keys=[jurisdiction, unit_name], uselist=False, viewonly=True
     )
 
     race: Mapped[Optional[str]] = mapped_column(String)
