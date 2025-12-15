@@ -6,19 +6,34 @@ from . import models, providers
 from .base import config
 
 
-async def _build_inmate_from_response(session, response):
+async def _build_inmate_from_response(session, response: providers.QueryResult):
     """Create an Inmate instance from a provider response."""
     kwargs = response.model_dump()
 
-    unit = (
+    # Check if the unit exists in the database
+    unit_exists = (
         await session.execute(
-            select(models.Unit).where(models.Unit.name == kwargs["unit"])
+            select(models.Unit.name)
+            .where(models.Unit.name == kwargs["unit"])
+            .where(models.Unit.jurisdiction == kwargs["jurisdiction"])
         )
     ).scalar_one_or_none()
 
-    kwargs["unit"] = unit
+    inmate_data = {
+        "id": kwargs["id"],
+        "jurisdiction": kwargs["jurisdiction"],
+        "first_name": kwargs["first_name"],
+        "last_name": kwargs["last_name"],
+        # Only set unit_name if the unit actually exists to avoid FK violation
+        "unit_name": kwargs["unit"] if unit_exists else None,
+        "race": kwargs.get("race"),
+        "sex": kwargs.get("sex"),
+        "release": kwargs.get("release"),
+        "url": kwargs.get("url"),
+        "datetime_fetched": kwargs.get("datetime_fetched"),
+    }
 
-    return models.Inmate(**kwargs)
+    return models.Inmate(**inmate_data)
 
 
 async def inmates_by_inmate_id(session, id_: int) -> list[str]:
