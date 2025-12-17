@@ -112,50 +112,53 @@ async def get_inmate(
     """Retrieve an inmate by jurisdiction and inmate ID."""
     logger.debug("Loading inmate view for %s inmate #%08d", jurisdiction, inmate_id)
 
-    statement = (
-        select(models.Inmate)
-        .where(
-            models.Inmate.jurisdiction == jurisdiction,
-            models.Inmate.id == inmate_id,
-        )
-        .options(
-            selectinload(models.Inmate.unit),
-            selectinload(models.Inmate.requests),
-            selectinload(models.Inmate.comments),
-            selectinload(models.Inmate.lookups),
-        )
-    )
-
-    inmate = (await session.execute(statement)).scalar_one_or_none()
-
-    if inmate is None or not inmate.entry_is_fresh():
-        logger.debug(
-            "Inmate not found or not fresh, querying providers for %s inmate #%08d",
-            jurisdiction,
-            inmate_id,
+    async with session.begin():
+        statement = (
+            select(models.Inmate)
+            .where(
+                models.Inmate.jurisdiction == jurisdiction,
+                models.Inmate.id == inmate_id,
+            )
+            .options(
+                selectinload(models.Inmate.unit),
+                selectinload(models.Inmate.requests),
+                selectinload(models.Inmate.comments),
+                selectinload(models.Inmate.lookups),
+            )
+            .with_for_update()
         )
 
-        await upsert_inmates_by_inmate_id(session, inmate_id)
         inmate = (await session.execute(statement)).scalar_one_or_none()
 
-    if inmate is None:
-        status_code = status.HTTP_404_NOT_FOUND
-        detail = "Inmate not found."
-        raise HTTPException(status_code=status_code, detail=detail)
+        if inmate is None or not inmate.entry_is_fresh():
+            logger.debug(
+                "Inmate not found or not fresh, querying providers for %s inmate #%08d",
+                jurisdiction,
+                inmate_id,
+            )
+            await upsert_inmates_by_inmate_id(session, inmate_id)
+            inmate = (await session.execute(statement)).scalar_one_or_none()
 
-    used_indices = [lookup.index for lookup in inmate.lookups]
-    next_index = next(index for index in itertools.count() if index not in used_indices)
+        if inmate is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Inmate not found."
+            )
 
-    lookup = models.Lookup(datetime_created=datetime.datetime.now(), index=next_index)
-    inmate.lookups.append(lookup)
-    inmate.lookups.sort(key=lambda lookup: lookup.datetime_created)
+        used_indices = [lookup.index for lookup in inmate.lookups]
+        next_index = next(
+            index for index in itertools.count() if index not in used_indices
+        )
 
-    session.add(lookup)
-    del inmate.lookups[:-3]
+        lookup = models.Lookup(
+            datetime_created=datetime.datetime.now(), index=next_index
+        )
+        inmate.lookups.append(lookup)
+        inmate.lookups.sort(key=lambda lookup: lookup.datetime_created)
 
-    await session.commit()
+        session.add(lookup)
+        del inmate.lookups[:-3]
+
     await session.refresh(inmate)
-
     return inmate
 
 
@@ -169,42 +172,48 @@ async def add_request(
     session: AsyncSession = Depends(get_session),
 ):
     """Add a new request for an inmate."""
-    inmate = (
-        await session.execute(
-            select(models.Inmate).where(
+    async with session.begin():
+        statement = (
+            select(models.Inmate)
+            .where(
                 models.Inmate.jurisdiction == jurisdiction,
                 models.Inmate.id == inmate_id,
             )
+            .with_for_update()
         )
-    ).scalar_one_or_none()
 
-    if inmate is None:
-        status_code = status.HTTP_404_NOT_FOUND
-        detail = "Inmate not found."
-        raise HTTPException(status_code=status_code, detail=detail)
+        inmate = (await session.execute(statement)).scalar_one_or_none()
 
-    used_indices = (
-        (
-            await session.execute(
-                select(models.Request.index).where(
-                    models.Request.inmate_jurisdiction == jurisdiction,
-                    models.Request.inmate_id == inmate_id,
+        if inmate is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Inmate not found."
+            )
+
+        used_indices = (
+            (
+                await session.execute(
+                    select(models.Request.index).where(
+                        models.Request.inmate_jurisdiction == jurisdiction,
+                        models.Request.inmate_id == inmate_id,
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    next_index = next(index for index in itertools.count() if index not in used_indices)
 
-    request = models.Request(
-        **request_data.model_dump(),
-        inmate_jurisdiction=jurisdiction,
-        inmate_id=inmate_id,
-        index=next_index,
-    )
-    session.add(request)
-    await session.commit()
+        next_index = next(
+            index for index in itertools.count() if index not in used_indices
+        )
+
+        request = models.Request(
+            **request_data.model_dump(),
+            inmate_jurisdiction=jurisdiction,
+            inmate_id=inmate_id,
+            index=next_index,
+        )
+        session.add(request)
+
     await session.refresh(request)
 
     logger.debug(
@@ -297,42 +306,48 @@ async def add_comment(
     session: AsyncSession = Depends(get_session),
 ):
     """Add a new comment for a specific inmate."""
-    inmate = (
-        await session.execute(
-            select(models.Inmate).where(
+    async with session.begin():
+        statement = (
+            select(models.Inmate)
+            .where(
                 models.Inmate.jurisdiction == jurisdiction,
                 models.Inmate.id == inmate_id,
             )
+            .with_for_update()
         )
-    ).scalar_one_or_none()
 
-    if inmate is None:
-        status_code = status.HTTP_404_NOT_FOUND
-        detail = "Inmate not found."
-        raise HTTPException(status_code=status_code, detail=detail)
+        inmate = (await session.execute(statement)).scalar_one_or_none()
 
-    used_indices = (
-        (
-            await session.execute(
-                select(models.Comment.index).where(
-                    models.Comment.inmate_jurisdiction == jurisdiction,
-                    models.Comment.inmate_id == inmate_id,
+        if inmate is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Inmate not found."
+            )
+
+        used_indices = (
+            (
+                await session.execute(
+                    select(models.Comment.index).where(
+                        models.Comment.inmate_jurisdiction == jurisdiction,
+                        models.Comment.inmate_id == inmate_id,
+                    )
                 )
             )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
-    next_index = next(index for index in itertools.count() if index not in used_indices)
 
-    comment = models.Comment(
-        **comment_data.model_dump(),
-        inmate_jurisdiction=jurisdiction,
-        inmate_id=inmate_id,
-        index=next_index,
-    )
-    session.add(comment)
-    await session.commit()
+        next_index = next(
+            index for index in itertools.count() if index not in used_indices
+        )
+
+        comment = models.Comment(
+            **comment_data.model_dump(),
+            inmate_jurisdiction=jurisdiction,
+            inmate_id=inmate_id,
+            index=next_index,
+        )
+        session.add(comment)
+
     await session.refresh(comment)
 
     logger.debug(
