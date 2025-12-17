@@ -57,6 +57,7 @@ class ReleaseDate(sqlalchemy.types.TypeDecorator):  # pylint: disable=too-many-a
             return value
 
 
+# pylint: disable=invalid-name
 Jurisdiction = Enum("Texas", "Federal", name="jurisdiction_enum")
 
 
