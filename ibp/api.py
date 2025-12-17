@@ -238,26 +238,29 @@ async def delete_request(
     session: AsyncSession = Depends(get_session),
 ):
     """Delete a request."""
-    request = (
-        await session.execute(
-            select(models.Request).where(
-                models.Request.inmate_jurisdiction == jurisdiction,
-                models.Request.inmate_id == inmate_id,
-                models.Request.index == request_index,
+    async with session.begin():
+        request = (
+            await session.execute(
+                select(models.Request).where(
+                    models.Request.inmate_jurisdiction == jurisdiction,
+                    models.Request.inmate_id == inmate_id,
+                    models.Request.index == request_index,
+                )
             )
+        ).scalar_one_or_none()
+
+        if request is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Request not found."
+            )
+
+        logger.debug(
+            "Deleting request #%d for inmate %s %d",
+            request_index,
+            jurisdiction,
+            inmate_id,
         )
-    ).scalar_one_or_none()
-
-    if request is None:
-        status_code = status.HTTP_404_NOT_FOUND
-        detail = "Request not found."
-        raise HTTPException(status_code=status_code, detail=detail)
-
-    logger.debug(
-        "Deleting request #%d for inmate %s %d", request_index, jurisdiction, inmate_id
-    )
-    await session.delete(request)
-    await session.commit()
+        await session.delete(request)
 
 
 @app.get(
@@ -371,30 +374,30 @@ async def delete_comment(
     session: AsyncSession = Depends(get_session),
 ):
     """Delete a comment."""
-    comment = (
-        await session.execute(
-            select(models.Comment).where(
-                models.Comment.inmate_jurisdiction == jurisdiction,
-                models.Comment.inmate_id == inmate_id,
-                models.Comment.index == comment_index,
+    async with session.begin():
+        comment = (
+            await session.execute(
+                select(models.Comment).where(
+                    models.Comment.inmate_jurisdiction == jurisdiction,
+                    models.Comment.inmate_id == inmate_id,
+                    models.Comment.index == comment_index,
+                )
             )
+        ).scalar_one_or_none()
+
+        if comment is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found."
+            )
+
+        logger.debug(
+            "deleting comment #%d for inmate %s %d",
+            comment_index,
+            jurisdiction,
+            inmate_id,
         )
-    ).scalar_one_or_none()
 
-    if comment is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found."
-        )
-
-    logger.debug(
-        "deleting comment #%d for inmate %s %d",
-        comment_index,
-        jurisdiction,
-        inmate_id,
-    )
-
-    await session.delete(comment)
-    await session.commit()
+        await session.delete(comment)
 
 
 @app.get("/units", response_model=list[schemas.Unit])
@@ -440,21 +443,22 @@ async def update_unit(
     """Update an existing unit."""
     logger.debug("updating unit with jurisdiction=%s, name=%s", jurisdiction, name)
 
-    unit = (
-        await session.execute(
-            select(models.Unit).where(
-                models.Unit.jurisdiction == jurisdiction, models.Unit.name == name
+    async with session.begin():
+        unit = (
+            await session.execute(
+                select(models.Unit).where(
+                    models.Unit.jurisdiction == jurisdiction, models.Unit.name == name
+                )
             )
-        )
-    ).scalar_one_or_none()
+        ).scalar_one_or_none()
 
-    if unit is None:
-        status_code = status.HTTP_404_NOT_FOUND
-        detail = "Unit not found."
-        raise HTTPException(status_code=status_code, detail=detail)
+        if unit is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Unit not found."
+            )
 
-    unit.update_from_kwargs(**unit_data.model_dump(exclude_unset=True))
-    await session.commit()
+        unit.update_from_kwargs(**unit_data.model_dump(exclude_unset=True))
+
     await session.refresh(unit)
 
     logger.debug("updated %s %s unit", jurisdiction, name)
