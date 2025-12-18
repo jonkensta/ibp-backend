@@ -15,7 +15,7 @@ def _inmate_entry_age_warning(
     jurisdiction = inmate_.jurisdiction
     id_ = inmate_.id
 
-    key = "entry age"
+    key = "entry_age"
     if inmate_.datetime_fetched is None:
         msg = f"Data entry for {jurisdiction} inmate #{id_:08d} has never been verified"
         yield key, msg

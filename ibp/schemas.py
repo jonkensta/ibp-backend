@@ -189,3 +189,21 @@ class InmateSearchResults(BaseModel):
 
     inmates: list[InmateSearchResult]
     errors: list[str]
+
+
+class InmateWarnings(BaseModel):
+    """Warnings about an inmate's data or status."""
+
+    entry_age: Optional[str] = None
+    release: Optional[str] = None
+
+
+class RequestValidationWarnings(BaseModel):
+    """Warnings when validating a new request before creation."""
+
+    # Inmate warnings
+    entry_age: Optional[str] = None
+    release: Optional[str] = None
+
+    # Request warnings
+    postmarkdate: Optional[str] = None

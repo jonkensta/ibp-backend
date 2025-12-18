@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from . import base, db, models, schemas
+from . import base, db, models, schemas, warnings
 from .labels import render_request_label
 from .base import app
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
@@ -160,6 +160,71 @@ async def get_inmate(
 
     await session.refresh(inmate)
     return inmate
+
+
+@app.get(
+    "/inmates/{jurisdiction}/{inmate_id}/warnings",
+    response_model=schemas.InmateWarnings,
+)
+async def get_inmate_warnings(
+    jurisdiction: schemas.JurisdictionEnum,
+    inmate_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Get warnings about an inmate's data or status."""
+    inmate = (
+        await session.execute(
+            select(models.Inmate)
+            .where(
+                models.Inmate.jurisdiction == jurisdiction,
+                models.Inmate.id == inmate_id,
+            )
+            .options(selectinload(models.Inmate.requests))
+        )
+    ).scalar_one_or_none()
+
+    if inmate is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Inmate not found."
+        )
+
+    warning_dict = warnings.inmate(inmate)
+    return schemas.InmateWarnings(**warning_dict)
+
+
+@app.post(
+    "/inmates/{jurisdiction}/{inmate_id}/requests/validate",
+    response_model=schemas.RequestValidationWarnings,
+)
+async def validate_request(
+    jurisdiction: schemas.JurisdictionEnum,
+    inmate_id: int,
+    request_data: schemas.RequestCreate,
+    session: AsyncSession = Depends(get_session),
+):
+    """Validate a request before creation, returning all warnings."""
+    inmate = (
+        await session.execute(
+            select(models.Inmate)
+            .where(
+                models.Inmate.jurisdiction == jurisdiction,
+                models.Inmate.id == inmate_id,
+            )
+            .options(selectinload(models.Inmate.requests))
+        )
+    ).scalar_one_or_none()
+
+    if inmate is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Inmate not found."
+        )
+
+    inmate_warnings_dict = warnings.inmate(inmate)
+    request_warnings_dict = warnings.request(inmate, request_data.date_postmarked)
+
+    return schemas.RequestValidationWarnings(
+        **inmate_warnings_dict, **request_warnings_dict
+    )
 
 
 @app.post(
