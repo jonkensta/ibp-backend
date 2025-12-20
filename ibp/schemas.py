@@ -85,8 +85,11 @@ class RequestCreate(RequestBase):
     """Schema for creating a new Request."""
 
 
-class CommentCreate(CommentBase):
+class CommentCreate(BaseModel):
     """Schema for creating a new Comment."""
+
+    author: str
+    body: str = Field(max_length=60)
 
 
 class UnitUpdate(BaseModel):

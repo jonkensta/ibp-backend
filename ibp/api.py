@@ -410,6 +410,7 @@ async def add_comment(
 
         comment = models.Comment(
             **comment_data.model_dump(),
+            datetime_created=datetime.datetime.now(datetime.timezone.utc),
             inmate_jurisdiction=jurisdiction,
             inmate_id=inmate_id,
             index=next_index,
