@@ -4,7 +4,7 @@ import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, field_serializer
 
 
 class JurisdictionEnum(str, Enum):
@@ -60,6 +60,13 @@ class LookupBase(BaseModel):
 
     datetime_created: datetime.datetime
 
+    @field_serializer("datetime_created")
+    def serialize_dt(self, dt: datetime.datetime, _info):
+        """Serialize datetime to ISO format with UTC timezone if naive."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        return dt.isoformat()
+
 
 class RequestBase(BaseModel):
     """Base schema for Request model."""
@@ -75,6 +82,13 @@ class CommentBase(BaseModel):
     datetime_created: datetime.datetime
     author: str
     body: str = Field(max_length=60)
+
+    @field_serializer("datetime_created")
+    def serialize_dt(self, dt: datetime.datetime, _info):
+        """Serialize datetime to ISO format with UTC timezone if naive."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        return dt.isoformat()
 
 
 class UnitCreate(UnitBase):
@@ -176,6 +190,15 @@ class Inmate(InmateBase):
         """Pydantic configuration for ORM mode."""
 
         from_attributes = True
+
+    @field_serializer("datetime_fetched")
+    def serialize_dt(self, dt: Optional[datetime.datetime], _info):
+        """Serialize datetime to ISO format with UTC timezone if naive."""
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        return dt.isoformat()
 
 
 class InmateSearchResult(InmateBase):
