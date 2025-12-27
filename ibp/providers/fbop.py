@@ -146,7 +146,7 @@ async def query(
             sex=entry.get("gender", None),
             url=None,
             release=release,
-            datetime_fetched=datetime.datetime.now(),
+            datetime_fetched=datetime.datetime.now(datetime.timezone.utc),
         )
 
     inmates: typing.Iterable[QueryResult] = map(data_to_inmate, data)

@@ -143,7 +143,7 @@ async def query(
             sex=entry.get("Gender", None),
             url=url,
             release=release,
-            datetime_fetched=datetime.datetime.now(),
+            datetime_fetched=datetime.datetime.now(datetime.timezone.utc),
         )
 
     return [inmate for row in rows if (inmate := row_to_inmate(row)) is not None]
