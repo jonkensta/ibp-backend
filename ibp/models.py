@@ -119,7 +119,9 @@ class Inmate(Base):
     release: Mapped[Optional[datetime.date]] = mapped_column(ReleaseDate)
     url: Mapped[Optional[str]] = mapped_column(String)
 
-    datetime_fetched: Mapped[Optional[datetime.datetime]] = mapped_column(DateTime)
+    datetime_fetched: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(timezone=True)
+    )
 
     requests: Mapped[list["Request"]] = relationship(
         "Request",
@@ -162,7 +164,7 @@ class Lookup(HasInmateIndex, Base):
     __tablename__ = "lookups"
 
     datetime_created: Mapped[datetime.datetime] = mapped_column(
-        DateTime, nullable=False
+        DateTime(timezone=True), nullable=False
     )
 
 
@@ -185,7 +187,7 @@ class Comment(HasInmateIndex, Base):
     __tablename__ = "comments"
 
     datetime_created: Mapped[datetime.datetime] = mapped_column(
-        DateTime, nullable=False
+        DateTime(timezone=True), nullable=False
     )
     author: Mapped[str] = mapped_column(String, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
