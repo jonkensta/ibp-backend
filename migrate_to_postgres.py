@@ -127,8 +127,11 @@ async def main():
 
     # Create engines with appropriate settings
     print("\nConnecting to databases...")
-    sqlite_engine = create_async_engine(sqlite_uri, **get_engine_kwargs(sqlite_uri))
-    postgres_engine = create_async_engine(postgres_uri, **get_engine_kwargs(postgres_uri))
+    import urllib.parse
+    sqlite_scheme = urllib.parse.urlparse(sqlite_uri).scheme
+    postgres_scheme = urllib.parse.urlparse(postgres_uri).scheme
+    sqlite_engine = create_async_engine(sqlite_uri, **get_engine_kwargs(sqlite_scheme))
+    postgres_engine = create_async_engine(postgres_uri, **get_engine_kwargs(postgres_scheme))
 
     # Create sessionmakers
     SqliteSession = async_sessionmaker(sqlite_engine, class_=AsyncSession)

@@ -11,7 +11,18 @@ from sqlalchemy.orm import DeclarativeBase
 from .base import config
 
 
-def get_engine_kwargs(uri: str) -> dict:
+def map_engine_scheme(scheme: str) -> str:
+    """Map generic database scheme to async driver version."""
+    scheme_mapping = {
+        "postgresql": "postgresql+asyncpg",
+        "postgres": "postgresql+asyncpg",
+        "sqlite": "sqlite+aiosqlite",
+    }
+
+    return scheme_mapping.get(scheme, scheme)
+
+
+def get_engine_kwargs(scheme: str) -> dict:
     """Get engine kwargs based on database URI scheme."""
     engine_kwargs = {
         "sqlite+aiosqlite": {
@@ -23,8 +34,6 @@ def get_engine_kwargs(uri: str) -> dict:
             "max_overflow": 10,  # Max additional connections
         },
     }
-
-    scheme = urllib.parse.urlparse(uri).scheme
 
     if scheme not in engine_kwargs:
         supported = list(engine_kwargs.keys())
@@ -38,7 +47,10 @@ def get_engine_kwargs(uri: str) -> dict:
 def build_engine():
     """Build an async engine."""
     uri = config.get("database", "uri")
-    engine_kwargs = get_engine_kwargs(uri)
+    parsed = urllib.parse.urlparse(uri)
+    mapped_scheme = map_engine_scheme(parsed.scheme)
+    uri = uri.replace(f"{parsed.scheme}://", f"{mapped_scheme}://", 1)
+    engine_kwargs = get_engine_kwargs(mapped_scheme)
     return create_async_engine(uri, **engine_kwargs)
 
 
