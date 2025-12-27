@@ -6,7 +6,7 @@ from typing import Optional
 import sqlalchemy
 import sqlalchemy.orm
 import sqlalchemy.types
-from sqlalchemy import Date, DateTime, Enum, Integer, String, Text
+from sqlalchemy import Date, DateTime, Enum, Integer, String, Text, TypeDecorator
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.orm import mapped_column  # pylint: disable=no-name-in-module
 from sqlalchemy.orm import Mapped, relationship
@@ -14,6 +14,25 @@ from sqlalchemy.schema import ForeignKeyConstraint, PrimaryKeyConstraint
 
 from .base import config
 from .db import Base
+
+
+class TZDateTime(TypeDecorator):
+    """DateTime type that ensures timezone-awareness (UTC) when loading from database."""
+
+    impl = DateTime
+    cache_ok = True
+
+    def __init__(self, *args, **kwargs):
+        """Initialize with timezone=True for PostgreSQL TIMESTAMPTZ support."""
+        kwargs['timezone'] = True
+        super().__init__(*args, **kwargs)
+
+    def process_result_value(self, value, dialect):
+        """Ensure datetime is timezone-aware when loaded from database."""
+        if value is not None and value.tzinfo is None:
+            # Assume UTC for timezone-naive datetimes
+            value = value.replace(tzinfo=datetime.timezone.utc)
+        return value
 
 # Disable common pylint false-positives for sqlalchemy ORM classes.
 # pylint: disable=too-few-public-methods
@@ -119,9 +138,7 @@ class Inmate(Base):
     release: Mapped[Optional[datetime.date]] = mapped_column(ReleaseDate)
     url: Mapped[Optional[str]] = mapped_column(String)
 
-    datetime_fetched: Mapped[Optional[datetime.datetime]] = mapped_column(
-        DateTime(timezone=True)
-    )
+    datetime_fetched: Mapped[Optional[datetime.datetime]] = mapped_column(TZDateTime())
 
     requests: Mapped[list["Request"]] = relationship(
         "Request",
@@ -164,7 +181,7 @@ class Lookup(HasInmateIndex, Base):
     __tablename__ = "lookups"
 
     datetime_created: Mapped[datetime.datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        TZDateTime(), nullable=False
     )
 
 
@@ -187,7 +204,7 @@ class Comment(HasInmateIndex, Base):
     __tablename__ = "comments"
 
     datetime_created: Mapped[datetime.datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        TZDateTime(), nullable=False
     )
     author: Mapped[str] = mapped_column(String, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
