@@ -19,6 +19,7 @@ dependencies = [
     "beautifulsoup4>=4.13.4",
     "python-barcode>=0.15.1",
     "pillow>=11.3.0",
+    "asyncpg>=0.31.0",
 ]
 
 [dependency-groups]

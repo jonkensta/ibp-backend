@@ -1,24 +1,45 @@
 """IBP database methods."""
 
+import urllib.parse
+
 from sqlalchemy import MetaData
 
 # pylint: disable=no-name-in-module
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from .base import config, get_toplevel_path
+from .base import config
 
 
-def get_uri():
-    """Get URI of sqlite3 database."""
-    toplevel = get_toplevel_path()
-    filepath = toplevel.joinpath(config.get("database", "database")).absolute()
-    return f"sqlite+aiosqlite:///{filepath}"
+def get_engine_kwargs(uri: str) -> dict:
+    """Get engine kwargs based on database URI scheme."""
+    engine_kwargs = {
+        "sqlite+aiosqlite": {
+            "connect_args": {"check_same_thread": False},
+        },
+        "postgresql+asyncpg": {
+            "pool_pre_ping": True,  # Verify connections before using
+            "pool_size": 5,  # Connection pool size
+            "max_overflow": 10,  # Max additional connections
+        },
+    }
+
+    scheme = urllib.parse.urlparse(uri).scheme
+
+    if scheme not in engine_kwargs:
+        supported = list(engine_kwargs.keys())
+        raise ValueError(
+            f"Unsupported database scheme '{scheme}'. Supported: {supported}"
+        )
+
+    return engine_kwargs[scheme]
 
 
 def build_engine():
     """Build an async engine."""
-    return create_async_engine(get_uri())
+    uri = config.get("database", "uri")
+    engine_kwargs = get_engine_kwargs(uri)
+    return create_async_engine(uri, **engine_kwargs)
 
 
 def build_async_sessionmaker():

@@ -13,3 +13,6 @@ data.db
 data.db.*
 build
 ibp_server.egg-info
+
+# Configuration files (use sample.conf as template)
+server.conf
