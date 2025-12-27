@@ -150,7 +150,7 @@ class Inmate(Base):
         if self.datetime_fetched is None:
             return False
 
-        age = datetime.datetime.now() - self.datetime_fetched
+        age = datetime.datetime.now(datetime.timezone.utc) - self.datetime_fetched
         ttl_hours = config.getint("warnings", "inmates_cache_ttl")
         ttl = datetime.timedelta(hours=ttl_hours)
         return age < ttl

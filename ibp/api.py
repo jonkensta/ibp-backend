@@ -150,7 +150,7 @@ async def get_inmate(
         )
 
         lookup = models.Lookup(
-            datetime_created=datetime.datetime.now(), index=next_index
+            datetime_created=datetime.datetime.now(datetime.timezone.utc), index=next_index
         )
         inmate.lookups.append(lookup)
         inmate.lookups.sort(key=lambda lookup: lookup.datetime_created)

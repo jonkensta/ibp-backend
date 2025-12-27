@@ -21,7 +21,7 @@ def _inmate_entry_age_warning(
         yield key, msg
 
     else:
-        age = datetime.datetime.now() - inmate_.datetime_fetched
+        age = datetime.datetime.now(datetime.timezone.utc) - inmate_.datetime_fetched
         inmates_cache_ttl = config.getint("warnings", "inmates_cache_ttl")
         ttl = datetime.timedelta(hours=inmates_cache_ttl)
         if age > ttl:
