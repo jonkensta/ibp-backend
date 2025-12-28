@@ -16,16 +16,32 @@ from .base import config
 from .db import Base
 
 
-class TZDateTime(TypeDecorator):
+class TZDateTime(TypeDecorator):  # pylint: disable=too-many-ancestors
     """DateTime type that ensures timezone-awareness (UTC) when loading from database."""
 
     impl = DateTime
     cache_ok = True
 
+    @property
+    def python_type(self):
+        """Return the Python type."""
+        return datetime.datetime
+
     def __init__(self, *args, **kwargs):
         """Initialize with timezone=True for PostgreSQL TIMESTAMPTZ support."""
         kwargs['timezone'] = True
         super().__init__(*args, **kwargs)
+
+    def process_bind_param(self, value, dialect):
+        """Process value before binding to database."""
+        if value is not None and value.tzinfo is not None:
+            # Convert to UTC before saving if it has timezone info
+            value = value.astimezone(datetime.timezone.utc)
+        return value
+
+    def process_literal_param(self, value, dialect):
+        """Process value for literal rendering."""
+        return value
 
     def process_result_value(self, value, dialect):
         """Ensure datetime is timezone-aware when loaded from database."""

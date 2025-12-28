@@ -2,6 +2,8 @@
 
 import urllib.parse
 
+from typing import Any
+
 from sqlalchemy import MetaData
 
 # pylint: disable=no-name-in-module
@@ -22,9 +24,9 @@ def map_engine_scheme(scheme: str) -> str:
     return scheme_mapping.get(scheme, scheme)
 
 
-def get_engine_kwargs(scheme: str) -> dict:
+def get_engine_kwargs(scheme: str) -> dict[str, Any]:
     """Get engine kwargs based on database URI scheme."""
-    engine_kwargs = {
+    engine_kwargs: dict[str, dict[str, Any]] = {
         "sqlite+aiosqlite": {
             "connect_args": {"check_same_thread": False},
         },

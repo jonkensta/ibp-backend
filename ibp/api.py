@@ -4,6 +4,7 @@ import datetime
 import itertools
 import logging
 import io
+from typing import Optional
 
 import sqlalchemy
 from fastapi import Depends, HTTPException, Query, Response, status
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from . import base, db, models, schemas, warnings
+from . import base, db, metrics, models, schemas, warnings
 from .labels import render_request_label
 from .base import app
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
@@ -529,3 +530,44 @@ async def update_unit(
 
     logger.debug("updated %s %s unit", jurisdiction, name)
     return unit
+
+
+@app.get("/metrics/requests", response_model=schemas.RequestMetricsResponse)
+# pylint: disable=too-many-arguments, too-many-positional-arguments
+async def get_metrics_requests(
+    session: AsyncSession = Depends(get_session),
+    unit_jurisdiction: Optional[schemas.JurisdictionEnum] = None,
+    unit_name: Optional[str] = None,
+    jurisdiction: Optional[str] = None,
+    action: Optional[str] = None,
+    date_range: Optional[str] = None,
+    start_date: Optional[datetime.date] = None,
+    end_date: Optional[datetime.date] = None,
+):
+    """Get request metrics aggregated by month."""
+    logger.debug("Fetching request metrics")
+
+    # Calculate date range from preset if provided
+    if date_range and not (start_date and end_date):
+        start_date, end_date = metrics.calculate_date_range(date_range)
+
+    data = await metrics.get_request_metrics(
+        session=session,
+        unit_jurisdiction=unit_jurisdiction,
+        unit_name=unit_name,
+        jurisdiction=jurisdiction if jurisdiction != "All" else None,
+        action=action if action != "All" else None,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    return schemas.RequestMetricsResponse(
+        data=data,
+        filters_applied={
+            "unit_jurisdiction": unit_jurisdiction,
+            "unit_name": unit_name,
+            "jurisdiction": jurisdiction,
+            "action": action,
+            "date_range": date_range,
+        },
+    )

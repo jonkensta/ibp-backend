@@ -2,9 +2,9 @@
 
 import datetime
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, Field, ConfigDict, field_serializer
+from pydantic import BaseModel, Field, field_serializer
 
 
 class JurisdictionEnum(str, Enum):
@@ -233,3 +233,19 @@ class RequestValidationWarnings(BaseModel):
 
     # Request warnings
     postmarkdate: Optional[str] = None
+
+
+class MonthlyMetricPoint(BaseModel):
+    """Schema for a single month's metrics."""
+
+    month: str  # Format: "YYYY-MM"
+    filled_count: int
+    tossed_count: int
+    total_count: int
+
+
+class RequestMetricsResponse(BaseModel):
+    """Schema for request metrics response."""
+
+    data: list[MonthlyMetricPoint]
+    filters_applied: dict[str, Any]

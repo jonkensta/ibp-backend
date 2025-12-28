@@ -132,7 +132,7 @@ def configure_root_logger(handlers):
 
 def configure_external_loggers(handlers):
     """Configure external loggers."""
-    logger_names = ["asyncio", "uvicorn", "sqlalchemy.engine"]
+    logger_names = ["asyncio", "uvicorn", "sqlalchemy.engine", "aiosqlite"]
     loggers = (logging.getLogger(name) for name in logger_names)
     for logger in loggers:
         logger.setLevel(logging.ERROR)
