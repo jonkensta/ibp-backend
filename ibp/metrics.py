@@ -1,4 +1,5 @@
 """Metrics aggregation for requests."""
+
 # pylint: disable=not-callable
 
 from datetime import date, datetime, timedelta

@@ -29,7 +29,7 @@ class TZDateTime(TypeDecorator):  # pylint: disable=too-many-ancestors
 
     def __init__(self, *args, **kwargs):
         """Initialize with timezone=True for PostgreSQL TIMESTAMPTZ support."""
-        kwargs['timezone'] = True
+        kwargs["timezone"] = True
         super().__init__(*args, **kwargs)
 
     def process_bind_param(self, value, dialect):
@@ -49,6 +49,7 @@ class TZDateTime(TypeDecorator):  # pylint: disable=too-many-ancestors
             # Assume UTC for timezone-naive datetimes
             value = value.replace(tzinfo=datetime.timezone.utc)
         return value
+
 
 # Disable common pylint false-positives for sqlalchemy ORM classes.
 # pylint: disable=too-few-public-methods

@@ -26,12 +26,13 @@ class EnvInterpolatingConfigParser(configparser.ConfigParser):
 
     def _interpolate_env(self, value):
         """Replace ${VAR} or ${VAR:-default} with environment values."""
+
         def replacer(match):
             var_expr = match.group(1)
 
             # Handle ${VAR:-default} syntax
-            if ':-' in var_expr:
-                var_name, default = var_expr.split(':-', 1)
+            if ":-" in var_expr:
+                var_name, default = var_expr.split(":-", 1)
                 return os.getenv(var_name.strip(), default.strip())
 
             # Handle ${VAR} syntax (required, no default)
@@ -45,7 +46,7 @@ class EnvInterpolatingConfigParser(configparser.ConfigParser):
             return env_value
 
         # Match ${...} patterns
-        return re.sub(r'\$\{([^}]+)\}', replacer, value)
+        return re.sub(r"\$\{([^}]+)\}", replacer, value)
 
 
 def get_toplevel_path() -> Path:
