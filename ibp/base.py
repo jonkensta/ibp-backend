@@ -95,6 +95,7 @@ app = FastAPI(
     title="Inside Books Project API",
     description="IBP API for managing inmate requests.",
     version="0.1.0",
+    root_path="/api",
 )
 
 app.add_middleware(
