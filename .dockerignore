@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# uv
+.uv/
+
+# Development files
+.git/
+.github/
+.gitignore
+.gitmodules
+.mypy_cache/
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Database files (should be mounted as volume)
+*.db
+*.db-journal
+data.old.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Documentation
+*.md
+MIGRATION_GUIDE.md
+
+# Scripts not needed in container
+migrate_*.py
