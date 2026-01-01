@@ -1,9 +1,9 @@
 # Use uv's official Python 3.13 image (includes uv pre-installed)
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
-# Install system dependencies (fonts for label generation)
+# Install system dependencies (fonts for label generation, curl for inmate lookups)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends fonts-dejavu && \
+    apt-get install -y --no-install-recommends fonts-dejavu curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
