@@ -1,6 +1,11 @@
 # Use uv's official Python 3.13 image (includes uv pre-installed)
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
+# Install system dependencies (fonts for label generation)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends fonts-dejavu && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Enable bytecode compilation for faster startup
