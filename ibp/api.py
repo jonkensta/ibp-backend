@@ -1,9 +1,9 @@
 """IBP API views."""
 
 import datetime
+import io
 import itertools
 import logging
-import io
 from typing import Optional
 
 import sqlalchemy
@@ -14,8 +14,8 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from . import base, db, metrics, models, schemas, warnings
-from .labels import render_request_label
 from .base import app
+from .labels import render_request_label
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
 from .upsert import inmates_by_name as upsert_inmates_by_name
 
