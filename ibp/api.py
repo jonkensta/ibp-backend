@@ -39,8 +39,8 @@ async def health_check(session: AsyncSession = Depends(get_session)):
         logger.error("Health check failed: %s", str(e))
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database unavailable"
-        )
+            detail="Database unavailable",
+        ) from e
 
 
 async def query_inmates_by_inmate_id(session: AsyncSession, inmate_id: int):
