@@ -119,9 +119,12 @@ def add_text(draw: ImageDraw.ImageDraw, box: Box, text: typing.Any) -> None:
 
 
 def render_request_label(
-    request: Request, size: tuple[int, int] = (1300, 500)
+    request: Request, size: tuple[int, int] = (1004, 378)
 ) -> Image.Image:
-    """Render a request label image."""
+    """Render a request label image.
+
+    Default size is 1004x378 pixels for 85mm x 32mm labels at 300 DPI.
+    """
     width, height = size
 
     image = Image.new("L", size, color=(255,))
