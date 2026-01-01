@@ -28,6 +28,21 @@ async def get_session():
         yield session
 
 
+@app.get("/health")
+async def health_check(session: AsyncSession = Depends(get_session)):
+    """Health check endpoint that verifies database connectivity."""
+    try:
+        # Quick database check - just verify we can execute a query
+        await session.execute(select(1))
+        return {"status": "ok", "database": "connected"}
+    except Exception as e:
+        logger.error("Health check failed: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable"
+        )
+
+
 async def query_inmates_by_inmate_id(session: AsyncSession, inmate_id: int):
     """Query inmates table by inmate ID."""
     return (
