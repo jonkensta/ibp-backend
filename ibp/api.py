@@ -209,7 +209,7 @@ async def get_inmate_warnings(
     return schemas.InmateWarnings(**warning_dict)
 
 
-@app.get("/inmates/by-request/{request_id}", response_model=schemas.InmateDetail)
+@app.get("/inmates/by-request/{request_id}", response_model=schemas.Inmate)
 async def get_inmate_by_legacy_request_id(
     request_id: int,
     session: AsyncSession = Depends(get_session),
