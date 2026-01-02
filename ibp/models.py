@@ -214,6 +214,8 @@ class Request(HasInmateIndex, Base):
         Enum("Filled", "Tossed", name="action_enum"), nullable=False
     )
 
+    request_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
 
 class Comment(HasInmateIndex, Base):
     """Sqlalchemy model for IBP comments."""
