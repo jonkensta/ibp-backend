@@ -104,7 +104,9 @@ def generate_requests(connection, inmate_autoid) -> typing.Iterable[dict]:
 
     for index, request in enumerate(requests):
         request.pop("inmate_autoid")
-        request["id"] = request.pop("autoid")
+        autoid = request.pop("autoid")
+        request["id"] = autoid
+        request["request_id"] = autoid  # Preserve legacy autoid for backward compatibility
         request["index"] = index
         request["date_processed"] = parse_date(request["date_processed"])
         request["date_postmarked"] = parse_date(request["date_postmarked"])
