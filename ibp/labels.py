@@ -130,7 +130,8 @@ def render_request_label(
     image = Image.new("L", size, color=(255,))
     draw = ImageDraw.Draw(image)
 
-    id_ = f"{request.inmate_jurisdiction}-{request.inmate_id}-{request.index}"
+    jurisdiction_code = "TEX" if request.inmate_jurisdiction == "Texas" else "FED"
+    id_ = f"{jurisdiction_code}-{request.inmate_id}-{request.index}"
 
     def build_box_from_percentages(x0: int, y0: int, x1: int, y1: int):
         return Box(
