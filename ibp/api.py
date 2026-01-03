@@ -119,6 +119,36 @@ async def search_inmates(
     return schemas.InmateSearchResults(inmates=inmates, errors=errors_as_strings)
 
 
+@app.get("/inmates/by-request/{request_id}", response_model=schemas.Inmate)
+async def get_inmate_by_legacy_request_id(
+    request_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Look up inmate by legacy request ID for backward compatibility."""
+    # Find request with matching request_id
+    stmt = (
+        select(models.Request)
+        .where(models.Request.request_id == request_id)
+        .options(
+            selectinload(models.Request.inmate).selectinload(models.Inmate.unit),
+            selectinload(models.Request.inmate).selectinload(models.Inmate.requests),
+            selectinload(models.Request.inmate).selectinload(models.Inmate.comments),
+            selectinload(models.Request.inmate).selectinload(models.Inmate.lookups),
+        )
+    )
+    result = await session.execute(stmt)
+    request = result.scalar_one_or_none()
+
+    if not request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No request found with legacy request_id {request_id}",
+        )
+
+    # Return the inmate associated with this request
+    return request.inmate
+
+
 @app.get("/inmates/{jurisdiction}/{inmate_id}", response_model=schemas.Inmate)
 async def get_inmate(
     jurisdiction: schemas.JurisdictionEnum,
@@ -207,36 +237,6 @@ async def get_inmate_warnings(
 
     warning_dict = warnings.inmate(inmate)
     return schemas.InmateWarnings(**warning_dict)
-
-
-@app.get("/inmates/by-request/{request_id}", response_model=schemas.Inmate)
-async def get_inmate_by_legacy_request_id(
-    request_id: int,
-    session: AsyncSession = Depends(get_session),
-):
-    """Look up inmate by legacy request ID for backward compatibility."""
-    # Find request with matching request_id
-    stmt = (
-        select(models.Request)
-        .where(models.Request.request_id == request_id)
-        .options(
-            selectinload(models.Request.inmate).selectinload(models.Inmate.unit),
-            selectinload(models.Request.inmate).selectinload(models.Inmate.requests),
-            selectinload(models.Request.inmate).selectinload(models.Inmate.comments),
-            selectinload(models.Request.inmate).selectinload(models.Inmate.lookups),
-        )
-    )
-    result = await session.execute(stmt)
-    request = result.scalar_one_or_none()
-
-    if not request:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No request found with legacy request_id {request_id}",
-        )
-
-    # Return the inmate associated with this request
-    return request.inmate
 
 
 @app.post(

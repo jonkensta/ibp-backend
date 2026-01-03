@@ -74,6 +74,7 @@ class RequestBase(BaseModel):
     date_processed: datetime.date
     date_postmarked: datetime.date
     action: ActionEnum
+    request_id: Optional[int] = None
 
 
 class CommentBase(BaseModel):
@@ -180,7 +181,7 @@ class Inmate(InmateBase):
 
     datetime_fetched: Optional[datetime.datetime] = None
 
-    unit: Unit
+    unit: Optional[Unit] = None
 
     requests: list[Request] = []
     comments: list[Comment] = []
