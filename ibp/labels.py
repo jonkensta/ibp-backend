@@ -1,4 +1,11 @@
-"""Utilities for creating request labels."""
+"""Utilities for creating request labels.
+
+The visual design mirrors the historical print-server label so that
+volunteers see a familiar label regardless of print path: a full-width
+Code128 barcode up top, a "PACKAGE ID" caption beneath it, the inmate
+name and ID in the middle, and jurisdiction / unit / shipping method
+along the bottom.
+"""
 
 import typing
 from dataclasses import dataclass
@@ -10,8 +17,8 @@ from PIL import Image, ImageDraw, ImageFont  # type: ignore
 from .models import Request
 
 
-def code39(text: typing.Any, size: tuple[int, int], dpi: int = 300) -> Image.Image:
-    """Create a barcode image for given text within the provided size."""
+def code128(text: typing.Any, size: tuple[int, int], dpi: int = 300) -> Image.Image:
+    """Create a Code128 barcode image for given text within the provided size."""
     writer = ImageWriter()
     options: dict[str, typing.Any] = {
         "write_text": False,
@@ -24,7 +31,7 @@ def code39(text: typing.Any, size: tuple[int, int], dpi: int = 300) -> Image.Ima
         """Convert pixels to millimeters for the given DPI."""
         return 25.4 * px / options["dpi"]
 
-    code = barcode.Code39(str(text), writer=writer, add_checksum=False)
+    code = barcode.Code128(str(text), writer=writer)
 
     raw = code.build()
     modules_per_line = len(raw[0])
@@ -112,10 +119,29 @@ def add_text(draw: ImageDraw.ImageDraw, box: Box, text: typing.Any) -> None:
     text_w = text_x1 - text_x0
     text_h = text_y1 - text_y0
 
-    x0 = box.x0 + (box_w - text_w + 1) // 2
-    y0 = box.y0 + (box_h - text_h + 1) // 2
+    x0 = box.x0 + (box_w - text_w + 1) // 2 - text_x0
+    y0 = box.y0 + (box_h - text_h + 1) // 2 - text_y0
 
     draw.text((x0, y0), text, font=font)
+
+
+def get_inmate_name(inmate: typing.Any) -> str:
+    """Return the inmate's full name, or a placeholder if unavailable."""
+    if inmate.first_name is None or inmate.last_name is None:
+        return "N/A"
+    return " ".join([inmate.first_name, inmate.last_name])
+
+
+def get_unit_name(unit: typing.Any) -> str:
+    """Return the unit's name, or a placeholder if unavailable."""
+    return unit.name if unit is not None else "N/A"
+
+
+def get_shipping_method(unit: typing.Any) -> str:
+    """Return the unit's shipping method, or a placeholder if unavailable."""
+    if unit is None or unit.shipping_method is None:
+        return "N/A"
+    return unit.shipping_method
 
 
 def render_request_label(
@@ -141,36 +167,27 @@ def render_request_label(
             (y1 * height + 50) // 100,
         )
 
-    # package ID barcode
-    box = build_box_from_percentages(3, 3, 97, 50)
-    image.paste(code39(id_, box.size), (box.x0, box.y0))
+    # package ID barcode (full width)
+    box = build_box_from_percentages(5, 5, 95, 38)
+    image.paste(code128(id_, box.size), (box.x0, box.y0))
 
-    box = build_box_from_percentages(3, 50, 97, 60)
-    add_text(draw, box, id_)
+    box = build_box_from_percentages(5, 38, 95, 48)
+    add_text(draw, box, f"PACKAGE ID: {id_}".upper())
 
-    # inmate name
-    def get_inmate_name(inmate: typing.Any) -> str:
-        if inmate.first_name is None or inmate.last_name is None:
-            return "Name: N/A"
-        return " ".join([inmate.first_name, inmate.last_name])
+    # inmate name and ID
+    box = build_box_from_percentages(5, 50, 95, 75)
+    name_line = f"{get_inmate_name(request.inmate)} #{request.inmate_id}"
+    add_text(draw, box, name_line.upper())
 
-    box = build_box_from_percentages(3, 60, 97, 90)
-    add_text(draw, box, get_inmate_name(request.inmate))
+    # jurisdiction, unit, shipping
+    unit = request.inmate.unit
+    details = (
+        f"{request.inmate.jurisdiction} — "
+        f"{get_unit_name(unit)} — "
+        f"{get_shipping_method(unit)}"
+    ).upper()
 
-    # other info at bottom
-    box = build_box_from_percentages(3, 90, 33, 97)
-    add_text(draw, box, request.inmate.jurisdiction)
-
-    def get_unit_name(unit: typing.Any) -> str:
-        return unit.name if unit is not None else "Unit: N/A"
-
-    box = build_box_from_percentages(33, 90, 67, 97)
-    add_text(draw, box, get_unit_name(request.inmate.unit))
-
-    def get_shipping_method(unit: typing.Any) -> str:
-        return unit.shipping_method if unit is not None else "Shipping: N/A"
-
-    box = build_box_from_percentages(67, 90, 97, 97)
-    add_text(draw, box, get_shipping_method(request.inmate.unit))
+    box = build_box_from_percentages(5, 77, 95, 95)
+    add_text(draw, box, details)
 
     return image
