@@ -56,20 +56,89 @@ async def query_inmates_by_inmate_id(session: AsyncSession, inmate_id: int):
     )
 
 
-async def query_inmates_by_name(session: AsyncSession, first_name: str, last_name: str):
-    """Query inmates table by name."""
+# Cap on rows returned by a name search, so unioning multiple candidate
+# (first, last) assignments cannot produce absurdly large responses.
+MAX_SEARCH_RESULTS = 250
+
+
+def parse_name_query(query: str) -> list[tuple[str, str]]:
+    """Parse a free-form name query into candidate (first, last) pairs.
+
+    Volunteers type names however they appear on an envelope: "first last",
+    "last first", "last, first", or just a single name.  Instead of guessing
+    one (first, last) assignment, every plausible assignment is returned and
+    the search matches the union of them:
+
+    - "maria garcia" / "garcia maria" / "garcia, maria"
+        -> [(first, last), (last, first)] for the two parsed words
+    - "smith" -> [("smith", ""), ("", "smith")]
+
+    An empty component leaves that component unconstrained.  An empty list is
+    returned if no name parts can be parsed at all.
+    """
+    name = HumanName(query)
+    first: str = name.first
+    last: str = name.last
+
+    if first and last:
+        candidates = [(first, last)]
+        if first.lower() != last.lower():
+            candidates.append((last, first))
+        return candidates
+
+    single = first or last
+    if single:
+        return [(single, ""), ("", single)]
+
+    return []
+
+
+async def query_inmates_by_name(
+    session: AsyncSession, candidates: list[tuple[str, str]]
+):
+    """Query inmates table by name.
+
+    ``candidates`` holds the plausible (first, last) assignments of the
+    user's query (see :func:`parse_name_query`).  A row matches if any
+    assignment matches, where each non-empty component is a case-insensitive
+    prefix match.  Results are ordered with exact last-name matches first,
+    then by name, and capped at ``MAX_SEARCH_RESULTS`` rows.
+    """
     lower = sqlalchemy.func.lower
-    return (
-        (
-            await session.execute(
-                select(models.Inmate)
-                .where(lower(models.Inmate.last_name) == lower(last_name))
-                .where(models.Inmate.first_name.ilike(first_name + "%"))
-            )
-        )
-        .scalars()
-        .all()
+
+    def prefix_match(column, term: str):
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        return column.ilike(escaped + "%", escape="\\")
+
+    matches = []
+    for first, last in candidates:
+        clauses = []
+        if last:
+            clauses.append(prefix_match(models.Inmate.last_name, last))
+        if first:
+            clauses.append(prefix_match(models.Inmate.first_name, first))
+        if clauses:
+            matches.append(sqlalchemy.and_(*clauses))
+
+    tokens = sorted({part.lower() for pair in candidates for part in pair if part})
+    exact_last_rank = sqlalchemy.case(
+        (lower(models.Inmate.last_name).in_(tokens), 0), else_=1
     )
+
+    statement = (
+        select(models.Inmate)
+        .where(sqlalchemy.or_(*matches))
+        .order_by(
+            exact_last_rank,
+            lower(models.Inmate.last_name),
+            lower(models.Inmate.first_name),
+            models.Inmate.jurisdiction,
+            models.Inmate.id,
+        )
+        .limit(MAX_SEARCH_RESULTS)
+    )
+
+    return (await session.execute(statement)).scalars().all()
 
 
 @app.on_event("startup")
@@ -95,10 +164,8 @@ async def search_inmates(
         inmate_id = int(query.replace("-", ""))
 
     except ValueError:
-        name = HumanName(query)
-        first: str = name.first
-        last: str = name.last
-        if not (first and last):
+        candidates = parse_name_query(query)
+        if not candidates:
             logger.debug("Failed to parse query: %s", query)
 
             # pylint: disable=raise-missing-from
@@ -106,16 +173,23 @@ async def search_inmates(
             detail = "Query must be an inmate name or ID."
             raise HTTPException(status_code=status_code, detail=detail)
 
-        logger.debug("querying inmates by name: %s %s", first, last)
-        errors = await upsert_inmates_by_name(session, first, last)
-        inmates = await query_inmates_by_name(session, first, last)
+        # The external providers require both a first and a last name, so
+        # single-word queries search the local database only.
+        for first, last in candidates:
+            if first and last:
+                logger.debug("querying providers by name: %s %s", first, last)
+                errors.extend(await upsert_inmates_by_name(session, first, last))
+
+        logger.debug("querying inmates by name candidates: %s", candidates)
+        inmates = await query_inmates_by_name(session, candidates)
 
     else:
         logger.debug("querying inmates by ID: %d", inmate_id)
         errors = await upsert_inmates_by_inmate_id(session, inmate_id)
         inmates = await query_inmates_by_inmate_id(session, inmate_id)
 
-    errors_as_strings = list(map(str, errors))
+    # Multiple provider passes can repeat the same error; dedupe for display.
+    errors_as_strings = list(dict.fromkeys(map(str, errors)))
     return schemas.InmateSearchResults(inmates=inmates, errors=errors_as_strings)
 
 
