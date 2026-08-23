@@ -1,6 +1,7 @@
 """Initialize the IBP FastAPI application."""
 
 import configparser
+import contextlib
 import logging
 import os
 import re
@@ -91,11 +92,23 @@ def read_server_config():
 
 config = read_server_config()
 
+
+@contextlib.asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Configure logging when the application starts."""
+    handlers = list(build_log_handlers())
+    configure_root_logger(handlers)
+    configure_external_loggers(handlers)
+    logging.getLogger(__name__).info("Starting IBP Application")
+    yield
+
+
 app = FastAPI(
     title="Inside Books Project API",
     description="IBP API for managing inmate requests.",
     version="0.1.0",
     root_path="/api",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
