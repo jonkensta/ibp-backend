@@ -26,6 +26,7 @@ class ShippingMethodEnum(str, Enum):
 
     BOX = "Box"
     INDIVIDUAL = "Individual"
+    FEDERAL_TUB = "Federal Tub"
 
 
 class UnitBase(BaseModel):

@@ -247,5 +247,5 @@ class Unit(Base):
     url: Mapped[Optional[str]] = mapped_column(String)
 
     shipping_method: Mapped[Optional[str]] = mapped_column(
-        Enum("Box", "Individual", name="shipping_enum")
+        Enum("Box", "Individual", "Federal Tub", name="shipping_enum")
     )
