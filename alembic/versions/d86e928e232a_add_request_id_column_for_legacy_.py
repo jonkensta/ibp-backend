@@ -1,7 +1,7 @@
 """Add request_id column for legacy compatibility
 
 Revision ID: d86e928e232a
-Revises: 
+Revises: 1e01dc9942d5
 Create Date: 2026-01-01 18:36:03.263043
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'd86e928e232a'
-down_revision: Union[str, None] = None
+down_revision: Union[str, None] = '1e01dc9942d5'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

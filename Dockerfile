@@ -24,6 +24,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Layer 2: Copy application code
 COPY ibp ./ibp
 COPY sample.conf ./
+COPY alembic.ini ./
+COPY alembic ./alembic
+COPY docker-entrypoint.sh ./
+RUN chmod +x /app/docker-entrypoint.sh
 
 # Layer 3: Install the project (fast since dependencies already cached)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -37,5 +41,6 @@ RUN mkdir -p /data
 # Expose port
 EXPOSE 8000
 
-# Run the application
+# Bootstrap the database schema, then run the application
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["uv", "run", "uvicorn", "ibp.base:app", "--host", "0.0.0.0", "--port", "8000"]
