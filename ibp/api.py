@@ -65,16 +65,17 @@ def parse_name_query(query: str) -> list[tuple[str, str]]:
     """Parse a free-form name query into candidate (first, last) pairs.
 
     Volunteers type names however they appear on an envelope: "first last",
-    "last first", "last, first", or just a single name.  Instead of guessing
-    one (first, last) assignment, every plausible assignment is returned and
-    the search matches the union of them:
+    "last first", or "last, first".  Instead of guessing one (first, last)
+    assignment, every plausible assignment is returned and the search matches
+    the union of them:
 
     - "maria garcia" / "garcia maria" / "garcia, maria"
         -> [(first, last), (last, first)] for the two parsed words
-    - "smith" -> [("smith", ""), ("", "smith")]
 
-    An empty component leaves that component unconstrained.  An empty list is
-    returned if no name parts can be parsed at all.
+    Both components are required (a first initial is enough): the external
+    providers cannot search on a lone name, so a single-word query would
+    silently search only the local cache.  An empty list is returned when the
+    query does not contain two name parts.
     """
     name = HumanName(query)
     first: str = name.first
@@ -85,10 +86,6 @@ def parse_name_query(query: str) -> list[tuple[str, str]]:
         if first.lower() != last.lower():
             candidates.append((last, first))
         return candidates
-
-    single = first or last
-    if single:
-        return [(single, ""), ("", single)]
 
     return []
 
@@ -170,15 +167,15 @@ async def search_inmates(
 
             # pylint: disable=raise-missing-from
             status_code = status.HTTP_400_BAD_REQUEST
-            detail = "Query must be an inmate name or ID."
+            detail = (
+                "Search by a first and last name — a first initial works, "
+                "like 'J Smith' — or an 8-digit ID number."
+            )
             raise HTTPException(status_code=status_code, detail=detail)
 
-        # The external providers require both a first and a last name, so
-        # single-word queries search the local database only.
         for first, last in candidates:
-            if first and last:
-                logger.debug("querying providers by name: %s %s", first, last)
-                errors.extend(await upsert_inmates_by_name(session, first, last))
+            logger.debug("querying providers by name: %s %s", first, last)
+            errors.extend(await upsert_inmates_by_name(session, first, last))
 
         logger.debug("querying inmates by name candidates: %s", candidates)
         inmates = await query_inmates_by_name(session, candidates)
