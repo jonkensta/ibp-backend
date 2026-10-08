@@ -1,0 +1,55 @@
+#!/bin/bash
+# Snapshot ~/ibp/data.db, verify it, upload to Google Drive, keep the newest 20 there.
+# Reports start/exit status (with the log) to Healthchecks if a ping URL is configured.
+set -euo pipefail
+
+DB=/home/jstarr/ibp/data.db
+LOCAL_DIR=/home/jstarr/backups/ibp
+REMOTE=gdrive:backups/ibp
+KEEP_REMOTE=20
+KEEP_LOCAL=4
+STAMP=$(date +%Y-%m-%d_%H%M)
+SNAP="$LOCAL_DIR/data-$STAMP.db"
+HC_URL=$(cat /home/jstarr/.config/ibp-backup/ping-url 2>/dev/null || true)
+
+hc() {
+    [ -n "$HC_URL" ] || return 0
+    curl -fsS -m 10 --retry 3 -o /dev/null --data-binary @- "$HC_URL/$1" || true
+}
+
+main() {
+    # Consistent online copy (takes a read lock; safe while gunicorn is running)
+    sqlite3 "$DB" ".timeout 30000" ".backup '$SNAP'"
+    result=$(sqlite3 "$SNAP" "PRAGMA integrity_check;")
+    if [ "$result" != "ok" ]; then
+        echo "integrity_check failed on snapshot: $result" >&2
+        exit 1
+    fi
+    tables=$(sqlite3 "$SNAP" "SELECT count(*) FROM sqlite_master WHERE type='table';")
+    if [ "$tables" -eq 0 ]; then
+        echo "snapshot has no tables" >&2
+        exit 1
+    fi
+    zstd -q -10 --rm "$SNAP"
+    echo "snapshot: $SNAP.zst ($(du -h "$SNAP.zst" | cut -f1))"
+
+    rclone copy "$SNAP.zst" "$REMOTE/"
+    echo "uploaded to $REMOTE"
+
+    # Filenames sort chronologically; drop everything past the newest N
+    rclone lsf --files-only --include 'data-*.db.zst' "$REMOTE/" | sort -r | tail -n +$((KEEP_REMOTE + 1)) |
+        while read -r f; do rclone deletefile "$REMOTE/$f" && echo "pruned remote $f"; done
+    ls -1 "$LOCAL_DIR"/data-*.db.zst | sort -r | tail -n +$((KEEP_LOCAL + 1)) | xargs -r rm --
+}
+
+hc start </dev/null
+LOG=$(mktemp)
+trap 'rm -f "$LOG"' EXIT
+# errexit is ignored inside anything run under || or if, so run main in its
+# own subshell with errexit re-enabled and read its status from PIPESTATUS.
+set +e
+(set -e; main) 2>&1 | tee "$LOG"
+rc=${PIPESTATUS[0]}
+set -e
+tail -c 10000 "$LOG" | hc "$rc"
+exit "$rc"

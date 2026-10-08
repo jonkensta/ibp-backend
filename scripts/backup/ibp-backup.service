@@ -1,0 +1,12 @@
+[Unit]
+Description=Back up IBP data.db to Google Drive
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=jstarr
+Group=jstarr
+ExecStart=/home/jstarr/.local/bin/ibp-backup
+Nice=10
+IOSchedulingClass=idle

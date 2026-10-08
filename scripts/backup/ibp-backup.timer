@@ -1,0 +1,9 @@
+[Unit]
+Description=IBP data.db backup (Mon & Fri 1pm)
+
+[Timer]
+OnCalendar=Mon,Fri *-*-* 13:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
