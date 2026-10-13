@@ -5,6 +5,7 @@ import contextlib
 import logging
 import os
 import re
+from collections.abc import Iterator
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -19,6 +20,9 @@ class EnvInterpolatingConfigParser(configparser.ConfigParser):
         ${DATABASE_URL} - reads from DATABASE_URL env var, raises error if not set
         ${DATABASE_URL:-sqlite:///data.db} - reads from env var, uses default if not set
     """
+
+    #: The file this configuration was read from, if any.
+    path: Path | None = None
 
     def get(self, section, option, **kwargs):
         """Get config value with environment variable interpolation."""
@@ -75,6 +79,7 @@ def read_server_config():
         filepath = os.path.join(toplevel, config_file)
         server_config = EnvInterpolatingConfigParser()
         server_config.read([filepath])
+        server_config.path = Path(filepath).resolve()
         return server_config
 
     # Search default locations in order of precedence
@@ -83,6 +88,7 @@ def read_server_config():
         if os.path.exists(filepath):
             server_config = EnvInterpolatingConfigParser()
             server_config.read([filepath])
+            server_config.path = Path(filepath).resolve()
             return server_config
 
     # No config file found
@@ -136,15 +142,70 @@ if cors_origins:
     )
 
 
-def build_log_handlers():
-    """Build log handlers."""
-    format_ = config.get("logging", "format", raw=True)
+DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 5
+
+
+def get_log_level() -> str:
+    """Return the configured root log level name (INFO by default)."""
+    return config.get("logging", "level", fallback=DEFAULT_LOG_LEVEL).upper()
+
+
+def get_logfile_path() -> Path | None:
+    """Return the configured log file path, or None to log to stderr.
+
+    A relative path is resolved against the directory of the config file (or
+    the project toplevel if no file was read), never the process working
+    directory.
+    """
+    logfile = config.get("logging", "logfile", fallback="").strip()
+    if not logfile:
+        return None
+
+    path = Path(logfile).expanduser()
+    if not path.is_absolute():
+        base_dir = config.path.parent if config.path else get_toplevel_path()
+        path = base_dir / path
+    return path
+
+
+def build_log_handlers() -> Iterator[logging.Handler]:
+    """Build log handlers.
+
+    With no ``logfile`` configured, log to stderr (picked up by journald under
+    systemd). Otherwise log to a size-rotated file whose total size is bounded
+    by ``max_bytes * (backup_count + 1)``.
+    """
+    format_ = config.get("logging", "format", raw=True, fallback=DEFAULT_LOG_FORMAT)
     formatter = logging.Formatter(format_)
 
-    handler = RotatingFileHandler(
-        config.get("logging", "logfile"),
-        maxBytes=config.getint("logging", "rotation_size"),
-    )
+    path = get_logfile_path()
+    handler: logging.Handler
+    if path is None:
+        handler = logging.StreamHandler()
+    else:
+        # ``rotation_size`` is the legacy name for ``max_bytes``.
+        max_bytes = config.getint(
+            "logging",
+            "max_bytes",
+            fallback=config.getint(
+                "logging", "rotation_size", fallback=DEFAULT_LOG_MAX_BYTES
+            ),
+        )
+        backup_count = config.getint(
+            "logging", "backup_count", fallback=DEFAULT_LOG_BACKUP_COUNT
+        )
+        if max_bytes <= 0 or backup_count <= 0:
+            raise ValueError(
+                "[logging] max_bytes and backup_count must be positive "
+                "so the log size stays bounded"
+            )
+        handler = RotatingFileHandler(
+            path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8"
+        )
+
     handler.setFormatter(formatter)
     yield handler
 
@@ -153,19 +214,27 @@ def configure_root_logger(handlers):
     """Configure the root logger."""
     root_logger = logging.getLogger()
     root_logger.handlers.clear()
-
-    level = logging.getLevelName(config.get("logging", "level"))
-    root_logger.setLevel(level)
+    root_logger.setLevel(get_log_level())
 
     for handler in handlers:
         root_logger.addHandler(handler)
 
 
 def configure_external_loggers(handlers):
-    """Configure external loggers."""
+    """Quiet noisy external loggers down to errors.
+
+    Loggers that propagate reach the root handlers already. Non-propagating
+    ones (uvicorn's) get the file handlers so their errors land in the log
+    file; they already write to stderr themselves.
+    """
     logger_names = ["asyncio", "uvicorn", "sqlalchemy.engine", "aiosqlite"]
     loggers = (logging.getLogger(name) for name in logger_names)
     for logger in loggers:
         logger.setLevel(logging.ERROR)
+        if logger.propagate:
+            continue
         for handler in handlers:
-            logger.addHandler(handler)
+            if isinstance(handler, logging.FileHandler) and handler not in (
+                logger.handlers
+            ):
+                logger.addHandler(handler)

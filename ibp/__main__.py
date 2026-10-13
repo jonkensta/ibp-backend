@@ -3,7 +3,7 @@
 import argparse
 import uvicorn
 
-from .base import app, config
+from .base import app, get_log_level
 
 
 def main():
@@ -19,7 +19,7 @@ def main():
         app,
         host=args.host,
         port=args.port,
-        log_level=config.get("logging", "level").lower(),
+        log_level=get_log_level().lower(),
     )
 
 
