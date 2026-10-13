@@ -7,6 +7,22 @@ from the legacy schema (integer-autoid keyed) into the new schema
 Legacy shipments, users, credentials, and alerts are intentionally dropped.
 Legacy requests.shipment_autoid is dropped (no Shipment model in the new schema);
 the legacy request autoid is preserved as Request.request_id.
+
+Timezones: the legacy app stored NAIVE datetimes in US Central local time
+(``datetime.now()`` on a server running in America/Chicago), whereas the new
+schema's TZDateTime treats naive values as UTC.  Every legacy DATETIME column
+that is migrated (comments.datetime, lookups.datetime, inmates.datetime_fetched)
+is therefore interpreted as America/Chicago wall-clock time and converted to a
+UTC-aware datetime before insertion.  DATE-only columns (requests.date_processed,
+requests.date_postmarked) and the free-form inmates.release string are NOT shifted.
+
+Around DST transitions the wall-clock time is resolved with ``fold=0``:
+
+- ambiguous times (the repeated hour when clocks fall back, e.g. 01:30 on the
+  first Sunday of November) resolve to the FIRST occurrence, i.e. CDT (UTC-5);
+- nonexistent times (the skipped hour when clocks spring forward, e.g. 02:30
+  on the second Sunday of March) are interpreted with the pre-transition
+  offset, CST (UTC-6), which is the same instant as 03:30 CDT.
 """
 
 import argparse
@@ -17,6 +33,7 @@ import sqlite3
 import sys
 import typing
 from contextlib import closing
+from zoneinfo import ZoneInfo
 
 import sqlalchemy
 import sqlalchemy.ext.asyncio
@@ -30,19 +47,33 @@ import ibp.db  # pylint: disable=import-error, wrong-import-position
 
 INMATE_BATCH_SIZE = 1000
 
+LEGACY_TIMEZONE = ZoneInfo("America/Chicago")
+
 
 def parse_date(date: str) -> datetime.date:
     """Parse a date string."""
     return datetime.datetime.strptime(date, "%Y-%m-%d").date()
 
 
+def legacy_local_to_utc(naive: datetime.datetime) -> datetime.datetime:
+    """Convert a naive legacy US Central wall-clock datetime to aware UTC.
+
+    DST edge cases are resolved with ``fold=0`` (see the module docstring).
+    """
+    if naive.tzinfo is not None:
+        raise ValueError(f"expected a naive legacy datetime, got {naive!r}")
+    local = naive.replace(tzinfo=LEGACY_TIMEZONE, fold=0)
+    return local.astimezone(datetime.timezone.utc)
+
+
 def parse_datetime(dt: str) -> datetime.datetime:
-    """Parse a datetime string."""
-    return datetime.datetime.strptime(dt, "%Y-%m-%d %H:%M:%S.%f")
+    """Parse a legacy (naive, US Central) datetime string into aware UTC."""
+    naive = datetime.datetime.strptime(dt, "%Y-%m-%d %H:%M:%S.%f")
+    return legacy_local_to_utc(naive)
 
 
 def parse_datetime_or_none(dt: str | None) -> datetime.datetime | None:
-    """Parse a datetime if not none."""
+    """Parse a legacy datetime string into aware UTC if not none."""
     return parse_datetime(dt) if dt is not None else None
 
 
