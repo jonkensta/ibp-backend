@@ -255,7 +255,9 @@ async def assert_destination_empty(session_factory) -> None:
     async with session_factory() as session:
         for model in (ibp.models.Unit, ibp.models.Inmate):
             count = await session.scalar(
-                sqlalchemy.select(sqlalchemy.func.count()).select_from(model)
+                sqlalchemy.select(
+                    sqlalchemy.func.count()  # pylint: disable=not-callable
+                ).select_from(model)
             )
             if count:
                 raise SystemExit(
@@ -267,9 +269,8 @@ async def assert_destination_empty(session_factory) -> None:
 async def migrate_units(connection, session_factory) -> None:
     """Migrate the units table."""
     print("Adding units")
-    units = generate_units(connection)
     progress = ProgressBar(max_value=table_length(connection, "units"))
-    units = progress(units)
+    units = progress(generate_units(connection))
 
     async with session_factory() as session:
         session.add_all(ibp.models.Unit(**unit) for unit in units)
@@ -280,9 +281,8 @@ async def migrate_inmates(connection, session_factory) -> None:
     """Migrate inmates along with their comments, requests, and lookups."""
     print("Adding inmates (with comments, requests, and lookups)")
     unit_names = build_unit_names(connection)
-    inmates = generate_inmates(connection, unit_names)
     progress = ProgressBar(max_value=table_length(connection, "inmates"))
-    inmates = progress(inmates)
+    inmates = progress(generate_inmates(connection, unit_names))
 
     async with session_factory() as session:
         batch = 0
@@ -356,7 +356,9 @@ async def verify_counts(connection, session_factory) -> dict[str, tuple[int, int
             )
             expected = source - orphaned
             migrated = await session.scalar(
-                sqlalchemy.select(sqlalchemy.func.count()).select_from(model)
+                sqlalchemy.select(
+                    sqlalchemy.func.count()  # pylint: disable=not-callable
+                ).select_from(model)
             )
             print(f"{table:<10} {source:>8} {orphaned:>9} {expected:>9} {migrated:>9}")
             counts[table] = (source, orphaned, migrated)
