@@ -23,6 +23,8 @@ class EnvInterpolatingConfigParser(configparser.ConfigParser):
     def get(self, section, option, **kwargs):
         """Get config value with environment variable interpolation."""
         value = super().get(section, option, **kwargs)
+        if not isinstance(value, str):  # e.g. a non-string fallback
+            return value
         return self._interpolate_env(value)
 
     def _interpolate_env(self, value):
@@ -111,13 +113,27 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+def get_cors_origins() -> list[str]:
+    """Return the origins allowed cross-origin access to the API.
+
+    Production serves the frontend and proxies ``/api/`` through the same nginx
+    origin, so no CORS is needed and the list is empty by default. A dev setup
+    that serves the frontend from another origin can opt in by listing exact
+    origins (comma or whitespace separated) under ``[server] cors_origins``.
+    """
+    value = config.get("server", "cors_origins", fallback="")
+    return [origin for origin in re.split(r"[,\s]+", value) if origin]
+
+
+cors_origins = get_cors_origins()
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 def build_log_handlers():
