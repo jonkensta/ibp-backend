@@ -81,9 +81,6 @@ def generate_units(connection) -> typing.Iterable[dict]:
     sql = "SELECT * FROM units"
     for unit in connection.execute(sql):
         unit.pop("autoid")
-        # NOTE: shipping_method is passed through untouched. Legacy data may
-        # contain 'Federal Tub', which requires the new model's shipping_enum
-        # to include it (added on a concurrent branch).
         yield unit
 
 
