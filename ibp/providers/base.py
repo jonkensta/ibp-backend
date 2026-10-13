@@ -68,10 +68,10 @@ async def query_by_inmate_id(
     try:
         inmate_id = provider.format_inmate_id(inmate_id)
     except ValueError as exc:
-        msg = f"'{inmate_id}' is not a valid Texas inmate number"
+        msg = f"not a valid {jurisdiction} inmate number"
         raise ValueError(msg) from exc
 
-    logger.debug("Querying with ID '%s'", inmate_id)
+    logger.debug("Querying by inmate ID")
     matches = await provider.query(inmate_id=inmate_id, timeout=timeout)
 
     if not matches:
@@ -97,20 +97,12 @@ async def query_by_name(
     provider = PROVIDERS[jurisdiction]
     logger = LOGGERS[jurisdiction]
 
-    logger.debug("Querying with name '%s, %s'", last, first)
+    logger.debug("Querying by name")
     matches = await provider.query(first_name=first, last_name=last, timeout=timeout)
 
     if not matches:
         logger.debug("No results were returned")
         return matches
-
-    for inmate in matches:
-        logger.debug(
-            "%s, %s #%s: MATCHES",
-            inmate.last_name,
-            inmate.first_name,
-            inmate.id,
-        )
 
     logger.debug("%d result(s) returned", len(matches))
     return matches
