@@ -217,11 +217,14 @@ def format_addressee(inmate: models.Inmate) -> str:
     return " ".join([*parts, f"#{inmate.id:08d}"])
 
 
-def build_request_address(request: models.Request) -> schemas.RequestAddress:
+def build_request_address(
+    request: models.Request, settings: schemas.ShippingSettings
+) -> schemas.RequestAddress:
     """Build a request's shipping address from its inmate and unit.
 
     The request's inmate and the inmate's unit must already be loaded.  An
     inmate without a unit cannot be shipped to, so that is a 409 error.
+    ``settings`` supplies the unit mailroom recipient line.
     """
     inmate = request.inmate
     unit = inmate.unit
@@ -246,6 +249,7 @@ def build_request_address(request: models.Request) -> schemas.RequestAddress:
         request_id=request.request_id,
         action=schemas.ActionEnum(request.action),
         unit_name=unit.name,
+        unit_recipient_name=settings.unit_recipient_name,
         street1=unit.street1,
         street2=unit.street2,
         city=unit.city,
@@ -372,7 +376,7 @@ async def get_request_address_by_legacy_request_id(
             detail=f"No request found with legacy request_id {request_id}",
         )
 
-    return build_request_address(request)
+    return build_request_address(request, await load_shipping_settings(session))
 
 
 @app.get("/inmates/{jurisdiction}/{inmate_id}", response_model=schemas.Inmate)
@@ -691,7 +695,7 @@ async def get_request_address(
             ),
         )
 
-    return build_request_address(request)
+    return build_request_address(request, await load_shipping_settings(session))
 
 
 @app.post(

@@ -264,7 +264,8 @@ class RequestAddress(BaseModel):
 
     ``name`` is the pre-formatted addressee line (``First Last #00012345``);
     the remaining fields identify the request and give the inmate's unit
-    mailing address.
+    mailing address.  ``unit_recipient_name`` is the configured mailroom
+    recipient line (e.g. ``ATTN: MAILROOM STAFF``) from the shipping settings.
     """
 
     name: str
@@ -279,6 +280,7 @@ class RequestAddress(BaseModel):
     action: ActionEnum
 
     unit_name: str
+    unit_recipient_name: str
     street1: str
     street2: Optional[str] = None
     city: str

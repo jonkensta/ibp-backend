@@ -93,6 +93,7 @@ EXPECTED_ADDRESS = {
     "id": 12345,
     "datetime_fetched": FETCHED.isoformat(),
     "unit_name": "Alpha",
+    "unit_recipient_name": "ATTN: MAILROOM STAFF",
     "street1": "1 Main St",
     "street2": "Bldg 2",
     "city": "Austin",
@@ -193,3 +194,19 @@ def test_inmate_view_records_lookup(client, seeded):
     with seeded() as session:
         count = session.query(models.Lookup).count()
     assert count == 1
+
+
+@pytest.mark.usefixtures("seeded")
+@pytest.mark.parametrize(
+    "url",
+    ["/inmates/Texas/12345/requests/0/address", "/inmates/by-request/501/address"],
+)
+def test_request_address_uses_saved_unit_recipient_name(client, url):
+    """The unit recipient line follows the editable shipping settings."""
+    settings = client.get("/shipping-settings").json()
+    settings["unit_recipient_name"] = "ATTN: MAIL ROOM"
+    assert client.put("/shipping-settings", json=settings).status_code == 200
+
+    response = client.get(url)
+    assert response.status_code == 200
+    assert response.json()["unit_recipient_name"] == "ATTN: MAIL ROOM"
