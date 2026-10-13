@@ -69,6 +69,9 @@ INMATE_BATCH_SIZE = 1000
 
 LEGACY_TIMEZONE = ZoneInfo("America/Chicago")
 
+# Legacy tables that are intentionally not migrated (reported in the summary).
+UNMIGRATED_TABLES = ("shipments", "users", "credentials", "alerts")
+
 # Legacy child tables and the column referencing their inmate's autoid.
 ORPHAN_COLUMNS = {
     "comments": "inmate_id",
@@ -292,7 +295,33 @@ async def migrate_inmates(connection, session_factory) -> None:
         await session.commit()
 
 
-async def verify_counts(connection, session_factory) -> None:
+class MigrationReport(typing.NamedTuple):
+    """Row counts gathered while migrating, for the final summary."""
+
+    # table -> (source rows, orphaned rows dropped, rows migrated)
+    counts: dict[str, tuple[int, int, int]]
+    # legacy table -> rows (tables that are not migrated at all)
+    unmigrated: dict[str, int]
+    # archive CSV path -> data rows written
+    archived: list[tuple[Path, int]]
+
+
+def legacy_table_exists(connection, table: str) -> bool:
+    """Return whether the legacy database has the given table."""
+    sql = "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name=?"
+    return bool(connection.execute(sql, (table,)).fetchone()["count"])
+
+
+def count_unmigrated(connection) -> dict[str, int]:
+    """Count rows in legacy tables that are not migrated."""
+    return {
+        table: table_length(connection, table)
+        for table in UNMIGRATED_TABLES
+        if legacy_table_exists(connection, table)
+    }
+
+
+async def verify_counts(connection, session_factory) -> dict[str, tuple[int, int, int]]:
     """Compare source and destination row counts and fail loudly on mismatch.
 
     Child rows with a NULL or dangling inmate reference cannot be represented
@@ -316,6 +345,7 @@ async def verify_counts(connection, session_factory) -> None:
     print("-" * len(header))
 
     failures = []
+    counts = {}
     async with session_factory() as session:
         for table, model in models.items():
             source = table_length(connection, table)
@@ -329,13 +359,11 @@ async def verify_counts(connection, session_factory) -> None:
                 sqlalchemy.select(sqlalchemy.func.count()).select_from(model)
             )
             print(f"{table:<10} {source:>8} {orphaned:>9} {expected:>9} {migrated:>9}")
+            counts[table] = (source, orphaned, migrated)
             if migrated != expected:
                 failures.append(f"{table}: expected {expected}, migrated {migrated}")
 
-    total_orphans = sum(
-        count_orphans(connection, table, column)
-        for table, column in orphan_columns.items()
-    )
+    total_orphans = sum(orphaned for _, orphaned, _ in counts.values())
     if total_orphans:
         print(
             f"\nWARNING: {total_orphans} legacy child rows have a NULL or dangling "
@@ -346,6 +374,7 @@ async def verify_counts(connection, session_factory) -> None:
         raise SystemExit("Row count verification FAILED:\n  " + "\n  ".join(failures))
 
     print("\nRow count verification passed.")
+    return counts
 
 
 def export_query_csv(connection, sql: str, path: Path) -> int:
@@ -396,14 +425,32 @@ def export_archive(connection, archive_dir: Path) -> list[tuple[Path, int]]:
     return exported
 
 
-def print_archive(exported: list[tuple[Path, int]]) -> None:
-    """Print the archive files written and their data row counts."""
-    print("\nArchived legacy data that is not migrated (CSV, UTF-8):")
-    for path, count in exported:
-        print(f"  {path} ({count} rows)")
+def print_summary(report: MigrationReport) -> None:
+    """Print the final migration summary."""
+    print("\nMigration summary")
+    print("=================")
+    print("Rows migrated (orphans dropped):")
+    for table, (_, orphaned, migrated) in report.counts.items():
+        print(f"  {table:<12} {migrated:>8} migrated  {orphaned:>6} orphans dropped")
+    total_orphans = sum(orphaned for _, orphaned, _ in report.counts.values())
+    print(f"  {'total':<12} {'':>8}           {total_orphans:>6} orphans dropped")
+
+    if report.unmigrated:
+        print("Legacy tables not migrated:")
+        for table, count in report.unmigrated.items():
+            print(f"  {table:<12} {count:>8} rows")
+
+    if report.archived:
+        print("Archived legacy data that is not migrated (CSV, UTF-8):")
+        for path, count in report.archived:
+            print(f"  {path} ({count} rows)")
+    else:
+        print("No archive written (pass --archive-dir DIR to export one).")
 
 
-async def run_migration(filepath: str, archive_dir: Path | None = None) -> None:
+async def run_migration(
+    filepath: str, archive_dir: Path | None = None
+) -> MigrationReport:
     """Create the schema and migrate the legacy data into it.
 
     If ``archive_dir`` is given, also export non-migrated legacy data to CSV.
@@ -427,12 +474,17 @@ async def run_migration(filepath: str, archive_dir: Path | None = None) -> None:
 
             await migrate_units(connection, session_factory)
             await migrate_inmates(connection, session_factory)
-            await verify_counts(connection, session_factory)
-
-            if archive_dir is not None:
-                print_archive(export_archive(connection, archive_dir))
+            counts = await verify_counts(connection, session_factory)
+            unmigrated = count_unmigrated(connection)
+            archived = (
+                export_archive(connection, archive_dir)
+                if archive_dir is not None
+                else []
+            )
     finally:
         await engine.dispose()
+
+    return MigrationReport(counts, unmigrated, archived)
 
 
 def stamp_schema() -> None:
@@ -461,8 +513,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    asyncio.run(run_migration(args.filepath, args.archive_dir))
+    report = asyncio.run(run_migration(args.filepath, args.archive_dir))
     stamp_schema()
+    print_summary(report)
 
 
 if __name__ == "__main__":
