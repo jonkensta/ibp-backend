@@ -154,7 +154,7 @@ async def search_inmates(
     except ValueError:
         candidates = parse_name_query(query)
         if not candidates:
-            logger.debug("Failed to parse query: %s", query)
+            logger.debug("rejecting name search query that lacks two name parts")
 
             # pylint: disable=raise-missing-from
             status_code = status.HTTP_400_BAD_REQUEST
@@ -164,17 +164,18 @@ async def search_inmates(
             )
             raise HTTPException(status_code=status_code, detail=detail)
 
+        logger.debug("searching by name (%d candidate orderings)", len(candidates))
         for first, last in candidates:
-            logger.debug("querying providers by name: %s %s", first, last)
             errors.extend(await upsert_inmates_by_name(session, first, last))
 
-        logger.debug("querying inmates by name candidates: %s", candidates)
         inmates = await query_inmates_by_name(session, candidates)
+        logger.debug("name search matched %d inmate(s)", len(inmates))
 
     else:
-        logger.debug("querying inmates by ID: %d", inmate_id)
+        logger.debug("searching by inmate ID")
         errors = await upsert_inmates_by_inmate_id(session, inmate_id)
         inmates = await query_inmates_by_inmate_id(session, inmate_id)
+        logger.debug("ID search matched %d inmate(s)", len(inmates))
 
     # Multiple provider passes can repeat the same error; dedupe for display.
     errors_as_strings = list(dict.fromkeys(map(str, errors)))
@@ -386,7 +387,7 @@ async def get_inmate(
     session: AsyncSession = Depends(get_session),
 ):
     """Retrieve an inmate by jurisdiction and inmate ID."""
-    logger.debug("Loading inmate view for %s inmate #%08d", jurisdiction, inmate_id)
+    logger.debug("loading inmate view")
 
     async with session.begin():
         statement = (
@@ -407,11 +408,7 @@ async def get_inmate(
         inmate = (await session.execute(statement)).scalar_one_or_none()
 
         if inmate is None or not inmate.entry_is_fresh():
-            logger.debug(
-                "Inmate not found or not fresh, querying providers for %s inmate #%08d",
-                jurisdiction,
-                inmate_id,
-            )
+            logger.debug("inmate not cached or stale; querying providers")
             await upsert_inmates_by_inmate_id(session, inmate_id)
             inmate = (await session.execute(statement)).scalar_one_or_none()
 
@@ -558,13 +555,7 @@ async def add_request(
 
     await session.refresh(request)
 
-    logger.debug(
-        "adding request #%d with %s postmark for %s inmate #%08d",
-        request.index,
-        request.date_postmarked,
-        jurisdiction,
-        inmate_id,
-    )
+    logger.debug("added request")
 
     return request
 
@@ -596,12 +587,7 @@ async def delete_request(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Request not found."
             )
 
-        logger.debug(
-            "Deleting request #%d for inmate %s %d",
-            request_index,
-            jurisdiction,
-            inmate_id,
-        )
+        logger.debug("deleting request")
         await session.delete(request)
 
 
@@ -753,12 +739,7 @@ async def add_comment(
 
     await session.refresh(comment)
 
-    logger.debug(
-        "adding comment #%d for %s inmate #%08d",
-        comment.index,
-        jurisdiction,
-        inmate_id,
-    )
+    logger.debug("added comment")
 
     return comment
 
@@ -790,12 +771,7 @@ async def delete_comment(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found."
             )
 
-        logger.debug(
-            "deleting comment #%d for inmate %s %d",
-            comment_index,
-            jurisdiction,
-            inmate_id,
-        )
+        logger.debug("deleting comment")
 
         await session.delete(comment)
 
