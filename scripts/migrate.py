@@ -1,5 +1,18 @@
 """Script to import data from the legacy IBP sqlite database.
 
+Usage::
+
+    DATABASE_URL=sqlite+aiosqlite:///path/new.db \\
+        uv run --group dev scripts/migrate.py legacy.db [--archive-dir DIR]
+
+The destination is the database configured for the app (``DATABASE_URL`` via
+the server config).  It must be empty or not exist yet.  On success the
+schema is stamped with the current alembic revision (via
+``ibp.db_bootstrap``), so the resulting database is ready for the app as-is;
+no separate ``python -m ibp.db_bootstrap`` step is needed.  Running it
+anyway (e.g. from the container entrypoint) is harmless: it sees the
+alembic_version table and performs a no-op ``alembic upgrade head``.
+
 Migrates units, inmates, and per-inmate comments, requests, and lookups
 from the legacy schema (integer-autoid keyed) into the new schema
 (composite-keyed by (jurisdiction, id) / (inmate_jurisdiction, inmate_id, index)).
@@ -44,6 +57,7 @@ sys.path.append(os.path.join(local_dir, os.path.pardir))  # noqa
 
 import ibp  # pylint: disable=import-error, wrong-import-position
 import ibp.db  # pylint: disable=import-error, wrong-import-position
+import ibp.db_bootstrap  # pylint: disable=import-error, wrong-import-position
 
 INMATE_BATCH_SIZE = 1000
 
@@ -318,13 +332,8 @@ async def verify_counts(connection, session_factory) -> None:
     print("\nRow count verification passed.")
 
 
-async def main():
-    """Import data from the legacy IBP database."""
-
-    parser = argparse.ArgumentParser(description=main.__doc__)
-    parser.add_argument("filepath", help="legacy sqlite database filepath")
-    args = parser.parse_args()
-
+async def run_migration(filepath: str) -> None:
+    """Create the schema and migrate the legacy data into it."""
     engine = ibp.db.build_engine()
     session_factory = sqlalchemy.ext.asyncio.async_sessionmaker(
         autocommit=False,
@@ -338,7 +347,7 @@ async def main():
         await assert_destination_empty(session_factory)
 
         with closing(
-            sqlite3.connect(f"file:{args.filepath}?mode=ro", uri=True)
+            sqlite3.connect(f"file:{filepath}?mode=ro", uri=True)
         ) as connection:
             connection.row_factory = dict_factory
 
@@ -349,5 +358,27 @@ async def main():
         await engine.dispose()
 
 
+def stamp_schema() -> None:
+    """Record the schema version so the database is ready for the app.
+
+    The schema was just created by ``Base.metadata.create_all`` from the
+    current models, so ``ibp.db_bootstrap`` stamps it as alembic ``head``
+    (or, if alembic_version already exists, runs a no-op upgrade).
+    """
+    print("\nStamping alembic schema version (ibp.db_bootstrap)")
+    ibp.db_bootstrap.bootstrap()
+
+
+def main() -> None:
+    """Import data from the legacy IBP database."""
+
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("filepath", help="legacy sqlite database filepath")
+    args = parser.parse_args()
+
+    asyncio.run(run_migration(args.filepath))
+    stamp_schema()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
