@@ -150,3 +150,70 @@ def build_legacy_db(path: Path) -> Path:
 def legacy_db(tmp_path: Path) -> Path:
     """Path to a freshly built synthetic legacy database."""
     return build_legacy_db(tmp_path / "legacy.db")
+
+
+@pytest.fixture
+def api_db(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):  # pylint: disable=too-many-locals
+    """Point the API at a fresh, empty SQLite database.
+
+    Yields a synchronous sessionmaker for seeding and inspecting the database;
+    the app's ``get_session`` dependency is overridden to use the same file.
+    Providers are patched to raise so no test can reach a live website.
+    """
+    # pylint: disable=import-outside-toplevel
+    from sqlalchemy import create_engine
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import NullPool
+
+    from ibp import api, providers
+    from ibp.base import app
+    from ibp.db import Base
+
+    path = tmp_path / "api.db"
+    sync_engine = create_engine(f"sqlite:///{path}")
+    Base.metadata.create_all(sync_engine)
+
+    async_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{path}", poolclass=NullPool
+    )
+    async_session = async_sessionmaker(
+        autocommit=False, autoflush=False, bind=async_engine, class_=AsyncSession
+    )
+
+    async def get_test_session():
+        async with async_session() as session:
+            yield session
+
+    def no_providers(*_args, **_kwargs):
+        raise AssertionError("inmate providers must not be queried")
+
+    monkeypatch.setattr(providers, "query_by_inmate_id", no_providers)
+    monkeypatch.setattr(providers, "query_by_name", no_providers)
+
+    app.dependency_overrides[api.get_session] = get_test_session
+    try:
+        yield sessionmaker(bind=sync_engine)
+    finally:
+        app.dependency_overrides.pop(api.get_session, None)
+        sync_engine.dispose()
+
+
+@pytest.fixture
+def client(api_db):  # pylint: disable=unused-argument,redefined-outer-name
+    """HTTP test client for the API backed by ``api_db``.
+
+    Not used as a context manager, so the app lifespan (file logging) is not run.
+    """
+    # pylint: disable=import-outside-toplevel
+    from fastapi.testclient import TestClient
+
+    from ibp.base import app
+
+    return TestClient(app)
