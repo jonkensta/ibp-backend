@@ -30,6 +30,13 @@ uv run fastapi run
 
 Both commands start the application on [localhost:8000](http://localhost:8000) by default. Configuration such as database location and logging options can be adjusted in `conf/server.conf`.
 
+## Deployment
+
+Production runs natively on a Raspberry Pi behind nginx, without Docker. The
+production config template, the systemd unit, the nginx site and the
+step-by-step install, cutover and rollback procedure are in
+[`deploy/`](deploy/README.md).
+
 ## Migrating from the legacy database
 
 `scripts/migrate.py` imports the legacy Flask app's SQLite database into a new,
