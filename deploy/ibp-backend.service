@@ -1,0 +1,66 @@
+# Inside Books Project backend, run natively on ibp-server.
+#
+# Install: sudo install -m 0644 deploy/ibp-backend.service /etc/systemd/system/
+# See deploy/README.md for the full procedure.
+#
+# nginx proxies /api/ to 127.0.0.1:8000 without rewriting the path. The app
+# sets root_path="/api" and strips that prefix itself, so the health check
+# from the Pi is: curl -s 127.0.0.1:8000/api/health
+
+[Unit]
+Description=Inside Books Project backend (uvicorn)
+Documentation=https://github.com/jonkensta/ibp-backend/blob/main/deploy/README.md
+After=network.target
+
+[Service]
+Type=exec
+User=jstarr
+Group=jstarr
+WorkingDirectory=/home/jstarr/ibp-new
+Environment=CONF=/home/jstarr/ibp-new/server.conf
+Environment=PYTHONUNBUFFERED=1
+
+# Bring the schema up to date (alembic upgrade head; a no-op when current),
+# as the container entrypoint does. A failure here stops the service.
+ExecStartPre=/home/jstarr/ibp-new/.venv/bin/python -m ibp.db_bootstrap
+
+# One worker: SQLite has a single writer and the Pi has 906 MB of RAM.
+# No access log: nginx already writes one to /var/log/nginx.
+ExecStart=/home/jstarr/ibp-new/.venv/bin/uvicorn ibp.base:app \
+    --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
+
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=ibp-backend
+
+# Safety net. The app idles at about 40 MB RSS.
+MemoryHigh=200M
+MemoryMax=300M
+
+# Hardening. The whole filesystem is read-only except the checkout, which
+# holds data.db and the SQLite -journal/-wal files created next to it. If the
+# database or a logfile moves elsewhere, add that directory here.
+ReadWritePaths=/home/jstarr/ibp-new
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# Provider lookups run curl, which needs DNS and outbound HTTPS.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
