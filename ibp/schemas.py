@@ -251,3 +251,40 @@ class RequestMetricsResponse(BaseModel):
 
     data: list[MonthlyMetricPoint]
     filters_applied: dict[str, Any]
+
+
+class RequestAddress(BaseModel):
+    """Read-only mailing address for shipping a request to an inmate.
+
+    ``name`` is the pre-formatted addressee line (``First Last #00012345``);
+    the remaining fields identify the request and give the inmate's unit
+    mailing address.
+    """
+
+    name: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    jurisdiction: JurisdictionEnum
+    id: int
+    datetime_fetched: Optional[datetime.datetime] = None
+
+    request_index: int
+    request_id: Optional[int] = None
+    action: ActionEnum
+
+    unit_name: str
+    street1: str
+    street2: Optional[str] = None
+    city: str
+    state: str
+    zipcode: str
+    shipping_method: Optional[ShippingMethodEnum] = None
+
+    @field_serializer("datetime_fetched")
+    def serialize_dt(self, dt: Optional[datetime.datetime], _info):
+        """Serialize datetime to ISO format with UTC timezone if naive."""
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        return dt.isoformat()

@@ -211,6 +211,87 @@ async def get_inmate_by_legacy_request_id(
     return request.inmate
 
 
+def format_addressee(inmate: models.Inmate) -> str:
+    """Format an inmate's addressee line, e.g. ``Jane Doe #00012345``."""
+    parts = [part.title() for part in (inmate.first_name, inmate.last_name) if part]
+    return " ".join([*parts, f"#{inmate.id:08d}"])
+
+
+def build_request_address(request: models.Request) -> schemas.RequestAddress:
+    """Build a request's shipping address from its inmate and unit.
+
+    The request's inmate and the inmate's unit must already be loaded.  An
+    inmate without a unit cannot be shipped to, so that is a 409 error.
+    """
+    inmate = request.inmate
+    unit = inmate.unit
+
+    if unit is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"{inmate.jurisdiction} inmate #{inmate.id:08d} is not assigned "
+                "to a unit; cannot address a package."
+            ),
+        )
+
+    return schemas.RequestAddress(
+        name=format_addressee(inmate),
+        first_name=inmate.first_name,
+        last_name=inmate.last_name,
+        jurisdiction=schemas.JurisdictionEnum(inmate.jurisdiction),
+        id=inmate.id,
+        datetime_fetched=inmate.datetime_fetched,
+        request_index=request.index,
+        request_id=request.request_id,
+        action=schemas.ActionEnum(request.action),
+        unit_name=unit.name,
+        street1=unit.street1,
+        street2=unit.street2,
+        city=unit.city,
+        state=unit.state,
+        zipcode=unit.zipcode,
+        shipping_method=(
+            schemas.ShippingMethodEnum(unit.shipping_method)
+            if unit.shipping_method
+            else None
+        ),
+    )
+
+
+# Declared before the /inmates/{jurisdiction}/... routes so that
+# "by-request" is not matched (and rejected) as a jurisdiction.
+@app.get(
+    "/inmates/by-request/{request_id}/address",
+    response_model=schemas.RequestAddress,
+)
+async def get_request_address_by_legacy_request_id(
+    request_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Get the shipping address for a legacy request ID.
+
+    Read-only: does not record a lookup or query the inmate providers.
+    """
+    request = (
+        await session.execute(
+            select(models.Request)
+            .where(models.Request.request_id == request_id)
+            .options(
+                selectinload(models.Request.inmate).selectinload(models.Inmate.unit)
+            )
+        )
+    ).scalar_one_or_none()
+
+    if request is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No request found with legacy request_id {request_id}",
+        )
+
+    return build_request_address(request)
+
+
 @app.get("/inmates/{jurisdiction}/{inmate_id}", response_model=schemas.Inmate)
 async def get_inmate(
     jurisdiction: schemas.JurisdictionEnum,
@@ -471,6 +552,63 @@ async def get_request_label(
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return Response(content=buffer.getvalue(), media_type="image/png")
+
+
+@app.get(
+    "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}/address",
+    response_model=schemas.RequestAddress,
+)
+async def get_request_address(
+    jurisdiction: schemas.JurisdictionEnum,
+    inmate_id: int,
+    request_index: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Get the shipping address for a request.
+
+    Read-only: unlike ``GET /inmates/{jurisdiction}/{inmate_id}``, this does
+    not record a lookup or query the inmate providers, so it is safe to call
+    once per shipped package.
+    """
+    inmate = (
+        await session.execute(
+            select(models.Inmate).where(
+                models.Inmate.jurisdiction == jurisdiction,
+                models.Inmate.id == inmate_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if inmate is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"{jurisdiction.value} inmate #{inmate_id:08d} not found.",
+        )
+
+    request = (
+        await session.execute(
+            select(models.Request)
+            .options(
+                selectinload(models.Request.inmate).selectinload(models.Inmate.unit)
+            )
+            .where(
+                models.Request.inmate_jurisdiction == jurisdiction,
+                models.Request.inmate_id == inmate_id,
+                models.Request.index == request_index,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if request is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Request #{request_index} not found for "
+                f"{jurisdiction.value} inmate #{inmate_id:08d}."
+            ),
+        )
+
+    return build_request_address(request)
 
 
 @app.post(
