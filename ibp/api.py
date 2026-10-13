@@ -259,6 +259,89 @@ def build_request_address(request: models.Request) -> schemas.RequestAddress:
     )
 
 
+def shipping_settings_to_schema(
+    row: Optional[models.ShippingSettings],
+) -> schemas.ShippingSettings:
+    """Convert the settings row (or the defaults, if missing) to its schema."""
+    values = (
+        {column: getattr(row, column) for column in models.DEFAULT_SHIPPING_SETTINGS}
+        if row is not None
+        else models.DEFAULT_SHIPPING_SETTINGS
+    )
+    return schemas.ShippingSettings.model_validate(
+        {
+            "return_address": {
+                "name": values["return_name"],
+                "street1": values["return_street1"],
+                "street2": values["return_street2"],
+                "city": values["return_city"],
+                "state": values["return_state"],
+                "zipcode": values["return_zipcode"],
+            },
+            "unit_recipient_name": values["unit_recipient_name"],
+        }
+    )
+
+
+async def load_shipping_settings(session: AsyncSession) -> schemas.ShippingSettings:
+    """Load the shipping settings, falling back to the defaults if unset.
+
+    The row is seeded by the migration and by ``ibp.db_bootstrap``; the
+    fallback only matters for a schema built by ``create_all`` alone.
+    """
+    row = await session.get(models.ShippingSettings, models.SHIPPING_SETTINGS_ID)
+    return shipping_settings_to_schema(row)
+
+
+@app.get("/shipping-settings", response_model=schemas.ShippingSettings)
+async def get_shipping_settings(session: AsyncSession = Depends(get_session)):
+    """Get the return address and unit recipient line used for shipping."""
+    return await load_shipping_settings(session)
+
+
+@app.put("/shipping-settings", response_model=schemas.ShippingSettings)
+async def update_shipping_settings(
+    settings: schemas.ShippingSettings,
+    session: AsyncSession = Depends(get_session),
+):
+    """Replace the shipping settings."""
+    address = settings.return_address
+    values = {
+        "return_name": address.name,
+        "return_street1": address.street1,
+        "return_street2": address.street2,
+        "return_city": address.city,
+        "return_state": address.state,
+        "return_zipcode": address.zipcode,
+        "unit_recipient_name": settings.unit_recipient_name,
+    }
+
+    async with session.begin():
+        row = await session.get(
+            models.ShippingSettings, models.SHIPPING_SETTINGS_ID, with_for_update=True
+        )
+        if row is None:
+            row = models.ShippingSettings(id=models.SHIPPING_SETTINGS_ID, **values)
+            session.add(row)
+        else:
+            row.update_from_kwargs(**values)
+
+    logger.info(
+        "updated shipping settings: return address %s, %s, %s, %s, %s %s; "
+        "unit recipient %r",
+        address.name,
+        address.street1,
+        address.street2 or "-",
+        address.city,
+        address.state,
+        address.zipcode,
+        settings.unit_recipient_name,
+    )
+
+    await session.refresh(row)
+    return shipping_settings_to_schema(row)
+
+
 # Declared before the /inmates/{jurisdiction}/... routes so that
 # "by-request" is not matched (and rejected) as a jurisdiction.
 @app.get(

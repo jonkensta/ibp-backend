@@ -8,8 +8,12 @@ entrypoint).  It inspects the configured database and does the right thing:
 - Tables exist but no ``alembic_version`` table: the database was created by
   ``Base.metadata.create_all`` (e.g. via ``scripts/migrate.py``).  If the
   schema already matches the current models, stamp it as ``head``; if it
-  predates the post-baseline migrations, stamp it at the baseline and upgrade.
+  predates later migrations, stamp the newest revision it matches and upgrade.
 - Otherwise: run ``alembic upgrade head`` to apply any pending migrations.
+
+Finally, the single ``shipping_settings`` row is seeded with the production
+defaults if it is missing (``create_all`` builds the table but, unlike the
+migration, does not seed it).
 
 Exits non-zero if anything goes wrong.
 """
@@ -24,11 +28,14 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 
+from . import models
 from .base import config as server_config
 
 logger = logging.getLogger(__name__)
 
 BASELINE_REVISION = "1e01dc9942d5"
+# Last revision before the shipping_settings table was added.
+PRE_SHIPPING_SETTINGS_REVISION = "a7c31f9e5b24"
 
 _SYNC_SCHEME_MAPPING = {
     "postgresql+asyncpg": "postgresql",
@@ -73,6 +80,27 @@ def inspect_database(url: str) -> tuple[set[str], bool]:
     return tables, has_request_id
 
 
+def seed_shipping_settings(url: str) -> None:
+    """Insert the default shipping settings row if it is missing."""
+    table = models.Base.metadata.tables[models.ShippingSettings.__tablename__]
+    engine = sa.create_engine(url)
+    try:
+        with engine.begin() as connection:
+            exists = connection.execute(
+                sa.select(table.c.id).where(table.c.id == models.SHIPPING_SETTINGS_ID)
+            ).first()
+            if exists is None:
+                logger.info("Seeding default shipping settings.")
+                connection.execute(
+                    sa.insert(table).values(
+                        id=models.SHIPPING_SETTINGS_ID,
+                        **models.DEFAULT_SHIPPING_SETTINGS,
+                    )
+                )
+    finally:
+        engine.dispose()
+
+
 def bootstrap() -> None:
     """Bring the database schema up to date."""
     url = get_sync_database_url()
@@ -83,13 +111,23 @@ def bootstrap() -> None:
         logger.info("Empty database detected; running alembic upgrade to head.")
         command.upgrade(config, "head")
     elif "alembic_version" not in tables:
-        if has_request_id:
+        if "shipping_settings" in tables:
             # Schema was created by Base.metadata.create_all from the current
             # models; adopt it as-is.
             logger.info(
                 "Existing schema without alembic_version detected; stamping head."
             )
             command.stamp(config, "head")
+        elif has_request_id:
+            # Schema was created by create_all from pre-shipping_settings
+            # models; adopt it there and replay the later migrations.
+            logger.info(
+                "Existing pre-shipping_settings schema without alembic_version "
+                "detected; stamping %s and upgrading to head.",
+                PRE_SHIPPING_SETTINGS_REVISION,
+            )
+            command.stamp(config, PRE_SHIPPING_SETTINGS_REVISION)
+            command.upgrade(config, "head")
         else:
             # Schema was created by create_all from pre-request_id models;
             # adopt it at the baseline and replay the later migrations.
@@ -104,6 +142,7 @@ def bootstrap() -> None:
         logger.info("alembic_version table present; running alembic upgrade to head.")
         command.upgrade(config, "head")
 
+    seed_shipping_settings(url)
     logger.info("Database schema bootstrap complete.")
 
 

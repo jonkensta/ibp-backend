@@ -10,7 +10,11 @@ from sqlalchemy import Date, DateTime, Enum, Integer, String, Text, TypeDecorato
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.orm import mapped_column  # pylint: disable=no-name-in-module
 from sqlalchemy.orm import Mapped, relationship
-from sqlalchemy.schema import ForeignKeyConstraint, PrimaryKeyConstraint
+from sqlalchemy.schema import (
+    CheckConstraint,
+    ForeignKeyConstraint,
+    PrimaryKeyConstraint,
+)
 
 from .base import config
 from .db import Base
@@ -249,3 +253,41 @@ class Unit(Base):
     shipping_method: Mapped[Optional[str]] = mapped_column(
         Enum("Box", "Individual", "Federal Tub", name="shipping_enum")
     )
+
+
+# Production defaults for the shipping settings row, seeded by the
+# ``b5e2d8c4a1f3`` migration and by ``ibp.db_bootstrap``, and returned by the
+# API if the row is somehow missing.
+SHIPPING_SETTINGS_ID = 1
+DEFAULT_SHIPPING_SETTINGS: dict[str, Optional[str]] = {
+    "return_name": "Inside Books Project",
+    "return_street1": "PO Box 301029",
+    "return_street2": "12 ST BOOKS",
+    "return_city": "Austin",
+    "return_state": "TX",
+    "return_zipcode": "78703",
+    "unit_recipient_name": "ATTN: MAILROOM STAFF",
+}
+
+
+class ShippingSettings(Base):
+    """Sqlalchemy model for the organisation's shipping settings.
+
+    A single row (``id == 1``) holding the return address printed on packages
+    and the recipient line printed above unit mailroom addresses.
+    """
+
+    __tablename__ = "shipping_settings"
+
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+
+    return_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    return_street1: Mapped[str] = mapped_column(String(100), nullable=False)
+    return_street2: Mapped[Optional[str]] = mapped_column(String(100))
+    return_city: Mapped[str] = mapped_column(String(100), nullable=False)
+    return_state: Mapped[str] = mapped_column(String(2), nullable=False)
+    return_zipcode: Mapped[str] = mapped_column(String(10), nullable=False)
+
+    unit_recipient_name: Mapped[str] = mapped_column(String(100), nullable=False)

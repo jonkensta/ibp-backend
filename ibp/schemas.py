@@ -2,9 +2,15 @@
 
 import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    Field,
+    StringConstraints,
+    field_serializer,
+)
 
 
 class JurisdictionEnum(str, Enum):
@@ -288,3 +294,60 @@ class RequestAddress(BaseModel):
         if dt.tzinfo is None:
             return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
         return dt.isoformat()
+
+
+SETTINGS_MAX_LENGTH = 100
+
+RequiredText = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=SETTINGS_MAX_LENGTH
+    ),
+]
+
+
+def blank_to_none(value: Optional[str]) -> Optional[str]:
+    """Normalise a blank optional string to None."""
+    return value or None
+
+
+OptionalText = Annotated[
+    Optional[
+        Annotated[
+            str,
+            StringConstraints(strip_whitespace=True, max_length=SETTINGS_MAX_LENGTH),
+        ]
+    ],
+    AfterValidator(blank_to_none),
+]
+
+StateCode = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, to_upper=True, pattern=r"^[A-Za-z]{2}$"),
+]
+
+Zipcode = Annotated[
+    str, StringConstraints(strip_whitespace=True, pattern=r"^\d{5}(-\d{4})?$")
+]
+
+
+class ReturnAddress(BaseModel):
+    """The organisation's return address printed on packages."""
+
+    name: RequiredText
+    street1: RequiredText
+    street2: OptionalText = None
+    city: RequiredText
+    state: StateCode
+    zipcode: Zipcode
+
+
+class ShippingSettings(BaseModel):
+    """Editable shipping settings.
+
+    ``unit_recipient_name`` is the line printed above a unit's mailroom
+    address (e.g. ``ATTN: MAILROOM STAFF``).
+    """
+
+    return_address: ReturnAddress
+    unit_recipient_name: RequiredText

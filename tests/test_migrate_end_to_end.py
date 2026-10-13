@@ -122,3 +122,15 @@ def test_refuses_non_empty_destination(legacy_db: Path, tmp_path: Path):
     second = run_migrate(legacy_db, destination)
     assert second.returncode != 0
     assert "refusing to migrate" in second.stderr
+
+
+def test_shipping_settings_are_seeded(migrated):
+    """The create_all schema gets the default shipping settings row."""
+    engine, _, _ = migrated
+    with Session(engine) as session:
+        settings = session.get(
+            ibp.models.ShippingSettings, ibp.models.SHIPPING_SETTINGS_ID
+        )
+        assert settings is not None
+        assert settings.unit_recipient_name == "ATTN: MAILROOM STAFF"
+        assert settings.return_state == "TX"
