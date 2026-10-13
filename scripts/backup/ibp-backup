@@ -16,7 +16,8 @@ SNAP="$LOCAL_DIR/data-$STAMP.db"
 HC_URL=$(cat /home/jstarr/.config/ibp-backup/ping-url 2>/dev/null || true)
 
 hc() {
-    [ -n "$HC_URL" ] || return 0
+    # Drain stdin even without a URL, or the writer gets SIGPIPE (exit 141).
+    [ -n "$HC_URL" ] || { cat >/dev/null; return 0; }
     curl -fsS -m 10 --retry 3 -o /dev/null --data-binary @- "$HC_URL/$1" || true
 }
 
