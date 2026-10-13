@@ -41,10 +41,10 @@ def upgrade() -> None:
         [
             {
                 'id': 1,
-                'return_name': 'Inside Books Project',
-                'return_street1': 'PO Box 301029',
+                'return_name': 'INSIDE BOOKS PROJECT',
+                'return_street1': 'PO BOX 301029',
                 'return_street2': '12 ST BOOKS',
-                'return_city': 'Austin',
+                'return_city': 'AUSTIN',
                 'return_state': 'TX',
                 'return_zipcode': '78703',
                 'unit_recipient_name': 'ATTN: MAILROOM STAFF',

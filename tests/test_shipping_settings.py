@@ -13,10 +13,10 @@ from ibp import db_bootstrap, models
 
 DEFAULTS = {
     "return_address": {
-        "name": "Inside Books Project",
-        "street1": "PO Box 301029",
+        "name": "INSIDE BOOKS PROJECT",
+        "street1": "PO BOX 301029",
         "street2": "12 ST BOOKS",
-        "city": "Austin",
+        "city": "AUSTIN",
         "state": "TX",
         "zipcode": "78703",
     },
