@@ -39,7 +39,3 @@ data.old.db
 
 # Documentation
 *.md
-MIGRATION_GUIDE.md
-
-# Scripts not needed in container
-migrate_*.py
