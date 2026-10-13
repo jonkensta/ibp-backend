@@ -5,6 +5,10 @@ Usage::
     DATABASE_URL=sqlite+aiosqlite:///path/new.db \\
         uv run --group dev scripts/migrate.py legacy.db [--archive-dir DIR]
 
+With ``--archive-dir``, legacy data that is not migrated (the shipments table,
+the request -> shipment linkage, and orphaned child rows) is exported to CSV
+files in DIR for safekeeping; this does not change what gets migrated.
+
 The destination is the database configured for the app (``DATABASE_URL`` via
 the server config).  It must be empty or not exist yet.  On success the
 schema is stamped with the current alembic revision (via
@@ -40,12 +44,14 @@ Around DST transitions the wall-clock time is resolved with ``fold=0``:
 
 import argparse
 import asyncio
+import csv
 import datetime
 import os
 import sqlite3
 import sys
 import typing
 from contextlib import closing
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import sqlalchemy
@@ -62,6 +68,13 @@ import ibp.db_bootstrap  # pylint: disable=import-error, wrong-import-position
 INMATE_BATCH_SIZE = 1000
 
 LEGACY_TIMEZONE = ZoneInfo("America/Chicago")
+
+# Legacy child tables and the column referencing their inmate's autoid.
+ORPHAN_COLUMNS = {
+    "comments": "inmate_id",
+    "lookups": "inmate_id",
+    "requests": "inmate_autoid",
+}
 
 
 def parse_date(date: str) -> datetime.date:
@@ -105,12 +118,19 @@ def table_length(connection, table: str) -> int:
     return connection.execute(sql).fetchone()["count"]
 
 
+def orphan_condition(inmate_column: str) -> str:
+    """SQL condition matching child rows with a NULL or dangling inmate."""
+    return (
+        f"{inmate_column} IS NULL "
+        f"OR {inmate_column} NOT IN (SELECT autoid FROM inmates)"
+    )
+
+
 def count_orphans(connection, table: str, inmate_column: str) -> int:
     """Count child rows whose inmate reference is NULL or dangling."""
     sql = f"""
         SELECT COUNT(*) AS count FROM {table}
-        WHERE {inmate_column} IS NULL
-           OR {inmate_column} NOT IN (SELECT autoid FROM inmates)
+        WHERE {orphan_condition(inmate_column)}
     """  # nosec: fixed table/column names
     return connection.execute(sql).fetchone()["count"]
 
@@ -279,11 +299,7 @@ async def verify_counts(connection, session_factory) -> None:
     in the new schema (children are keyed by their inmate); they are reported
     explicitly and excluded from the expected counts.
     """
-    orphan_columns = {
-        "comments": "inmate_id",
-        "lookups": "inmate_id",
-        "requests": "inmate_autoid",
-    }
+    orphan_columns = ORPHAN_COLUMNS
     models = {
         "units": ibp.models.Unit,
         "inmates": ibp.models.Inmate,
@@ -332,8 +348,66 @@ async def verify_counts(connection, session_factory) -> None:
     print("\nRow count verification passed.")
 
 
-async def run_migration(filepath: str) -> None:
-    """Create the schema and migrate the legacy data into it."""
+def export_query_csv(connection, sql: str, path: Path) -> int:
+    """Write the result of a legacy query to a UTF-8 CSV with a header row."""
+    cursor = connection.execute(sql)
+    header = [column[0] for column in cursor.description]
+    count = 0
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(header)
+        for row in cursor:
+            writer.writerow(row[column] for column in header)
+            count += 1
+    return count
+
+
+def archive_queries() -> dict[str, str]:
+    """Map archive CSV filenames to the legacy queries that produce them."""
+    queries = {
+        "shipments.csv": "SELECT * FROM shipments ORDER BY autoid",
+        "request_shipments.csv": """
+            SELECT autoid AS request_autoid, shipment_autoid FROM requests
+            WHERE shipment_autoid IS NOT NULL ORDER BY autoid
+        """,
+    }
+    for table, column in ORPHAN_COLUMNS.items():
+        queries[f"orphan_{table}.csv"] = f"""
+            SELECT * FROM {table} WHERE {orphan_condition(column)}
+            ORDER BY autoid
+        """  # nosec: fixed table/column names
+    return queries
+
+
+def export_archive(connection, archive_dir: Path) -> list[tuple[Path, int]]:
+    """Export legacy data that is not migrated to CSV files in ``archive_dir``.
+
+    Writes the full shipments table, the request -> shipment linkage
+    (request_autoid equals the migrated Request.request_id), and the orphaned
+    comments/lookups/requests rows (NULL or dangling inmate reference) that
+    the migration drops.  Values are written exactly as stored in the legacy
+    database, i.e. datetimes are naive US Central local time.
+    """
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    exported = []
+    for name, sql in archive_queries().items():
+        path = archive_dir / name
+        exported.append((path, export_query_csv(connection, sql, path)))
+    return exported
+
+
+def print_archive(exported: list[tuple[Path, int]]) -> None:
+    """Print the archive files written and their data row counts."""
+    print("\nArchived legacy data that is not migrated (CSV, UTF-8):")
+    for path, count in exported:
+        print(f"  {path} ({count} rows)")
+
+
+async def run_migration(filepath: str, archive_dir: Path | None = None) -> None:
+    """Create the schema and migrate the legacy data into it.
+
+    If ``archive_dir`` is given, also export non-migrated legacy data to CSV.
+    """
     engine = ibp.db.build_engine()
     session_factory = sqlalchemy.ext.asyncio.async_sessionmaker(
         autocommit=False,
@@ -354,6 +428,9 @@ async def run_migration(filepath: str) -> None:
             await migrate_units(connection, session_factory)
             await migrate_inmates(connection, session_factory)
             await verify_counts(connection, session_factory)
+
+            if archive_dir is not None:
+                print_archive(export_archive(connection, archive_dir))
     finally:
         await engine.dispose()
 
@@ -374,9 +451,17 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=main.__doc__)
     parser.add_argument("filepath", help="legacy sqlite database filepath")
+    parser.add_argument(
+        "--archive-dir",
+        type=Path,
+        help=(
+            "write CSV exports of legacy data that is not migrated (shipments, "
+            "request->shipment links, orphaned child rows) to this directory"
+        ),
+    )
     args = parser.parse_args()
 
-    asyncio.run(run_migration(args.filepath))
+    asyncio.run(run_migration(args.filepath, args.archive_dir))
     stamp_schema()
 
 
