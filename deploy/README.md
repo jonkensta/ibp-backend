@@ -78,9 +78,14 @@ Write the config:
     install -m 0600 deploy/server.conf.example server.conf
     $EDITOR server.conf   # check the database path; no secrets are needed
 
-The template leaves `[logging] logfile` empty so that logs go to the journal.
-That needs the logging change from to-do B1. On a commit without it, set
-`logfile` to an absolute path under `/home/jstarr/ibp-new`.
+The template leaves `[logging] logfile` empty so that logs go to the journal
+(`journalctl -u ibp-backend`). To log to a file instead, set `logfile` to an
+absolute path under `/home/jstarr/ibp-new`; it is rotated at `max_bytes`,
+keeping `backup_count` old files.
+
+The return address and the unit mailroom recipient line are not in the config:
+they live in the database (`/api/shipping-settings`), seeded with the legacy
+production values by `ibp.db_bootstrap`.
 
 Smoke-test on port 8001 against a copy of the migrated database, while
 legacy keeps running on port 80:

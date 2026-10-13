@@ -18,23 +18,15 @@ uri = sqlite+aiosqlite:////home/jstarr/ibp-new/data.db
 [logging]
 level = INFO
 # Empty logfile: log to stderr, which systemd sends to the journal
-# (journalctl -u ibp-backend). Needs the logging change from to-do B1; until
-# then the app requires a writable file path here.
+# (journalctl -u ibp-backend). A relative path is resolved against this
+# config file's directory.
 logfile =
-# Only used when logfile is set: rotate at this many bytes.
-rotation_size = 1048576
+# Only used when logfile is set: rotate at max_bytes and keep backup_count
+# old files, so at most max_bytes * (backup_count + 1) bytes are used.
+max_bytes = 10485760
+backup_count = 5
 # journald adds its own timestamps.
 format = [%(levelname)s] %(name)s: %(message)s
-
-[address]
-# Production return address, exactly as legacy shippy uses it. Not read by
-# the app yet (to-do B4, a return_address endpoint for shippy).
-addressee = Inside Books Project
-street1 = PO Box 301029
-street2 = 12 ST BOOKS
-city = Austin
-state = TX
-zipcode = 78703
 
 [providers]
 # Seconds allowed for each provider (TDCJ, FBOP) curl request. A name search
@@ -50,7 +42,3 @@ min_release_timedelta = 60
 min_postmark_timedelta = 90
 # Hours before cached inmate data is fetched again from the providers.
 inmates_cache_ttl = 24
-
-[shipping]
-# Recipient line for unit mailrooms. Not read by the app yet (to-do B4).
-unit_address_name = ATTN: MAILROOM STAFF
