@@ -1,10 +1,13 @@
 #!/bin/bash
-# Snapshot ~/ibp/data.db, verify it, upload to Google Drive, keep the newest 20 there.
+# Snapshot the IBP database, verify it, upload to Google Drive, keep the newest 20 there.
 # Reports start/exit status (with the log) to Healthchecks if a ping URL is configured.
+#
+# The default DB path is the Docker deployment's bind mount (deploy/pi). Override with
+# IBP_DB, e.g. IBP_DB=/home/jstarr/ibp/data.db for the legacy Pi 3B.
 set -euo pipefail
 
-DB=/home/jstarr/ibp/data.db
-LOCAL_DIR=/home/jstarr/backups/ibp
+DB=${IBP_DB:-/srv/ibp/data/data.db}
+LOCAL_DIR=${IBP_BACKUP_DIR:-/home/jstarr/backups/ibp}
 REMOTE=gdrive:backups/ibp
 KEEP_REMOTE=20
 KEEP_LOCAL=4
@@ -18,18 +21,24 @@ hc() {
 }
 
 main() {
-    # Consistent online copy (takes a read lock; safe while gunicorn is running)
+    [ -f "$DB" ] || { echo "database not found: $DB" >&2; exit 1; }
+    mkdir -p "$LOCAL_DIR"
+    # Consistent online copy (takes a read lock; safe while the app is running)
     sqlite3 "$DB" ".timeout 30000" ".backup '$SNAP'"
     result=$(sqlite3 "$SNAP" "PRAGMA integrity_check;")
     if [ "$result" != "ok" ]; then
         echo "integrity_check failed on snapshot: $result" >&2
         exit 1
     fi
-    tables=$(sqlite3 "$SNAP" "SELECT count(*) FROM sqlite_master WHERE type='table';")
-    if [ "$tables" -eq 0 ]; then
-        echo "snapshot has no tables" >&2
+    # Tables both the legacy and the new schema have; catches an empty or wrong file.
+    tables=$(sqlite3 "$SNAP" "SELECT count(*) FROM sqlite_master WHERE type='table'
+        AND name IN ('inmates', 'requests', 'units', 'comments', 'lookups');")
+    if [ "$tables" -ne 5 ]; then
+        echo "snapshot is missing core tables (found $tables of 5)" >&2
         exit 1
     fi
+    echo "snapshot: $(sqlite3 "$SNAP" "SELECT count(*) FROM inmates;") inmates," \
+        "$(sqlite3 "$SNAP" "SELECT count(*) FROM requests;") requests"
     zstd -q -10 --rm "$SNAP"
     echo "snapshot: $SNAP.zst ($(du -h "$SNAP.zst" | cut -f1))"
 

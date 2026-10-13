@@ -35,12 +35,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --frozen --no-dev
 
-# Create data directory for SQLite
-RUN mkdir -p /data
+# Run the venv directly instead of through `uv run`, which would try to
+# re-sync at startup (uv.lock and pyproject.toml are bind-mounted above, not
+# copied). This also lets the container run as an unprivileged user.
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
+
+# Data directory for SQLite; production bind-mounts a host dir here and runs
+# the container as that dir's owner (see deploy/pi/compose.yaml).
+RUN mkdir -p /data && chmod 0777 /data
 
 # Expose port
 EXPOSE 8000
 
 # Bootstrap the database schema, then run the application
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["uv", "run", "uvicorn", "ibp.base:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "ibp.base:app", "--host", "0.0.0.0", "--port", "8000"]

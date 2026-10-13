@@ -1,0 +1,52 @@
+# Production stack for ibp-server (Raspberry Pi 4B, arm64, Docker Compose).
+# Install this directory as /srv/ibp; see deploy/pi/README.md.
+#
+#   /srv/ibp/compose.yaml   this file
+#   /srv/ibp/.env           IBP_TAG (and optionally IBP_UID/IBP_GID)
+#   /srv/ibp/nginx.conf     frontend nginx config (HTTP only, LAN + tailnet)
+#   /srv/ibp/data/data.db   the SQLite database (backed up by ibp-backup)
+
+name: ibp
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  ibp-backend:
+    image: ghcr.io/jonkensta/ibp-backend:${IBP_TAG:?set IBP_TAG in .env}
+    environment:
+      TZ: America/Chicago
+      DATABASE_URL: sqlite+aiosqlite:////data/data.db
+    # Own the database as the host user, so host-side tools (ibp-backup,
+    # sqlite3) and the container agree on file ownership.
+    user: "${IBP_UID:-1000}:${IBP_GID:-1000}"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    logging: *logging
+
+  ibp-frontend:
+    image: ghcr.io/jonkensta/ibp-frontend:${IBP_TAG:?set IBP_TAG in .env}
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      ibp-backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    logging: *logging
