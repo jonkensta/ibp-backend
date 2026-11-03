@@ -33,7 +33,9 @@ def _inmate_release_warning(
     inmate_: models.Inmate,
 ) -> typing.Iterable[typing.Tuple[str, str]]:
     """Yield a release warning for an inmate if any."""
-    if inmate_.release is None:
+    # Providers report text such as "UNKNOWN", "LIFE" or "NOT AVAILABLE"
+    # instead of a date for many inmates; there is nothing to compare then.
+    if not isinstance(inmate_.release, datetime.date):
         return
 
     days = config.getint("warnings", "min_release_timedelta")
