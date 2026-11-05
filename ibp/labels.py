@@ -7,6 +7,7 @@ name and ID in the middle, and jurisdiction / unit / shipping method
 along the bottom.
 """
 
+import io
 import typing
 from dataclasses import dataclass
 
@@ -144,6 +145,12 @@ def get_shipping_method(unit: typing.Any) -> str:
     return unit.shipping_method
 
 
+def label_package_id(request: Request) -> str:
+    """Return the package ID printed on a request label, e.g. TEX-12345-0."""
+    jurisdiction_code = "TEX" if request.inmate_jurisdiction == "Texas" else "FED"
+    return f"{jurisdiction_code}-{request.inmate_id}-{request.index}"
+
+
 def render_request_label(
     request: Request, size: tuple[int, int] = (1004, 378)
 ) -> Image.Image:
@@ -156,8 +163,7 @@ def render_request_label(
     image = Image.new("L", size, color=(255,))
     draw = ImageDraw.Draw(image)
 
-    jurisdiction_code = "TEX" if request.inmate_jurisdiction == "Texas" else "FED"
-    id_ = f"{jurisdiction_code}-{request.inmate_id}-{request.index}"
+    id_ = label_package_id(request)
 
     def build_box_from_percentages(x0: int, y0: int, x1: int, y1: int):
         return Box(
@@ -191,3 +197,20 @@ def render_request_label(
     add_text(draw, box, details)
 
     return image
+
+
+LABEL_SIZE_MM = (85, 32)
+
+
+def render_request_label_pdf(request: Request) -> bytes:
+    """Render a request label as a one-page PDF exactly 85mm x 32mm.
+
+    The PNG label is embedded as the whole page, with no margins. Pillow
+    sizes the page from the image size and DPI, so the DPI is set per axis
+    to make the page match the label stock exactly.
+    """
+    image = render_request_label(request)
+    dpi = tuple(px * 25.4 / mm for px, mm in zip(image.size, LABEL_SIZE_MM))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PDF", dpi=dpi, title=label_package_id(request))
+    return buffer.getvalue()
