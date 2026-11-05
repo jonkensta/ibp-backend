@@ -1,13 +1,12 @@
 """IBP API views."""
 
 import datetime
-import io
 import itertools
 import logging
 from typing import Optional
 
 import sqlalchemy
-from fastapi import Depends, HTTPException, Query, Response, status
+from fastapi import Depends, HTTPException, Query, status
 from nameparser import HumanName  # type: ignore[import]
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -15,7 +14,6 @@ from sqlalchemy.orm import selectinload
 
 from . import db, metrics, models, schemas, warnings
 from .base import app
-from .labels import render_request_label
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
 from .upsert import inmates_by_name as upsert_inmates_by_name
 
@@ -656,18 +654,14 @@ async def delete_request(
         await session.delete(request)
 
 
-@app.get(
-    "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}/label",
-    response_class=Response,
-)
-async def get_request_label(
+async def get_request_with_unit(
+    session: AsyncSession,
     jurisdiction: schemas.JurisdictionEnum,
     inmate_id: int,
     request_index: int,
-    session: AsyncSession = Depends(get_session),
-):
-    """Return a PNG label image for a request."""
-    request = (
+) -> Optional[models.Request]:
+    """Return a request with its inmate and unit loaded, or None."""
+    return (
         await session.execute(
             select(models.Request)
             .options(
@@ -680,16 +674,6 @@ async def get_request_label(
             )
         )
     ).scalar_one_or_none()
-
-    if request is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Request not found."
-        )
-
-    image = render_request_label(request)
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return Response(content=buffer.getvalue(), media_type="image/png")
 
 
 @app.get(
@@ -722,19 +706,9 @@ async def get_request_address(
             detail=f"{jurisdiction.value} inmate #{inmate_id:08d} not found.",
         )
 
-    request = (
-        await session.execute(
-            select(models.Request)
-            .options(
-                selectinload(models.Request.inmate).selectinload(models.Inmate.unit)
-            )
-            .where(
-                models.Request.inmate_jurisdiction == jurisdiction,
-                models.Request.inmate_id == inmate_id,
-                models.Request.index == request_index,
-            )
-        )
-    ).scalar_one_or_none()
+    request = await get_request_with_unit(
+        session, jurisdiction, inmate_id, request_index
+    )
 
     if request is None:
         raise HTTPException(
