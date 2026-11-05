@@ -20,7 +20,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version-file: "pyproject.toml"
+          # Match the Docker image (python3.13); an unpinned runner picks the
+          # newest Python, which PyO3 wheels (watchfiles, rignore) lag behind.
+          python-version: "3.13"
 
       - name: Install dependencies
         run: uv sync --locked --all-extras --dev
