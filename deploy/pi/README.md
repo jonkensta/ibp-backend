@@ -70,8 +70,10 @@ The backend needs no config file: the image's `sample.conf` defaults are the
 production values (INFO logging to stderr, 5 s provider timeout, 60/90 day
 warnings, 24 h cache), and the database path comes from `DATABASE_URL` in
 `compose.yaml`. The return address and the unit mailroom line live in the
-database and are edited on the app's Settings page. To override any
-`sample.conf` value, mount a `server.conf` and point `CONF` at it:
+database and are edited on the app's Settings page. To change any
+`sample.conf` value, mount an edited copy of the whole `sample.conf` (it
+replaces the file, it is not merged with it) as `server.conf` and point
+`CONF` at it; the backend refuses to start if `CONF` names a missing file:
 
     # compose.yaml, ibp-backend:
     environment:
