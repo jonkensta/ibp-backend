@@ -380,31 +380,71 @@ async def get_request_address_by_legacy_request_id(
     return build_request_address(request, await load_shipping_settings(session))
 
 
+def inmate_view_statement(jurisdiction: schemas.JurisdictionEnum, inmate_id: int):
+    """Select one inmate with everything the inmate view shows."""
+    return (
+        select(models.Inmate)
+        .where(
+            models.Inmate.jurisdiction == jurisdiction,
+            models.Inmate.id == inmate_id,
+        )
+        .options(
+            selectinload(models.Inmate.unit),
+            selectinload(models.Inmate.requests),
+            selectinload(models.Inmate.comments),
+            selectinload(models.Inmate.lookups),
+        )
+    )
+
+
+# Number of most recent lookups kept per inmate; older ones are deleted.
+MAX_LOOKUPS_PER_INMATE = 3
+
+
 @app.get("/inmates/{jurisdiction}/{inmate_id}", response_model=schemas.Inmate)
 async def get_inmate(
     jurisdiction: schemas.JurisdictionEnum,
     inmate_id: int,
     session: AsyncSession = Depends(get_session),
 ):
-    """Retrieve an inmate by jurisdiction and inmate ID."""
-    logger.debug("loading inmate view")
+    """Retrieve an inmate by jurisdiction and inmate ID.
 
-    async with session.begin():
-        statement = (
-            select(models.Inmate)
-            .where(
-                models.Inmate.jurisdiction == jurisdiction,
-                models.Inmate.id == inmate_id,
-            )
-            .options(
-                selectinload(models.Inmate.unit),
-                selectinload(models.Inmate.requests),
-                selectinload(models.Inmate.comments),
-                selectinload(models.Inmate.lookups),
-            )
-            .with_for_update()
+    Read-only: does not record a lookup or query the inmate providers, so
+    clients may refetch it freely (e.g. after adding a request or comment).
+    Opening an inmate is ``POST /inmates/{jurisdiction}/{inmate_id}/lookups``.
+    """
+    inmate = (
+        await session.execute(inmate_view_statement(jurisdiction, inmate_id))
+    ).scalar_one_or_none()
+
+    if inmate is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Inmate not found."
         )
 
+    return inmate
+
+
+@app.post(
+    "/inmates/{jurisdiction}/{inmate_id}/lookups",
+    response_model=schemas.Inmate,
+    status_code=status.HTTP_201_CREATED,
+)
+async def record_lookup(
+    jurisdiction: schemas.JurisdictionEnum,
+    inmate_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Record that a volunteer opened an inmate, and return the inmate.
+
+    Call this once per deliberate view of an inmate, never on a refetch.
+    The inmate's provider data is refreshed first if it is missing or stale.
+    Only the most recent ``MAX_LOOKUPS_PER_INMATE`` lookups are kept.
+    """
+    logger.debug("recording inmate lookup")
+
+    async with session.begin():
+        statement = inmate_view_statement(jurisdiction, inmate_id).with_for_update()
         inmate = (await session.execute(statement)).scalar_one_or_none()
 
         if inmate is None or not inmate.entry_is_fresh():
@@ -430,7 +470,7 @@ async def get_inmate(
         inmate.lookups.sort(key=lambda lookup: lookup.datetime_created)
 
         session.add(lookup)
-        del inmate.lookups[:-3]
+        del inmate.lookups[:-MAX_LOOKUPS_PER_INMATE]
 
     await session.refresh(inmate)
     return inmate
@@ -639,9 +679,8 @@ async def get_request_address(
 ):
     """Get the shipping address for a request.
 
-    Read-only: unlike ``GET /inmates/{jurisdiction}/{inmate_id}``, this does
-    not record a lookup or query the inmate providers, so it is safe to call
-    once per shipped package.
+    Read-only: does not record a lookup or query the inmate providers, so it
+    is safe to call once per shipped package.
     """
     inmate = (
         await session.execute(

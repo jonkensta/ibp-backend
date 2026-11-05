@@ -187,15 +187,6 @@ def test_legacy_request_inmate_is_read_only(client):
     assert response.json()["id"] == 12345
 
 
-def test_inmate_view_records_lookup(client, seeded):
-    """Contrast: the inmate view records a lookup on every call."""
-    response = client.get("/inmates/Texas/12345")
-    assert response.status_code == 200
-    with seeded() as session:
-        count = session.query(models.Lookup).count()
-    assert count == 1
-
-
 @pytest.mark.usefixtures("seeded")
 @pytest.mark.parametrize(
     "url",
