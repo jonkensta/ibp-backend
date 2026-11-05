@@ -443,6 +443,32 @@ async def record_lookup(
     """
     logger.debug("recording inmate lookup")
 
+    # SQLite ignores FOR UPDATE, so two simultaneous POSTs for one inmate can
+    # both pick the same free index; the loser hits the unique key and retries
+    # against the winner's committed lookups (no provider re-query: the
+    # winner's refresh, if any, is committed too).
+    for attempt in itertools.count(1):
+        try:
+            inmate = await _record_lookup_once(session, jurisdiction, inmate_id)
+        except sqlalchemy.exc.IntegrityError:
+            if attempt >= LOOKUP_ATTEMPTS:
+                raise
+            logger.info("concurrent lookup for inmate %s; retrying", inmate_id)
+            continue
+        break
+
+    await session.refresh(inmate)
+    return inmate
+
+
+# Attempts to record a lookup before giving up on concurrent index collisions.
+LOOKUP_ATTEMPTS = 3
+
+
+async def _record_lookup_once(
+    session: AsyncSession, jurisdiction: schemas.JurisdictionEnum, inmate_id: int
+) -> models.Inmate:
+    """Record one lookup in its own transaction; see ``record_lookup``."""
     async with session.begin():
         statement = inmate_view_statement(jurisdiction, inmate_id).with_for_update()
         inmate = (await session.execute(statement)).scalar_one_or_none()
@@ -472,7 +498,6 @@ async def record_lookup(
         session.add(lookup)
         del inmate.lookups[:-MAX_LOOKUPS_PER_INMATE]
 
-    await session.refresh(inmate)
     return inmate
 
 
