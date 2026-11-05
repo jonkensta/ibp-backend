@@ -61,11 +61,25 @@ def get_toplevel_path() -> Path:
     return Path(__file__).parent.parent
 
 
+def load_config_file(filepath: Path) -> EnvInterpolatingConfigParser:
+    """Read one config file, raising if it is missing or unreadable.
+
+    ``ConfigParser.read`` silently skips files it cannot open, which would
+    leave the server running on an empty configuration.
+    """
+    server_config = EnvInterpolatingConfigParser()
+    with open(filepath, encoding="utf-8") as file:
+        server_config.read_file(file)
+    server_config.path = filepath.resolve()
+    return server_config
+
+
 def read_server_config():
     """Read configuration file at module load time.
 
     Config file resolution order:
-    1. CONF environment variable (if set) - explicit path override
+    1. CONF environment variable (if set) - explicit path override; a
+       relative path is resolved against the project toplevel. It must exist.
     2. server.conf (if exists) - local/production config
     3. sample.conf (fallback) - template
 
@@ -76,20 +90,19 @@ def read_server_config():
     # Check for explicit override via CONF environment variable
     config_file = os.getenv("CONF")
     if config_file:
-        filepath = os.path.join(toplevel, config_file)
-        server_config = EnvInterpolatingConfigParser()
-        server_config.read([filepath])
-        server_config.path = Path(filepath).resolve()
-        return server_config
+        filepath = toplevel / config_file
+        if not filepath.is_file():
+            raise FileNotFoundError(
+                f"CONF is set to {config_file!r}, but no config file exists at "
+                f"{filepath}"
+            )
+        return load_config_file(filepath)
 
     # Search default locations in order of precedence
     for config_file in ["server.conf", "sample.conf"]:
-        filepath = os.path.join(toplevel, config_file)
-        if os.path.exists(filepath):
-            server_config = EnvInterpolatingConfigParser()
-            server_config.read([filepath])
-            server_config.path = Path(filepath).resolve()
-            return server_config
+        filepath = toplevel / config_file
+        if filepath.exists():
+            return load_config_file(filepath)
 
     # No config file found
     raise FileNotFoundError(
