@@ -847,6 +847,43 @@ async def get_all_units(session: AsyncSession = Depends(get_session)):
     return (await session.execute(select(models.Unit))).scalars().all()
 
 
+@app.post("/units", response_model=schemas.Unit, status_code=status.HTTP_201_CREATED)
+async def create_unit(
+    unit_data: schemas.UnitCreate, session: AsyncSession = Depends(get_session)
+):
+    """Create a new unit; a unit is identified by its (jurisdiction, name)."""
+    logger.debug(
+        "creating unit with jurisdiction=%s, name=%s",
+        unit_data.jurisdiction,
+        unit_data.name,
+    )
+
+    conflict = HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"A {unit_data.jurisdiction.value} unit named "
+        f"'{unit_data.name}' already exists.",
+    )
+
+    try:
+        async with session.begin():
+            existing = await session.get(
+                models.Unit, (unit_data.jurisdiction.value, unit_data.name)
+            )
+            if existing is not None:
+                raise conflict
+
+            unit = models.Unit(**unit_data.model_dump(mode="json"))
+            session.add(unit)
+    except sqlalchemy.exc.IntegrityError as error:
+        # A concurrent create of the same unit won the race.
+        raise conflict from error
+
+    await session.refresh(unit)
+
+    logger.debug("created %s %s unit", unit.jurisdiction, unit.name)
+    return unit
+
+
 @app.get("/units/{jurisdiction}/{name}", response_model=schemas.Unit)
 async def get_unit(
     jurisdiction: schemas.JurisdictionEnum,

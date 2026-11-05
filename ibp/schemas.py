@@ -102,6 +102,10 @@ class CommentBase(BaseModel):
 class UnitCreate(UnitBase):
     """Schema for creating a new Unit."""
 
+    name: str = Field(min_length=1)
+    street1: str = Field(min_length=1)
+    city: str = Field(min_length=1)
+
 
 class RequestCreate(RequestBase):
     """Schema for creating a new Request."""
