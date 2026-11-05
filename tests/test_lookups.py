@@ -194,3 +194,56 @@ def test_crud_and_reads_do_not_record_lookups(client, lookup_count):
         (response.request.url, response.status_code) for response in calls
     ]
     assert lookup_count() == 1
+
+
+@pytest.mark.usefixtures("no_upsert")
+def test_concurrent_lookups_both_succeed(seeded, lookup_count):
+    """Two simultaneous POSTs for one inmate both record a lookup, never a 500.
+
+    The frontend can open the same inmate twice at once (e.g. GlobalSearch's
+    auto-redirect firing twice). Both requests pick the next free lookup index
+    before either commits; the loser must retry, not fail on the unique key.
+    """
+    # pylint: disable=import-outside-toplevel
+    import asyncio
+
+    import httpx
+    from sqlalchemy import event
+    from sqlalchemy.orm import Session
+    from sqlalchemy.util import await_only
+
+    from ibp.base import app
+
+    async def run() -> list[httpx.Response]:
+        # Hold the first flush of each request until both have chosen an
+        # index, so they always collide (as in production) instead of
+        # depending on timing.
+        barrier = asyncio.Barrier(2)
+        waiting = {"left": 2}
+
+        def before_flush(session, _context, _instances):
+            if waiting["left"] and any(
+                isinstance(obj, models.Lookup) for obj in session.new
+            ):
+                waiting["left"] -= 1
+                await_only(asyncio.wait_for(barrier.wait(), timeout=5))
+
+        event.listen(Session, "before_flush", before_flush)
+        try:
+            # Return a 500 as a response, as production does, instead of raising.
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as http:
+                return list(
+                    await asyncio.gather(http.post(LOOKUPS_URL), http.post(LOOKUPS_URL))
+                )
+        finally:
+            event.remove(Session, "before_flush", before_flush)
+
+    responses = asyncio.run(run())
+    assert [response.status_code for response in responses] == [201, 201]
+    assert lookup_count() == 2
+    with seeded() as session:
+        indices = sorted(lookup.index for lookup in session.query(models.Lookup))
+    assert indices == [0, 1]
