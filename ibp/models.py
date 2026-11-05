@@ -291,3 +291,24 @@ class ShippingSettings(Base):
     return_zipcode: Mapped[str] = mapped_column(String(10), nullable=False)
 
     unit_recipient_name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+class Book(Base):
+    """Sqlalchemy model for the ISBN lookup cache.
+
+    One row per ISBN-13: the title and author to use for that book, how they
+    were decided (``source``: ``claude`` for a merge of the providers, a
+    provider name when only it answered or Claude was unavailable, or
+    ``manual``) and the raw provider candidates as JSON, kept so a bad merge
+    can be audited later.
+    """
+
+    __tablename__ = "books"
+
+    isbn: Mapped[str] = mapped_column(String(13), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    author: Mapped[Optional[str]] = mapped_column(String(255))
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    confidence: Mapped[Optional[str]] = mapped_column(String(10))
+    candidates: Mapped[Optional[str]] = mapped_column(Text)
+    fetched_at: Mapped[datetime.datetime] = mapped_column(TZDateTime, nullable=False)

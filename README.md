@@ -43,6 +43,16 @@ every section. Values may use `${VAR}` (required environment variable) or
 `${VAR:-default}`; for example the database URI is
 `${DATABASE_URL:-sqlite+aiosqlite:///data.db}`.
 
+The `[books]` section configures the ISBN lookup (`GET /books/{isbn}`): it
+queries ISBNdb, Open Library, Google Books and the Library of Congress at
+once, has Claude merge their answers into one title and author, and caches
+the result in the `books` table (`ibp/books.py`). The keys come from
+`ISBNDB_KEY`, `GOOGLE_BOOKS_KEY` and `ANTHROPIC_API_KEY`; all are optional.
+Without the Anthropic key, or when the Claude call fails, the first provider
+that answered is used (and, if Claude is configured, not cached, so the next
+lookup tries the merge again). Claude spend is capped by the Anthropic
+workspace's spend limit.
+
 ## Deployment
 
 Production runs on `ibp-server`, a Raspberry Pi 4B, as a Docker Compose

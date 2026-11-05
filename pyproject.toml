@@ -24,6 +24,8 @@ dependencies = [
     # Sync driver used by alembic migrations against PostgreSQL
     # (the application itself uses asyncpg).
     "psycopg2-binary>=2.9",
+    "anthropic>=2.6.0",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]

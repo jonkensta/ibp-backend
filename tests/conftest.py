@@ -160,7 +160,8 @@ def api_db(
 
     Yields a synchronous sessionmaker for seeding and inspecting the database;
     the app's ``get_session`` dependency is overridden to use the same file.
-    Providers are patched to raise so no test can reach a live website.
+    Inmate and book providers are patched to raise so no test can reach a
+    live website.
     """
     # pylint: disable=import-outside-toplevel
     from sqlalchemy import create_engine
@@ -172,7 +173,7 @@ def api_db(
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import NullPool
 
-    from ibp import api, providers
+    from ibp import api, books, providers
     from ibp.base import app
     from ibp.db import Base
 
@@ -194,8 +195,12 @@ def api_db(
     def no_providers(*_args, **_kwargs):
         raise AssertionError("inmate providers must not be queried")
 
+    async def no_book_providers(*_args, **_kwargs):
+        raise AssertionError("book providers must not be queried")
+
     monkeypatch.setattr(providers, "query_by_inmate_id", no_providers)
     monkeypatch.setattr(providers, "query_by_name", no_providers)
+    monkeypatch.setattr(books, "fetch_candidates", no_book_providers)
 
     app.dependency_overrides[api.get_session] = get_test_session
     try:

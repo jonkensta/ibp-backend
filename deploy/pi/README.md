@@ -20,7 +20,7 @@ HTTPS.
 | Path | What |
 |---|---|
 | `/srv/ibp/compose.yaml`, `nginx.conf` | copied from this directory |
-| `/srv/ibp/.env` | `IBP_TAG=v…` (from `.env.example`) |
+| `/srv/ibp/.env` | `IBP_TAG=v…` and the ISBN lookup keys (from `.env.example`; mode 0600) |
 | `/srv/ibp/data/data.db` | the database, owned by `jstarr` (uid 1000) |
 | `~/.local/bin/ibp-backup` + timer | backups, see `scripts/backup/README.md` |
 
@@ -48,7 +48,8 @@ Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
        git clone https://github.com/jonkensta/ibp-backend.git ~/ibp-backend
        cp ~/ibp-backend/deploy/pi/{compose.yaml,nginx.conf} /srv/ibp/
        cp ~/ibp-backend/deploy/pi/.env.example /srv/ibp/.env
-       $EDITOR /srv/ibp/.env                  # IBP_TAG
+       $EDITOR /srv/ibp/.env                  # IBP_TAG, ISBN lookup keys
+       chmod 600 /srv/ibp/.env
        cp /path/to/migrated.db /srv/ibp/data/data.db
        cd /srv/ibp && docker compose pull && docker compose up -d
        docker compose ps                      # both "healthy"
