@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 BASELINE_REVISION = "1e01dc9942d5"
 # Last revision before the shipping_settings table was added.
 PRE_SHIPPING_SETTINGS_REVISION = "a7c31f9e5b24"
+# Last revision before the books table was added.
+PRE_BOOKS_REVISION = "b5e2d8c4a1f3"
 
 _SYNC_SCHEME_MAPPING = {
     "postgresql+asyncpg": "postgresql",
@@ -111,13 +113,23 @@ def bootstrap() -> None:
         logger.info("Empty database detected; running alembic upgrade to head.")
         command.upgrade(config, "head")
     elif "alembic_version" not in tables:
-        if "shipping_settings" in tables:
+        if "books" in tables:
             # Schema was created by Base.metadata.create_all from the current
             # models; adopt it as-is.
             logger.info(
                 "Existing schema without alembic_version detected; stamping head."
             )
             command.stamp(config, "head")
+        elif "shipping_settings" in tables:
+            # Schema was created by create_all from pre-books models; adopt it
+            # there and replay the later migrations.
+            logger.info(
+                "Existing pre-books schema without alembic_version detected; "
+                "stamping %s and upgrading to head.",
+                PRE_BOOKS_REVISION,
+            )
+            command.stamp(config, PRE_BOOKS_REVISION)
+            command.upgrade(config, "head")
         elif has_request_id:
             # Schema was created by create_all from pre-shipping_settings
             # models; adopt it there and replay the later migrations.

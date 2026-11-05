@@ -205,7 +205,7 @@ def test_bootstrap_adopts_pre_settings_create_all_schema(tmp_path, monkeypatch):
     tables = [
         table
         for name, table in models.Base.metadata.tables.items()
-        if name != "shipping_settings"
+        if name not in ("shipping_settings", "books")
     ]
     models.Base.metadata.create_all(engine, tables=tables)
     engine.dispose()

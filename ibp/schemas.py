@@ -7,6 +7,7 @@ from typing import Annotated, Any, Optional
 from pydantic import (
     AfterValidator,
     BaseModel,
+    ConfigDict,
     Field,
     StringConstraints,
     field_serializer,
@@ -357,3 +358,21 @@ class ShippingSettings(BaseModel):
 
     return_address: ReturnAddress
     unit_recipient_name: RequiredText
+
+
+class Book(BaseModel):
+    """Title and author for an ISBN, from the lookup cache or the providers.
+
+    ``source`` is ``claude`` when Claude merged the providers' answers (with
+    its ``confidence``: ``high``, ``medium`` or ``low``), otherwise the
+    provider used (``isbndb``, ``openlibrary``, ``google``, ``loc``) or
+    ``manual``.
+    """
+
+    isbn: str
+    title: str
+    author: Optional[str] = None
+    source: str
+    confidence: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
