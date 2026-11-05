@@ -15,7 +15,11 @@ from sqlalchemy.orm import selectinload
 
 from . import db, metrics, models, schemas, warnings
 from .base import app
-from .labels import render_request_label
+from .labels import (
+    label_package_id,
+    render_request_label,
+    render_request_label_pdf,
+)
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
 from .upsert import inmates_by_name as upsert_inmates_by_name
 
@@ -656,17 +660,13 @@ async def delete_request(
         await session.delete(request)
 
 
-@app.get(
-    "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}/label",
-    response_class=Response,
-)
-async def get_request_label(
+async def load_label_request(
+    session: AsyncSession,
     jurisdiction: schemas.JurisdictionEnum,
     inmate_id: int,
     request_index: int,
-    session: AsyncSession = Depends(get_session),
-):
-    """Return a PNG label image for a request."""
+) -> models.Request:
+    """Load a request with its inmate and unit for label rendering, or 404."""
     request = (
         await session.execute(
             select(models.Request)
@@ -686,10 +686,49 @@ async def get_request_label(
             status_code=status.HTTP_404_NOT_FOUND, detail="Request not found."
         )
 
+    return request
+
+
+@app.get(
+    "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}/label",
+    response_class=Response,
+)
+async def get_request_label(
+    jurisdiction: schemas.JurisdictionEnum,
+    inmate_id: int,
+    request_index: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a PNG label image for a request."""
+    request = await load_label_request(session, jurisdiction, inmate_id, request_index)
     image = render_request_label(request)
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return Response(content=buffer.getvalue(), media_type="image/png")
+
+
+@app.get(
+    "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}/label.pdf",
+    response_class=Response,
+)
+async def get_request_label_pdf(
+    jurisdiction: schemas.JurisdictionEnum,
+    inmate_id: int,
+    request_index: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Return a request label as a one-page PDF sized exactly to the label.
+
+    Browsers print a PDF at its own page size, so this is the reliable
+    fallback when the print server is unavailable.
+    """
+    request = await load_label_request(session, jurisdiction, inmate_id, request_index)
+    filename = f"{label_package_id(request)}.pdf"
+    return Response(
+        content=render_request_label_pdf(request),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @app.get(
