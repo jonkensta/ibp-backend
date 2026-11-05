@@ -22,20 +22,48 @@ During development you can launch the application with FastAPI's development ser
 uv run fastapi dev ibp
 ```
 
-For a production build use the regular `run` command:
+It listens on [localhost:8000](http://localhost:8000) and, with the sample
+config, uses `data.db` in the project directory. Create the schema first with
+`uv run python -m ibp.db_bootstrap`.
 
-```bash
-uv run fastapi run
-```
+## Configuration
 
-Both commands start the application on [localhost:8000](http://localhost:8000) by default. Configuration such as database location and logging options can be adjusted in `conf/server.conf`.
+The server reads exactly one INI config file, found in this order:
+
+1. the path in the `CONF` environment variable (relative paths are resolved
+   against the project directory). If `CONF` is set and the file does not
+   exist, startup fails with an error naming the path.
+2. `server.conf` in the project directory, if it exists (gitignored; copy
+   `sample.conf` to start one).
+3. `sample.conf`, the committed template, whose defaults are the production
+   values.
+
+The file is not merged with `sample.conf`, so a `server.conf` must contain
+every section. Values may use `${VAR}` (required environment variable) or
+`${VAR:-default}`; for example the database URI is
+`${DATABASE_URL:-sqlite+aiosqlite:///data.db}`.
 
 ## Deployment
 
-Production runs natively on a Raspberry Pi behind nginx, without Docker. The
-production config template, the systemd unit, the nginx site and the
-step-by-step install, cutover and rollback procedure are in
-[`deploy/`](deploy/README.md).
+Production runs on `ibp-server`, a Raspberry Pi 4B, as a Docker Compose
+stack defined in [`deploy/pi/`](deploy/pi/README.md):
+
+- `ibp-frontend`: nginx on port 80, serving the React app and proxying
+  `/api/` to the backend.
+- `ibp-backend`: this app under uvicorn on port 8000, reachable only from the
+  frontend container. Its entrypoint runs `python -m ibp.db_bootstrap`, which
+  creates the schema on an empty database or applies pending alembic
+  migrations, then starts the server.
+
+Both images are built for amd64 and arm64 by GitHub Actions
+(`.github/workflows/docker.yml`) and published to GHCR as
+`ghcr.io/jonkensta/ibp-backend` and `ghcr.io/jonkensta/ibp-frontend`, tagged
+`main`, `sha-<sha>` and `vX.Y.Z`; production pins a release tag via `IBP_TAG`
+in `/srv/ibp/.env`. The backend needs no config file there: it uses the
+image's `sample.conf` with `DATABASE_URL` pointing at `/data/data.db`, a host
+directory bind-mounted into the container. Setup, upgrades, backups and
+overriding the config are covered in
+[`deploy/pi/README.md`](deploy/pi/README.md).
 
 ## Migrating from the legacy database
 
@@ -62,4 +90,4 @@ DATABASE_URL=sqlite+aiosqlite:///path/to/new.db \
 Running `python -m ibp.db_bootstrap` afterwards (as the container entrypoint
 does) is harmless; it finds the stamped schema and has nothing to do.
 
-Run the tests with `uv run --group dev pytest`.
+Run the tests with `uv run pytest -q`.
