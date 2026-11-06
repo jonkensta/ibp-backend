@@ -13,6 +13,7 @@ from sqlalchemy.orm import Mapped, relationship
 from sqlalchemy.schema import (
     CheckConstraint,
     ForeignKeyConstraint,
+    Index,
     PrimaryKeyConstraint,
 )
 
@@ -226,6 +227,108 @@ class Request(HasInmateIndex, Base):
     )
 
     request_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    # Incremented on every add, edit or delete of the request's items, in the
+    # same transaction (see ibp/package_api.py).
+    contents_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sqlalchemy.text("0")
+    )
+
+    items: Mapped[list["PackageItem"]] = relationship(
+        "PackageItem",
+        back_populates="request",
+        order_by="PackageItem.id",
+        cascade="all, delete-orphan",
+        collection_class=list,
+    )
+
+
+# The columns of a request's key, as referenced by package items and
+# registrations.
+REQUEST_KEY_COLUMNS = ["inmate_jurisdiction", "inmate_id", "request_index"]
+REQUEST_KEY_TARGETS = [
+    "requests.inmate_jurisdiction",
+    "requests.inmate_id",
+    "requests.index",
+]
+
+
+class PackageItem(Base):
+    """Sqlalchemy model for a book recorded in a filled request's package.
+
+    ``id`` uses ``AUTOINCREMENT`` on SQLite so a deleted item's id is never
+    given to a new item (a stale registration queue must not act on a
+    different book). ``revision`` is incremented on every edit, and callers
+    acting on an item pass the revision they saw. ``registered_at`` is set
+    once the book is registered on the TDCJ Book Portal; a registered item is
+    read-only.
+    """
+
+    __tablename__ = "package_items"
+
+    __table_args__ = (
+        ForeignKeyConstraint(REQUEST_KEY_COLUMNS, REQUEST_KEY_TARGETS),
+        Index("ix_package_items_request", *REQUEST_KEY_COLUMNS),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    inmate_jurisdiction: Mapped[str] = mapped_column(Jurisdiction, nullable=False)
+    inmate_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sqlalchemy.text("0")
+    )
+
+    isbn: Mapped[Optional[str]] = mapped_column(String(13))
+    title: Mapped[str] = mapped_column(String(100), nullable=False)
+    author: Mapped[Optional[str]] = mapped_column(String(100))
+    source: Mapped[str] = mapped_column(
+        Enum("isbn", "manual", name="item_source_enum", native_enum=False),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime.datetime] = mapped_column(TZDateTime(), nullable=False)
+    updated_at: Mapped[datetime.datetime] = mapped_column(TZDateTime(), nullable=False)
+    registered_at: Mapped[Optional[datetime.datetime]] = mapped_column(TZDateTime())
+
+    request: Mapped["Request"] = relationship(
+        "Request", back_populates="items", uselist=False
+    )
+
+
+class Registration(Base):
+    """Sqlalchemy model for one successful TDCJ Book Portal registration.
+
+    Append-only: the permanent record of what TDCJ got. ``item_id`` is kept
+    (without a foreign key) after the item itself is deleted, and a request
+    with registrations cannot be deleted. ``tdcj_number`` is the inmate
+    number as sent to the portal (zero-padded to 8 digits).
+    """
+
+    __tablename__ = "registrations"
+
+    __table_args__ = (
+        ForeignKeyConstraint(REQUEST_KEY_COLUMNS, REQUEST_KEY_TARGETS),
+        Index("ix_registrations_request", *REQUEST_KEY_COLUMNS),
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    item_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
+    inmate_jurisdiction: Mapped[str] = mapped_column(Jurisdiction, nullable=False)
+    inmate_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_index: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    title: Mapped[str] = mapped_column(String(100), nullable=False)
+    author: Mapped[Optional[str]] = mapped_column(String(100))
+    tdcj_number: Mapped[str] = mapped_column(String(8), nullable=False)
+    registered_at: Mapped[datetime.datetime] = mapped_column(
+        TZDateTime(), nullable=False
+    )
 
 
 class Comment(HasInmateIndex, Base):
