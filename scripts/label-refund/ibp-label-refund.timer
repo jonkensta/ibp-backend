@@ -1,0 +1,9 @@
+[Unit]
+Description=EasyPost unused-label refunds (Wed 10am)
+
+[Timer]
+OnCalendar=Wed *-*-* 10:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

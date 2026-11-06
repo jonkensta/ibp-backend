@@ -1,0 +1,13 @@
+[Unit]
+Description=Request EasyPost refunds for unscanned labels 14-29 days old
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=jstarr
+Group=jstarr
+# Dry run until the output has been checked; then set IBP_REFUND_MODE=apply.
+Environment=IBP_REFUND_MODE=dry-run
+ExecStart=/home/jstarr/.local/bin/ibp-label-refund
+Nice=10
