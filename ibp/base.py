@@ -240,7 +240,17 @@ def configure_external_loggers(handlers):
     ones (uvicorn's) get the file handlers so their errors land in the log
     file; they already write to stderr themselves.
     """
-    logger_names = ["asyncio", "uvicorn", "sqlalchemy.engine", "aiosqlite"]
+    # The HTTP clients log each request URL at INFO, and a Google Books
+    # lookup carries its API key in the query string.
+    logger_names = [
+        "asyncio",
+        "uvicorn",
+        "sqlalchemy.engine",
+        "aiosqlite",
+        "httpx",
+        "httpx2",
+        "httpcore",
+    ]
     loggers = (logging.getLogger(name) for name in logger_names)
     for logger in loggers:
         logger.setLevel(logging.ERROR)
