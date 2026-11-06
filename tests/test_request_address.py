@@ -112,7 +112,7 @@ def test_request_address(client):
         **EXPECTED_ADDRESS,
         "request_index": 0,
         "request_id": 501,
-        "code": "TEX-12345-0",
+        "code": "TEX-00012345-0",
         "action": "Filled",
     }
 
@@ -161,7 +161,7 @@ def test_legacy_request_address(client):
         **EXPECTED_ADDRESS,
         "request_index": 0,
         "request_id": 501,
-        "code": "TEX-12345-0",
+        "code": "TEX-00012345-0",
         "action": "Filled",
     }
 
@@ -209,7 +209,7 @@ ADDRESS_TEX_0 = {
     **EXPECTED_ADDRESS,
     "request_index": 0,
     "request_id": 501,
-    "code": "TEX-12345-0",
+    "code": "TEX-00012345-0",
     "action": "Filled",
 }
 
@@ -239,12 +239,12 @@ def test_request_address_by_code_tossed(client):
     response = client.get("/requests/TEX-12345-1/address")
     assert response.status_code == 200
     assert response.json()["action"] == "Tossed"
-    assert response.json()["code"] == "TEX-12345-1"
+    assert response.json()["code"] == "TEX-00012345-1"
 
 
 @pytest.mark.usefixtures("no_side_effects")
 @pytest.mark.parametrize(
-    "code", ["TEX-12345-7", "TEX-99999999-0", "FED-12345-0", "TEX-12345", "junk"]
+    "code", ["TEX-00012345-7", "TEX-99999999-0", "FED-00012345-0", "TEX-12345", "junk"]
 )
 def test_request_address_by_code_not_found(client, code):
     """Unknown and malformed codes are one 404."""
@@ -280,8 +280,8 @@ def test_legacy_inmate(client, url):
     inmate = response.json()
     assert (inmate["jurisdiction"], inmate["id"]) == ("Texas", 12345)
     assert sorted(request["code"] for request in inmate["requests"]) == [
-        "TEX-12345-0",
-        "TEX-12345-1",
+        "TEX-00012345-0",
+        "TEX-00012345-1",
     ]
 
 

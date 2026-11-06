@@ -147,13 +147,15 @@ def get_shipping_method(unit: typing.Any) -> str:
 
 
 def label_package_id(request: Request) -> str:
-    """Return the request code printed on a request label, e.g. TEX-12345-0.
+    """Return the request code printed on a request label, e.g. TEX-00012345-0.
+
+    The inmate number is zero-padded to 8 digits, like TDCJ and BOP numbers.
 
     This is the one formatter for request codes; ``parse_request_code`` reads
     them back.
     """
     jurisdiction_code = "TEX" if request.inmate_jurisdiction == "Texas" else "FED"
-    return f"{jurisdiction_code}-{request.inmate_id}-{request.index}"
+    return f"{jurisdiction_code}-{request.inmate_id:08d}-{request.index}"
 
 
 @dataclass(frozen=True)
@@ -175,9 +177,10 @@ _REQUEST_CODE_PATTERN = re.compile(
 
 
 def parse_request_code(code: str) -> typing.Optional[RequestKey]:
-    """Parse a request code such as ``TEX-1234567-2``, or return None.
+    """Parse a request code such as ``TEX-01234567-2``, or return None.
 
-    Case-insensitive; the inmate number may be zero-padded (``TEX-01234567-2``).
+    Case-insensitive; the inmate number may also be unpadded
+    (``TEX-1234567-2``), as on labels printed before v1.0.9.
     ``TEX`` is Texas and ``FED`` is Federal.
     """
     match = _REQUEST_CODE_PATTERN.fullmatch(code.strip())
@@ -221,7 +224,7 @@ def render_request_label(
 
     # inmate name and ID
     box = build_box_from_percentages(5, 50, 95, 75)
-    name_line = f"{get_inmate_name(request.inmate)} #{request.inmate_id}"
+    name_line = f"{get_inmate_name(request.inmate)} #{request.inmate_id:08d}"
     add_text(draw, box, name_line.upper())
 
     # jurisdiction, unit, shipping
