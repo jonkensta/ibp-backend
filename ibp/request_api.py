@@ -10,6 +10,7 @@ response includes the code.
 import io
 import logging
 
+import sqlalchemy
 from fastapi import Depends, HTTPException, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -25,6 +26,7 @@ from .api import (
 )
 from .base import app
 from .labels import (
+    RequestKey,
     label_package_id,
     parse_request_code,
     render_request_label,
@@ -34,25 +36,31 @@ from .labels import (
 logger = logging.getLogger(__name__)
 
 
+def request_key(code: str) -> RequestKey:
+    """Parse a request code, or 404 "Request not found." if malformed."""
+    key = parse_request_code(code)
+    if key is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Request not found.")
+    return key
+
+
 async def load_request(session: AsyncSession, code: str, *options) -> models.Request:
     """Return the request with a request code, or 404 if malformed or unknown."""
-    key = parse_request_code(code)
-    if key is not None:
-        request = (
-            await session.execute(
-                select(models.Request)
-                .where(
-                    models.Request.inmate_jurisdiction == key.jurisdiction,
-                    models.Request.inmate_id == key.inmate_id,
-                    models.Request.index == key.index,
-                )
-                .options(*options)
+    key = request_key(code)
+    request = (
+        await session.execute(
+            select(models.Request)
+            .where(
+                models.Request.inmate_jurisdiction == key.jurisdiction,
+                models.Request.inmate_id == key.inmate_id,
+                models.Request.index == key.index,
             )
-        ).scalar_one_or_none()
-        if request is not None:
-            return request
-
-    raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Request not found.")
+            .options(*options)
+        )
+    ).scalar_one_or_none()
+    if request is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Request not found.")
+    return request
 
 
 async def load_request_with_unit(session: AsyncSession, code: str) -> models.Request:
@@ -92,11 +100,57 @@ async def get_address_by_legacy_id(
 
 @app.delete("/requests/{code}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_request(code: str, session: AsyncSession = Depends(get_session)):
-    """Delete a request. Its index is never reused."""
+    """Delete a request. Its index is never reused.
+
+    A request with books recorded (409; delete them first) or with any book
+    ever registered on the portal (409, even after the items are deleted)
+    can't be deleted. The conditional ``DELETE`` is the transaction's first
+    statement, so a concurrent item add can't slip in between check and
+    delete.
+    """
+    key = request_key(code)
     async with session.begin():
-        request = await load_request(session, code)
-        logger.debug("deleting request")
-        await session.delete(request)
+        deleted = (
+            await session.execute(
+                sqlalchemy.delete(models.Request)
+                .where(
+                    models.Request.inmate_jurisdiction == key.jurisdiction,
+                    models.Request.inmate_id == key.inmate_id,
+                    models.Request.index == key.index,
+                    ~has_rows(models.PackageItem, key),
+                    ~has_rows(models.Registration, key),
+                )
+                .returning(models.Request.index)
+                .execution_options(synchronize_session=False)
+            )
+        ).scalar_one_or_none()
+
+        if deleted is None:
+            await load_request(session, code)
+            if await session.scalar(
+                sqlalchemy.select(has_rows(models.Registration, key))
+            ):
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail="Request has books registered on the portal, "
+                    "so it can't be deleted.",
+                )
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                detail="Request has books recorded; delete them first.",
+            )
+        logger.debug("deleted request")
+
+
+def has_rows(
+    model: type[models.PackageItem] | type[models.Registration], key: RequestKey
+) -> sqlalchemy.Exists:
+    """Whether ``model`` has rows for the request with ``key``."""
+    return sqlalchemy.exists().where(
+        model.inmate_jurisdiction == key.jurisdiction,
+        model.inmate_id == key.inmate_id,
+        model.request_index == key.index,
+    )
 
 
 @app.get("/requests/{code}/address", response_model=schemas.RequestAddress)

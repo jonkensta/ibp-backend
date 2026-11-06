@@ -205,14 +205,16 @@ def test_bootstrap_adopts_pre_settings_create_all_schema(tmp_path, monkeypatch):
     tables = [
         table
         for name, table in models.Base.metadata.tables.items()
-        if name not in ("shipping_settings", "books")
+        if name not in ("shipping_settings", "books", "package_items", "registrations")
     ]
     models.Base.metadata.create_all(engine, tables=tables)
     with engine.begin() as connection:
         # Added after this schema's era.
-        connection.execute(
-            sqlalchemy.text("ALTER TABLE inmates DROP COLUMN next_request_index")
-        )
+        for column in ["inmates.next_request_index", "requests.contents_revision"]:
+            table, name = column.split(".")
+            connection.execute(
+                sqlalchemy.text(f"ALTER TABLE {table} DROP COLUMN {name}")  # nosec
+            )
     engine.dispose()
 
     monkeypatch.setattr(db_bootstrap, "get_sync_database_url", lambda: url)

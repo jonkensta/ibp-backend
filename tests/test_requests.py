@@ -46,6 +46,7 @@ def test_add_request(client, seeded):
         "request_id": None,
         "index": 0,
         "code": "TEX-12345-0",
+        "contents_revision": 0,
     }
 
     with seeded() as session:

@@ -87,9 +87,13 @@ def test_bootstrap_adopts_pre_next_request_index_schema(tmp_path, monkeypatch):
     try:
         ibp.models.Base.metadata.create_all(engine)
         with engine.begin() as connection:
-            connection.execute(
-                sqlalchemy.text("ALTER TABLE inmates DROP COLUMN next_request_index")
-            )
+            for statement in [
+                "DROP TABLE registrations",
+                "DROP TABLE package_items",
+                "ALTER TABLE requests DROP COLUMN contents_revision",
+                "ALTER TABLE inmates DROP COLUMN next_request_index",
+            ]:
+                connection.execute(sqlalchemy.text(statement))
         insert_inmates(engine)
 
         monkeypatch.setattr(db_bootstrap, "get_sync_database_url", lambda: url)
