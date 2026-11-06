@@ -60,19 +60,32 @@ def isbn10_check_digit(first9: str) -> str:
     return "X" if check == 10 else str(check)
 
 
-# Unicode categories dropped from an entered ISBN: format characters (LRM,
-# zero-width space), space separators (no-break space) and dashes.
-_ISBN_IGNORED_CATEGORIES = {"Cf", "Zs", "Zl", "Zp", "Pd"}
+# A leading label such as "ISBN", "ISBN-13:" or "isbn 10". The 10/13 only
+# counts as part of the label when no digit follows it, so an ISBN-10 that
+# starts with 10 or 13 ("ISBN 1305504917") keeps its digits.
+_ISBN_LABEL = re.compile(r"^ISBN(?:[- ]?1[03](?!\d))?[ :]*", re.IGNORECASE)
 
 
 def compact_isbn(raw: str) -> str:
-    """Strip what normalize_isbn ignores, keeping the digits (and any X)."""
-    kept = "".join(
-        ch
-        for ch in raw
-        if not ch.isspace() and unicodedata.category(ch) not in _ISBN_IGNORED_CATEGORIES
-    )
-    return re.sub(r"^ISBN(?:1[03])?:?", "", kept, flags=re.IGNORECASE).upper()
+    """Strip what normalize_isbn ignores, keeping the digits (and any X).
+
+    Invisible format characters (left-to-right marks, zero-width spaces) are
+    dropped, any dash reads as a hyphen and any space as a space; then a
+    leading label goes, then the hyphens and spaces.
+    """
+    chars = []
+    for ch in raw:
+        category = unicodedata.category(ch)
+        if category == "Cf":
+            continue
+        if category == "Pd":
+            chars.append("-")
+        elif ch.isspace() or category.startswith("Z"):
+            chars.append(" ")
+        else:
+            chars.append(ch)
+    text = _ISBN_LABEL.sub("", "".join(chars).strip())
+    return re.sub(r"[ -]", "", text).upper()
 
 
 def normalize_isbn(raw: str) -> Optional[str]:
