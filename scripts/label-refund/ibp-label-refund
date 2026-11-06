@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Request EasyPost refunds for USPS labels that were never scanned.
+
+A label qualifies when it was bought MIN_AGE to MAX_AGE days ago, USPS has
+no scan for it (tracker refreshed from EasyPost first), and no refund has
+been requested. EasyPost only refunds unscanned USPS labels within 30 days
+of purchase, so a weekly run refunds each one at day 14-21 and a missed run
+is caught the next week.
+
+Dry run unless IBP_REFUND_MODE=apply (or --apply). If more than MAX_REFUNDS
+labels qualify, nothing is refunded and the run fails: that many unused
+labels means something else is wrong.
+
+Prints shipment ids, tracking codes, dates and amounts only (no recipient
+names or addresses). Refunds requested are appended to
+~/.local/state/ibp-label-refund/refunds.csv.
+
+Config (mode 0600, outside the repo):
+    ~/.config/ibp-label-refund/easypost-api-key   production key (EZAK...)
+    ~/.config/ibp-label-refund/ping-url           Healthchecks URL (optional)
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import csv
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+API = "https://api.easypost.com/v2"
+CONFIG = Path.home() / ".config" / "ibp-label-refund"
+STATE = Path.home() / ".local" / "state" / "ibp-label-refund"
+MIN_AGE = timedelta(days=14)
+MAX_AGE = timedelta(days=29)
+MAX_REFUNDS = 15
+# Tracker statuses that mean USPS has not handled the package.
+PRE_SCAN = {None, "", "unknown", "pre_transit"}
+DONE_REFUND = {"submitted", "refunded", "rejected"}
+
+
+class ApiError(RuntimeError):
+    pass
+
+
+def request(method: str, path: str, key: str, params: dict | None = None) -> dict:
+    url = f"{API}/{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    auth = base64.b64encode(f"{key}:".encode()).decode()
+    req = urllib.request.Request(
+        url, method=method, headers={"Authorization": f"Basic {auth}"}
+    )
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as err:
+            # Never retry a POST: a refund request that timed out may have landed.
+            if method == "GET" and err.code in (429, 500, 502, 503, 504):
+                time.sleep(2**attempt)
+                continue
+            body = err.read().decode(errors="replace")[:300]
+            raise ApiError(f"{method} {path}: HTTP {err.code} {body}") from err
+        except urllib.error.URLError as err:
+            if method == "GET" and attempt < 5:
+                time.sleep(2**attempt)
+                continue
+            raise ApiError(f"{method} {path}: {err.reason}") from err
+    raise ApiError(f"{method} {path}: giving up after retries")
+
+
+def parse_ts(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def scanned(tracker: dict | None) -> bool:
+    if not tracker:
+        return False
+    if tracker.get("status") not in PRE_SCAN:
+        return True
+    return any(
+        d.get("status") not in PRE_SCAN for d in tracker.get("tracking_details") or []
+    )
+
+
+@dataclass
+class Label:
+    shipment_id: str
+    tracking_code: str
+    created_at: str
+    rate: float
+    tracker_id: str | None
+
+
+def first_pass(
+    shipments: list[dict], now: datetime
+) -> tuple[list[Label], dict[str, int]]:
+    """Pick labels worth a fresh tracker check, from the shipment list alone."""
+    skipped = {
+        "scanned": 0,
+        "refund_requested": 0,
+        "not_usps": 0,
+        "no_tracker": 0,
+        "out_of_window": 0,
+    }
+    out = []
+    for s in shipments:
+        rate = s.get("selected_rate") or {}
+        if not s.get("tracking_code") or not rate:
+            continue  # never bought
+        if (s.get("mode") or "production") != "production":
+            continue
+        age = now - parse_ts(s["created_at"])
+        if not MIN_AGE <= age <= MAX_AGE:
+            skipped["out_of_window"] += 1
+            continue
+        if (s.get("refund_status") or "") in DONE_REFUND:
+            skipped["refund_requested"] += 1
+            continue
+        if (rate.get("carrier") or "").upper() != "USPS":
+            skipped["not_usps"] += 1
+            continue
+        tracker = s.get("tracker")
+        if not tracker or not tracker.get("id"):
+            skipped["no_tracker"] += 1  # can't verify it was never scanned
+            continue
+        if scanned(tracker):
+            skipped["scanned"] += 1
+            continue
+        out.append(
+            Label(
+                s["id"],
+                s["tracking_code"],
+                s["created_at"],
+                float(rate.get("rate") or 0),
+                tracker["id"],
+            )
+        )
+    return out, skipped
+
+
+def list_shipments(key: str, now: datetime) -> list[dict]:
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    params = {
+        "page_size": 100,
+        "purchased": "true",
+        "start_datetime": (now - MAX_AGE - timedelta(days=1)).strftime(fmt),
+        "end_datetime": (now - MIN_AGE + timedelta(days=1)).strftime(fmt),
+    }
+    by_id: dict[str, dict] = {}
+    while True:
+        data = request("GET", "shipments", key, params)
+        batch = data.get("shipments") or []
+        for s in batch:
+            by_id[s["id"]] = s
+        if not batch or not data.get("has_more"):
+            return list(by_id.values())
+        params["before_id"] = batch[-1]["id"]
+        time.sleep(0.3)
+
+
+def read_secret(name: str) -> str | None:
+    path = CONFIG / name
+    try:
+        return path.read_text().strip() or None
+    except FileNotFoundError:
+        return None
+
+
+def ping(url: str | None, suffix: str, body: str = "") -> None:
+    if not url:
+        return
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(url + suffix, data=body.encode()[-10000:]),
+            timeout=15,
+        )
+    except OSError as err:
+        print(f"healthchecks ping failed: {err}", file=sys.stderr)
+
+
+def run(key: str, apply: bool, log: list[str]) -> int:
+    def say(msg: str) -> None:
+        print(msg, flush=True)
+        log.append(msg)
+
+    now = datetime.now(timezone.utc)
+    shipments = list_shipments(key, now)
+    maybe, skipped = first_pass(shipments, now)
+    candidates = []
+    for label in maybe:
+        tracker = request("GET", f"trackers/{label.tracker_id}", key)
+        time.sleep(0.2)
+        if scanned(tracker):
+            skipped["scanned"] += 1
+        else:
+            candidates.append(label)
+    total = sum(c.rate for c in candidates)
+    say(
+        f"{'APPLY' if apply else 'DRY RUN'}: {len(shipments)} labels bought "
+        f"{MIN_AGE.days}-{MAX_AGE.days} days ago (+1 day margin); "
+        f"{len(candidates)} never scanned and not refunded (${total:.2f}); skipped {skipped}"
+    )
+    for c in candidates:
+        say(f"  {c.shipment_id} {c.tracking_code} bought {c.created_at} ${c.rate:.2f}")
+    if len(candidates) > MAX_REFUNDS:
+        say(
+            f"REFUSING: {len(candidates)} labels qualify, more than the limit of {MAX_REFUNDS}; "
+            "check what happened and refund by hand"
+        )
+        return 2
+    if not apply or not candidates:
+        return 0
+
+    STATE.mkdir(parents=True, exist_ok=True)
+    record = STATE / "refunds.csv"
+    new_file = not record.exists()
+    failed = 0
+    with record.open("a", newline="") as fh:
+        w = csv.writer(fh)
+        if new_file:
+            w.writerow(
+                [
+                    "requested_at",
+                    "shipment_id",
+                    "tracking_code",
+                    "bought",
+                    "rate",
+                    "result",
+                ]
+            )
+        for c in candidates:
+            try:
+                res = request("POST", f"shipments/{c.shipment_id}/refund", key)
+                result = res.get("refund_status") or "?"
+            except ApiError as err:
+                result = f"error: {err}"
+                failed += 1
+            w.writerow(
+                [
+                    now.isoformat(timespec="seconds"),
+                    c.shipment_id,
+                    c.tracking_code,
+                    c.created_at,
+                    f"{c.rate:.2f}",
+                    result,
+                ]
+            )
+            fh.flush()
+            say(f"  refund {c.shipment_id}: {result}")
+            time.sleep(0.5)
+    say(f"refunds requested: {len(candidates) - failed} ok, {failed} failed")
+    return 1 if failed else 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--apply", action="store_true", help="request refunds (default: dry run)"
+    )
+    args = ap.parse_args()
+    apply = args.apply or os.environ.get("IBP_REFUND_MODE") == "apply"
+    key = os.environ.get("EASYPOST_API_KEY") or read_secret("easypost-api-key")
+    if not key:
+        sys.exit(
+            f"no EasyPost key: set EASYPOST_API_KEY or create {CONFIG / 'easypost-api-key'}"
+        )
+    if not key.startswith("EZAK"):
+        sys.exit("refusing: not a production EasyPost key (EZAK...)")
+    ping_url = read_secret("ping-url")
+    ping(ping_url, "/start")
+    log: list[str] = []
+    try:
+        code = run(key, apply, log)
+    except Exception as err:  # report any failure to Healthchecks
+        msg = f"FAILED: {type(err).__name__}: {err}"
+        print(msg, file=sys.stderr)
+        log.append(msg)
+        code = 1
+    ping(ping_url, f"/{code}", "\n".join(log))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
