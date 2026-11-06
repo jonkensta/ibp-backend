@@ -156,7 +156,8 @@ def label_package_id(request: Request) -> str:
     return f"{jurisdiction_code}-{request.inmate_id}-{request.index}"
 
 
-class RequestKey(typing.NamedTuple):
+@dataclass(frozen=True)
+class RequestKey:
     """The stored key of a request: (jurisdiction, inmate ID, request index)."""
 
     jurisdiction: str
