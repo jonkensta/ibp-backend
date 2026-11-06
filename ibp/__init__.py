@@ -1,4 +1,4 @@
 """IBP FastAPI application."""
 
-from . import api, book_api, label_api, models
+from . import api, book_api, models, request_api
 from .base import app, config

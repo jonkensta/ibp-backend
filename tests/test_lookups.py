@@ -182,9 +182,11 @@ def test_crud_and_reads_do_not_record_lookups(client, lookup_count):
     calls = [
         client.post(f"{INMATE_URL}/requests/validate", json=request),
         client.post(f"{INMATE_URL}/requests", json=request),
-        client.get(f"{INMATE_URL}/requests/1/label"),
+        client.get("/requests/TEX-12345-1/label"),
+        client.get("/requests/TEX-12345-1/label.pdf"),
+        client.get("/requests/TEX-12345-1/address"),
         client.get(f"{INMATE_URL}/requests/1/address"),
-        client.delete(f"{INMATE_URL}/requests/1"),
+        client.delete("/requests/TEX-12345-1"),
         client.post(f"{INMATE_URL}/comments", json={"author": "a", "body": "b"}),
         client.delete(f"{INMATE_URL}/comments/1"),
         client.get(f"{INMATE_URL}/warnings"),

@@ -78,7 +78,7 @@ def test_add_request_indices_fill_gaps(client, seeded):
     for expected in range(3):
         assert client.post(REQUESTS_URL, json=NEW_REQUEST).json()["index"] == expected
 
-    assert client.delete(f"{REQUESTS_URL}/1").status_code == 204
+    assert client.delete("/requests/TEX-12345-1").status_code == 204
     assert client.post(REQUESTS_URL, json=NEW_REQUEST).json()["index"] == 1
     assert _indices(seeded) == [0, 1, 2]
 
@@ -112,19 +112,39 @@ def test_delete_request(client, seeded):
     client.post(REQUESTS_URL, json=NEW_REQUEST)
     client.post(REQUESTS_URL, json=NEW_REQUEST)
 
-    response = client.delete(f"{REQUESTS_URL}/0")
+    response = client.delete("/requests/TEX-12345-0")
     assert response.status_code == 204
     assert not response.content
     assert _indices(seeded) == [1]
 
-    assert client.delete(f"{REQUESTS_URL}/0").status_code == 404
+    response = client.delete("/requests/TEX-12345-0")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Request not found."
     assert _indices(seeded) == [1]
 
 
-def test_delete_request_not_found(client, seeded):
-    """Unknown inmates and indices are 404s."""
+def test_delete_request_by_lowercase_padded_code(client, seeded):
+    """The code is case-insensitive and may zero-pad the inmate number."""
     client.post(REQUESTS_URL, json=NEW_REQUEST)
-    assert client.delete(f"{REQUESTS_URL}/5").status_code == 404
-    assert client.delete("/inmates/Texas/99999/requests/0").status_code == 404
-    assert client.delete("/inmates/Federal/12345/requests/0").status_code == 404
+    assert client.delete("/requests/tex-00012345-0").status_code == 204
+    assert not _indices(seeded)
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["TEX-12345-5", "TEX-99999-0", "FED-12345-0", "TEX-12345", "XYZ-12345-0", "0"],
+)
+def test_delete_request_not_found(client, seeded, code):
+    """Unknown and malformed codes are 404s and delete nothing."""
+    client.post(REQUESTS_URL, json=NEW_REQUEST)
+    response = client.delete(f"/requests/{code}")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Request not found."
+    assert _indices(seeded) == [0]
+
+
+def test_old_delete_path_is_gone(client, seeded):
+    """Deleting moved to /requests/{code}; the old inmate path deletes nothing."""
+    client.post(REQUESTS_URL, json=NEW_REQUEST)
+    assert client.delete(f"{REQUESTS_URL}/0").status_code == 404
     assert _indices(seeded) == [0]

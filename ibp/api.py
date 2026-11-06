@@ -181,34 +181,82 @@ async def search_inmates(
     return schemas.InmateSearchResults(inmates=inmates, errors=errors_as_strings)
 
 
-@app.get("/inmates/by-request/{request_id}", response_model=schemas.Inmate)
+async def load_request_by_legacy_id(
+    session: AsyncSession, legacy_id: int, *options
+) -> models.Request:
+    """Return the request with a legacy request ID (``request_id``), or 404."""
+    request = (
+        await session.execute(
+            select(models.Request)
+            .where(models.Request.request_id == legacy_id)
+            .options(*options)
+        )
+    ).scalar_one_or_none()
+
+    if request is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No request found with legacy request_id {legacy_id}",
+        )
+
+    return request
+
+
+async def inmate_by_legacy_request_id(
+    session: AsyncSession, legacy_id: int
+) -> models.Inmate:
+    """Return the inmate (as the inmate view shows it) of a legacy request."""
+    request = await load_request_by_legacy_id(
+        session,
+        legacy_id,
+        selectinload(models.Request.inmate).selectinload(models.Inmate.unit),
+        selectinload(models.Request.inmate).selectinload(models.Inmate.requests),
+        selectinload(models.Request.inmate).selectinload(models.Inmate.comments),
+        selectinload(models.Request.inmate).selectinload(models.Inmate.lookups),
+    )
+    return request.inmate
+
+
+async def address_by_legacy_request_id(
+    session: AsyncSession, legacy_id: int
+) -> schemas.RequestAddress:
+    """Return the shipping address of a legacy request."""
+    request = await load_request_by_legacy_id(
+        session,
+        legacy_id,
+        selectinload(models.Request.inmate).selectinload(models.Inmate.unit),
+    )
+    return build_request_address(request, await load_shipping_settings(session))
+
+
+# Deprecated aliases of /requests/legacy/{legacy_id}/... (ibp/request_api.py),
+# kept for shippy and extension 0.5.1. Declared before the
+# /inmates/{jurisdiction}/... routes so that "by-request" is not matched (and
+# rejected) as a jurisdiction.
+@app.get(
+    "/inmates/by-request/{request_id}",
+    response_model=schemas.Inmate,
+    include_in_schema=False,
+)
 async def get_inmate_by_legacy_request_id(
     request_id: int,
     session: AsyncSession = Depends(get_session),
 ):
-    """Look up inmate by legacy request ID for backward compatibility."""
-    # Find request with matching request_id
-    stmt = (
-        select(models.Request)
-        .where(models.Request.request_id == request_id)
-        .options(
-            selectinload(models.Request.inmate).selectinload(models.Inmate.unit),
-            selectinload(models.Request.inmate).selectinload(models.Inmate.requests),
-            selectinload(models.Request.inmate).selectinload(models.Inmate.comments),
-            selectinload(models.Request.inmate).selectinload(models.Inmate.lookups),
-        )
-    )
-    result = await session.execute(stmt)
-    request = result.scalar_one_or_none()
+    """Deprecated alias of ``GET /requests/legacy/{legacy_id}/inmate``."""
+    return await inmate_by_legacy_request_id(session, request_id)
 
-    if not request:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No request found with legacy request_id {request_id}",
-        )
 
-    # Return the inmate associated with this request
-    return request.inmate
+@app.get(
+    "/inmates/by-request/{request_id}/address",
+    response_model=schemas.RequestAddress,
+    include_in_schema=False,
+)
+async def get_request_address_by_legacy_request_id(
+    request_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Deprecated alias of ``GET /requests/legacy/{legacy_id}/address``."""
+    return await address_by_legacy_request_id(session, request_id)
 
 
 def format_addressee(inmate: models.Inmate) -> str:
@@ -345,39 +393,6 @@ async def update_shipping_settings(
 
     await session.refresh(row)
     return shipping_settings_to_schema(row)
-
-
-# Declared before the /inmates/{jurisdiction}/... routes so that
-# "by-request" is not matched (and rejected) as a jurisdiction.
-@app.get(
-    "/inmates/by-request/{request_id}/address",
-    response_model=schemas.RequestAddress,
-)
-async def get_request_address_by_legacy_request_id(
-    request_id: int,
-    session: AsyncSession = Depends(get_session),
-):
-    """Get the shipping address for a legacy request ID.
-
-    Read-only: does not record a lookup or query the inmate providers.
-    """
-    request = (
-        await session.execute(
-            select(models.Request)
-            .where(models.Request.request_id == request_id)
-            .options(
-                selectinload(models.Request.inmate).selectinload(models.Inmate.unit)
-            )
-        )
-    ).scalar_one_or_none()
-
-    if request is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No request found with legacy request_id {request_id}",
-        )
-
-    return build_request_address(request, await load_shipping_settings(session))
 
 
 def inmate_view_statement(jurisdiction: schemas.JurisdictionEnum, inmate_id: int):
@@ -625,37 +640,6 @@ async def add_request(
     return request
 
 
-@app.delete(
-    "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-async def delete_request(
-    jurisdiction: schemas.JurisdictionEnum,
-    inmate_id: int,
-    request_index: int,
-    session: AsyncSession = Depends(get_session),
-):
-    """Delete a request."""
-    async with session.begin():
-        request = (
-            await session.execute(
-                select(models.Request).where(
-                    models.Request.inmate_jurisdiction == jurisdiction,
-                    models.Request.inmate_id == inmate_id,
-                    models.Request.index == request_index,
-                )
-            )
-        ).scalar_one_or_none()
-
-        if request is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Request not found."
-            )
-
-        logger.debug("deleting request")
-        await session.delete(request)
-
-
 async def get_request_with_unit(
     session: AsyncSession,
     jurisdiction: schemas.JurisdictionEnum,
@@ -678,9 +662,12 @@ async def get_request_with_unit(
     ).scalar_one_or_none()
 
 
+# Deprecated alias of GET /requests/{code}/address (ibp/request_api.py), kept
+# for shippy; unlike it, the 404s name the inmate or request index.
 @app.get(
     "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}/address",
     response_model=schemas.RequestAddress,
+    include_in_schema=False,
 )
 async def get_request_address(
     jurisdiction: schemas.JurisdictionEnum,
@@ -688,7 +675,7 @@ async def get_request_address(
     request_index: int,
     session: AsyncSession = Depends(get_session),
 ):
-    """Get the shipping address for a request.
+    """Get the shipping address for a request (deprecated alias).
 
     Read-only: does not record a lookup or query the inmate providers, so it
     is safe to call once per shipped package.

@@ -64,7 +64,7 @@ def media_box_mm(pdf: bytes) -> tuple[float, float]:
 @pytest.mark.usefixtures("seeded")
 def test_label_png(client):
     """The PNG label is unchanged: 1004x378 px, 85x32 mm at 300 DPI."""
-    response = client.get("/inmates/Texas/12345/requests/0/label")
+    response = client.get("/requests/TEX-12345-0/label")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     assert Image.open(io.BytesIO(response.content)).size == (1004, 378)
@@ -73,7 +73,7 @@ def test_label_png(client):
 @pytest.mark.usefixtures("seeded")
 def test_label_pdf_is_one_page_at_label_size(client):
     """The PDF label is a single page sized exactly 85 x 32 mm."""
-    response = client.get("/inmates/Texas/12345/requests/0/label.pdf")
+    response = client.get("/requests/TEX-12345-0/label.pdf")
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pdf"
     assert response.headers["content-disposition"] == (
@@ -91,7 +91,7 @@ def test_label_pdf_is_one_page_at_label_size(client):
 @pytest.mark.usefixtures("seeded")
 def test_label_pdf_image_fills_page(client):
     """The page holds the full-resolution label image with no margins."""
-    pdf = client.get("/inmates/Texas/12345/requests/0/label.pdf").content
+    pdf = client.get("/requests/TEX-12345-0/label.pdf").content
     assert re.search(rb"/Width\s+1004\b", pdf)
     assert re.search(rb"/Height\s+378\b", pdf)
     # The content stream scales the image to the full MediaBox at the origin.
@@ -104,8 +104,29 @@ def test_label_pdf_image_fills_page(client):
 
 @pytest.mark.usefixtures("seeded")
 @pytest.mark.parametrize("suffix", ["label", "label.pdf"])
-def test_label_unknown_request(client, suffix):
-    """An unknown request is a 404 for both label formats."""
-    response = client.get(f"/inmates/Texas/12345/requests/7/{suffix}")
+def test_label_by_lowercase_padded_code(client, suffix):
+    """Any spelling of the code finds the request; the PDF keeps the canonical name."""
+    response = client.get(f"/requests/tex-00012345-0/{suffix}")
+    assert response.status_code == 200
+    if suffix == "label.pdf":
+        assert 'filename="TEX-12345-0.pdf"' in response.headers["content-disposition"]
+
+
+@pytest.mark.usefixtures("seeded")
+@pytest.mark.parametrize("suffix", ["label", "label.pdf"])
+@pytest.mark.parametrize(
+    "code", ["TEX-12345-7", "FED-12345-0", "TEX-99999-0", "TEX-12345", "nonsense"]
+)
+def test_label_unknown_request(client, suffix, code):
+    """Unknown and malformed codes are a 404 for both label formats."""
+    response = client.get(f"/requests/{code}/{suffix}")
     assert response.status_code == 404
     assert response.json()["detail"] == "Request not found."
+
+
+@pytest.mark.usefixtures("seeded")
+@pytest.mark.parametrize("suffix", ["label", "label.pdf"])
+def test_old_label_paths_are_gone(client, suffix):
+    """The label moved to /requests/{code}; the old inmate path is a 404."""
+    response = client.get(f"/inmates/Texas/12345/requests/0/{suffix}")
+    assert response.status_code == 404

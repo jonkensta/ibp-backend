@@ -203,3 +203,108 @@ def test_request_address_uses_saved_unit_recipient_name(client, url):
     response = client.get(url)
     assert response.status_code == 200
     assert response.json()["unit_recipient_name"] == "ATTN: MAIL ROOM"
+
+
+ADDRESS_TEX_0 = {
+    **EXPECTED_ADDRESS,
+    "request_index": 0,
+    "request_id": 501,
+    "code": "TEX-12345-0",
+    "action": "Filled",
+}
+
+
+@pytest.mark.usefixtures("no_side_effects")
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/requests/TEX-12345-0/address",
+        "/requests/tex-00012345-0/address",
+        "/requests/legacy/501/address",
+        # Deprecated aliases (shippy).
+        "/inmates/Texas/12345/requests/0/address",
+        "/inmates/by-request/501/address",
+    ],
+)
+def test_address_paths_agree(client, url):
+    """Every address path returns the same address, including the code."""
+    response = client.get(url)
+    assert response.status_code == 200
+    assert response.json() == ADDRESS_TEX_0
+
+
+@pytest.mark.usefixtures("no_side_effects")
+def test_request_address_by_code_tossed(client):
+    """Tossed requests are addressable by code too."""
+    response = client.get("/requests/TEX-12345-1/address")
+    assert response.status_code == 200
+    assert response.json()["action"] == "Tossed"
+    assert response.json()["code"] == "TEX-12345-1"
+
+
+@pytest.mark.usefixtures("no_side_effects")
+@pytest.mark.parametrize(
+    "code", ["TEX-12345-7", "TEX-99999999-0", "FED-12345-0", "TEX-12345", "junk"]
+)
+def test_request_address_by_code_not_found(client, code):
+    """Unknown and malformed codes are one 404."""
+    response = client.get(f"/requests/{code}/address")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Request not found."
+
+
+@pytest.mark.usefixtures("no_side_effects")
+def test_request_address_by_code_inmate_without_unit(client):
+    """A Federal code resolves; an inmate with no unit is still a 409."""
+    response = client.get("/requests/FED-7654321-0/address")
+    assert response.status_code == 409
+    assert "not assigned to a unit" in response.json()["detail"]
+
+
+@pytest.mark.usefixtures("no_side_effects")
+def test_legacy_address_unknown(client):
+    """An unknown legacy id is a 404 with the same detail as the old path."""
+    response = client.get("/requests/legacy/999/address")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "No request found with legacy request_id 999"
+
+
+@pytest.mark.usefixtures("no_side_effects")
+@pytest.mark.parametrize(
+    "url", ["/requests/legacy/501/inmate", "/inmates/by-request/501"]
+)
+def test_legacy_inmate(client, url):
+    """A legacy id resolves to its inmate, whose requests carry their codes."""
+    response = client.get(url)
+    assert response.status_code == 200
+    inmate = response.json()
+    assert (inmate["jurisdiction"], inmate["id"]) == ("Texas", 12345)
+    assert sorted(request["code"] for request in inmate["requests"]) == [
+        "TEX-12345-0",
+        "TEX-12345-1",
+    ]
+
+
+@pytest.mark.usefixtures("no_side_effects")
+@pytest.mark.parametrize(
+    "url", ["/requests/legacy/999/inmate", "/inmates/by-request/999"]
+)
+def test_legacy_inmate_unknown(client, url):
+    """An unknown legacy id is a 404 on both inmate paths."""
+    response = client.get(url)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "No request found with legacy request_id 999"
+
+
+def test_aliases_hidden_from_openapi(client):
+    """The deprecated aliases work but are not in the OpenAPI schema."""
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/requests/{code}/address" in paths
+    assert "/requests/legacy/{legacy_id}/inmate" in paths
+    assert "/requests/legacy/{legacy_id}/address" in paths
+    for alias in [
+        "/inmates/by-request/{request_id}",
+        "/inmates/by-request/{request_id}/address",
+        "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}/address",
+    ]:
+        assert alias not in paths
