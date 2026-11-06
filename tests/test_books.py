@@ -28,6 +28,22 @@ HOBBIT = "9780547928227"
         ("0547928212", None),
         ("1234", None),
         ("TEX-1234-0", None),
+        # Copied from a web page: left-to-right marks, no-break spaces,
+        # Unicode dashes, an "ISBN-13 :" label.
+        ("\u200e978-0547928227", HOBBIT),
+        ("\u00a0\u00a0978\u20110547928227\u200f", HOBBIT),
+        ("978\u20130\u2014547928227", HOBBIT),
+        ("ISBN-13 : 978-0547928227", HOBBIT),
+        ("isbn 0547928211", "9780547928210"),
+        ("\ufeff9780547928227\u200b", HOBBIT),
+        ("ISBN", None),
+        # An ISBN-10 starting with 13 or 10 isn't read as an "ISBN-13" label.
+        ("1305504917", "9781305504912"),
+        ("ISBN 1305504917", "9781305504912"),
+        ("ISBN: 1305504917", "9781305504912"),
+        ("ISBN-10 1305504917", "9781305504912"),
+        ("ISBN13 9780547928227", HOBBIT),
+        ("ISBN 1005504911", "9781005504915"),
     ],
 )
 def test_normalize_isbn(raw, expected):

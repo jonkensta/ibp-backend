@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Optional
@@ -59,13 +60,43 @@ def isbn10_check_digit(first9: str) -> str:
     return "X" if check == 10 else str(check)
 
 
+# A leading label such as "ISBN", "ISBN-13:" or "isbn 10". The 10/13 only
+# counts as part of the label when no digit follows it, so an ISBN-10 that
+# starts with 10 or 13 ("ISBN 1305504917") keeps its digits.
+_ISBN_LABEL = re.compile(r"^ISBN(?:[- ]?1[03](?!\d))?[ :]*", re.IGNORECASE)
+
+
+def compact_isbn(raw: str) -> str:
+    """Strip what normalize_isbn ignores, keeping the digits (and any X).
+
+    Invisible format characters (left-to-right marks, zero-width spaces) are
+    dropped, any dash reads as a hyphen and any space as a space; then a
+    leading label goes, then the hyphens and spaces.
+    """
+    chars = []
+    for ch in raw:
+        category = unicodedata.category(ch)
+        if category == "Cf":
+            continue
+        if category == "Pd":
+            chars.append("-")
+        elif ch.isspace() or category.startswith("Z"):
+            chars.append(" ")
+        else:
+            chars.append(ch)
+    text = _ISBN_LABEL.sub("", "".join(chars).strip())
+    return re.sub(r"[ -]", "", text).upper()
+
+
 def normalize_isbn(raw: str) -> Optional[str]:
     """Return the ISBN-13 for an ISBN-10, ISBN-13 or 18-digit EAN, or None.
 
-    Hyphens and spaces are ignored; an 18-digit scan (ISBN-13 plus a
-    5-digit price add-on) is trimmed. Bad check digits are rejected.
+    Spaces, dashes and invisible characters (such as the left-to-right marks
+    a copy from a web page brings along) are ignored, as is a leading "ISBN",
+    "ISBN-10" or "ISBN-13" label; an 18-digit scan (ISBN-13 plus a 5-digit
+    price add-on) is trimmed. Bad check digits are rejected.
     """
-    digits = re.sub(r"[\s-]", "", raw).upper()
+    digits = compact_isbn(raw)
     if len(digits) == 18 and digits[:3] in ("978", "979"):
         digits = digits[:13]
     if re.fullmatch(r"\d{9}[\dX]", digits):
