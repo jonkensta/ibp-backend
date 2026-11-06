@@ -85,11 +85,24 @@ replaces the file, it is not merged with it) as `server.conf` and point
 ## Upgrading
 
     cd /srv/ibp
+    cp -p .env .env.pre-<new tag>             # for a rollback
     $EDITOR .env                              # new IBP_TAG
     sudo systemctl start ibp-backup.service  # fresh backup first
     docker compose pull && docker compose up -d
     docker image prune -f
 
 Roll back by setting the previous tag and running `docker compose up -d`
-again. If the new release ran a database migration, also restore the backup
-taken just before (`scripts/backup/README.md`).
+again. If the new release ran a database migration, the old backend can't
+start on the migrated database, so restore the backup taken just before the
+upgrade first, with both containers stopped (writes since then are lost):
+
+    cd /srv/ibp
+    docker compose down
+    mkdir -p ~/restore && zstd -d ~/backups/ibp/data-<before upgrade>.db.zst -o ~/restore/data.db
+    sqlite3 ~/restore/data.db "PRAGMA integrity_check;"   # must print: ok
+    mv data/data.db data/data.db.before-rollback          # keep until verified
+    rm -f data/data.db-journal data/data.db-wal data/data.db-shm
+    install -m 0644 ~/restore/data.db data/data.db
+    cp .env.pre-<new tag> .env                            # the previous IBP_TAG
+    docker compose up -d
+    docker compose ps                                     # both on the old tag, healthy
