@@ -518,6 +518,15 @@ class PackageItem(PackageItemBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @field_serializer("registered_at", "created_at", "updated_at")
+    def serialize_dt(self, dt: Optional[datetime.datetime], _info):
+        """Serialize datetime to ISO format with UTC timezone if naive."""
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        return dt.isoformat()
+
 
 class PackageItemCreated(PackageItem):
     """A newly recorded package item.
