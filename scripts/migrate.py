@@ -236,6 +236,11 @@ def generate_inmates(connection, unit_names: dict[int, str]) -> typing.Iterable[
             ibp.models.Request(**request)
             for request in convert_requests(requests.pop(autoid, []))
         ]
+        # Continue numbering after the copied requests (indexes are never
+        # reused; the alembic migration sets the same value).
+        inmate["next_request_index"] = (
+            max((request.index for request in inmate["requests"]), default=-1) + 1
+        )
         inmate["lookups"] = [
             ibp.models.Lookup(**lookup)
             for lookup in convert_lookups(lookups.pop(autoid, []))

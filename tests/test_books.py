@@ -257,6 +257,11 @@ def test_bootstrap_adopts_pre_books_create_all_schema(tmp_path, monkeypatch):
     engine = sqlalchemy.create_engine(url)
     tables = [t for name, t in models.Base.metadata.tables.items() if name != "books"]
     models.Base.metadata.create_all(engine, tables=tables)
+    with engine.begin() as connection:
+        # Added after this schema's era.
+        connection.execute(
+            sqlalchemy.text("ALTER TABLE inmates DROP COLUMN next_request_index")
+        )
     engine.dispose()
 
     monkeypatch.setattr(db_bootstrap, "get_sync_database_url", lambda: url)

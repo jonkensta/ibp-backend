@@ -134,3 +134,17 @@ def test_shipping_settings_are_seeded(migrated):
         assert settings is not None
         assert settings.unit_recipient_name == "ATTN: MAILROOM STAFF"
         assert settings.return_state == "TX"
+
+
+def test_next_request_index_follows_copied_requests(migrated):
+    """Each inmate's request counter continues after its copied requests."""
+    engine, _, _ = migrated
+    with Session(engine) as session:
+        counters = {
+            (inmate.jurisdiction, inmate.id): (
+                inmate.next_request_index,
+                sorted(request.index for request in inmate.requests),
+            )
+            for inmate in session.query(ibp.models.Inmate)
+        }
+    assert counters == {("Texas", 1001): (1, [0]), ("Federal", 2002): (2, [0, 1])}

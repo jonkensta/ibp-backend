@@ -161,6 +161,13 @@ class Inmate(Base):
 
     datetime_fetched: Mapped[Optional[datetime.datetime]] = mapped_column(TZDateTime())
 
+    # The index the inmate's next request gets. Only ever incremented (see
+    # api.add_request), so a deleted request's index, and its printed label,
+    # never point at a different request.
+    next_request_index: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sqlalchemy.text("0")
+    )
+
     requests: Mapped[list["Request"]] = relationship(
         "Request",
         back_populates="inmate",
