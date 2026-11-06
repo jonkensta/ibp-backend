@@ -23,7 +23,7 @@ ISBN = "9780306406157"
 OTHER_ISBN = "9781861972712"
 
 BOOK = {"isbn": ISBN, "title": "War and Peace", "author": "Tolstoy", "source": "isbn"}
-MANUAL_BOOK = {"title": "A Zine", "source": "manual"}
+MANUAL_BOOK = {"title": "A Zine", "author": "Unknown", "source": "manual"}
 
 
 @pytest.fixture
@@ -141,7 +141,7 @@ def test_add_item(client, seeded):
 def test_list_items(client, seeded):
     """Items are listed oldest first, without previously_sent."""
     first = add(client)
-    second = add(client, **MANUAL_BOOK, isbn=None, author=None)
+    second = add(client, **MANUAL_BOOK, isbn=None)
     response = client.get(ITEMS_URL)
     assert response.status_code == 200
     listed = response.json()
@@ -164,11 +164,11 @@ def test_list_items(client, seeded):
 def test_edit_item(client, seeded):
     """An edit replaces the fields, bumps the revision and makes it manual."""
     item = add(client)
-    response = edit(client, item, title="War & Peace", author=None, isbn=None)
+    response = edit(client, item, title="War & Peace", author="Unknown", isbn=None)
     assert response.status_code == 200
     edited = response.json()
     assert edited["title"] == "War & Peace"
-    assert edited["author"] is None
+    assert edited["author"] == "Unknown"
     assert edited["isbn"] is None
     assert edited["revision"] == 1
     assert edited["source"] == "manual"
@@ -452,7 +452,7 @@ def test_registration_queue(client, seeded):
     newer = add(client, code=OTHER_PACKAGE, title="Newer request")
     first = add(client, title="First")
     registered = add(client, title="Registered")
-    second = add(client, title="Second", author=None)
+    second = add(client, title="Second", author="Unknown")
     older = add(client, code=OLDER_PACKAGE, title="Older request")
     add(client, code=FEDERAL_PACKAGE, title="Federal")
     register(client, registered)
@@ -482,7 +482,7 @@ def test_registration_queue(client, seeded):
             "item_id": second["id"],
             "revision": 1,
             "title": "Second, edited",
-            "author": None,
+            "author": "Unknown",
             "tdcj_number": "00012345",
         },
         {
@@ -514,9 +514,15 @@ def test_title_and_author_are_cleaned(client, seeded):
     assert (item["title"], item["author"]) == ("War and Peace", "Leo Tolstoy")
 
 
-def test_blank_author_is_none(client, seeded):
-    """A blank or control-only author is stored as no author."""
-    assert add(client, author=" \x01 ")["author"] is None
+@pytest.mark.parametrize("author", [None, "", " \x01 "])
+def test_author_is_required(client, seeded, author):
+    """The portal needs an author: missing, blank or control-only is 422."""
+    body = {**BOOK, "author": author}
+    response = client.post(ITEMS_URL, json=body)
+    assert response.status_code == 422
+    del body["author"]
+    assert client.post(ITEMS_URL, json=body).status_code == 422
+    assert client.get(ITEMS_URL).json() == []
 
 
 @pytest.mark.parametrize(
@@ -533,12 +539,29 @@ def test_isbn_is_normalized(client, seeded, isbn, expected):
     assert add(client, isbn=isbn, source="manual")["isbn"] == expected
 
 
-def test_length_limits(client, seeded):
-    """Title and author take up to 100 characters (the portal's maxlength)."""
-    item = add(client, title="T" * 100, author="A" * 100)
-    assert (len(item["title"]), len(item["author"])) == (100, 100)
-    # Collapsed whitespace doesn't count against the limit.
+@pytest.mark.parametrize("field", ["title", "author"])
+@pytest.mark.parametrize(
+    "length, accepted", [(2, False), (3, True), (100, True), (101, False)]
+)
+def test_length_limits(client, seeded, field, length, accepted):
+    """Title and author take 3 to 100 characters, as the portal requires."""
+    response = client.post(ITEMS_URL, json={**BOOK, field: "x" * length})
+    if accepted:
+        assert response.status_code == 201
+        assert len(response.json()[field]) == length
+    else:
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["msg"] == "Must be 3 to 100 characters."
+
+
+def test_length_counts_cleaned_text(client, seeded):
+    """Collapsed whitespace doesn't count; padding doesn't make it long enough."""
     assert len(add(client, title="T" * 50 + "     " + "T" * 49)["title"]) == 100
+    response = client.post(ITEMS_URL, json={**BOOK, "author": "  A \x00 B  "})
+    assert response.status_code == 201
+    assert response.json()["author"] == "A B"
+    response = client.post(ITEMS_URL, json={**BOOK, "author": " AB \x00 "})
+    assert response.status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -546,6 +569,8 @@ def test_length_limits(client, seeded):
     [
         {"title": "T" * 101},
         {"author": "A" * 101},
+        {"author": "AB"},
+        {"author": None},
         {"title": ""},
         {"title": " \t\x00 "},
         {"title": None},
@@ -574,6 +599,9 @@ def test_edits_are_validated(client, seeded):
     item = add(client)
     assert edit(client, item, title="T" * 101).status_code == 422
     assert edit(client, item, isbn="bad").status_code == 422
+    assert edit(client, item, title="TT").status_code == 422
+    assert edit(client, item, author=None).status_code == 422
+    assert edit(client, item, author="  ").status_code == 422
     edited = edit(client, item, title=" Two\n words ", isbn="0306406152").json()
     assert (edited["title"], edited["isbn"]) == ("Two words", ISBN)
 

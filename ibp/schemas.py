@@ -436,24 +436,22 @@ def isbn_or_none(value: Optional[str]) -> Optional[str]:
     return normalized
 
 
-# Titles and authors are sent to the TDCJ Book Portal, whose inputs take at
-# most PORTAL_MAX_LENGTH characters; cleaning runs before the length checks.
-ItemTitle = Annotated[
-    str,
-    StringConstraints(min_length=1, max_length=PORTAL_MAX_LENGTH),
-    BeforeValidator(clean_text),
-]
+# The TDCJ Book Portal requires a title and an author of PORTAL_MIN_LENGTH to
+# PORTAL_MAX_LENGTH characters after trimming. Cleaning runs before the check.
+PORTAL_MIN_LENGTH = 3
 
-ItemAuthor = Annotated[
-    Optional[
-        Annotated[
-            str,
-            StringConstraints(max_length=PORTAL_MAX_LENGTH),
-            BeforeValidator(clean_text),
-        ]
-    ],
-    AfterValidator(blank_to_none),
-]
+
+def portal_length(value: str) -> str:
+    """Accept a cleaned title or author only if the portal would."""
+    if not PORTAL_MIN_LENGTH <= len(value) <= PORTAL_MAX_LENGTH:
+        raise PydanticCustomError(
+            "portal_length",
+            f"Must be {PORTAL_MIN_LENGTH} to {PORTAL_MAX_LENGTH} characters.",
+        )
+    return value
+
+
+PortalText = Annotated[str, BeforeValidator(clean_text), AfterValidator(portal_length)]
 
 ItemIsbn = Annotated[Optional[str], AfterValidator(isbn_or_none)]
 
@@ -463,13 +461,14 @@ class PackageItemBase(BaseModel):
 
     ``isbn`` is normalized to ISBN-13 (ISBN-10 converted, an 18-digit scan
     with a price add-on trimmed). Title and author have control characters
-    removed and whitespace collapsed, and are at most 100 characters (the
-    portal's limit); the title cannot be empty.
+    removed and whitespace collapsed, and then must be 3 to 100 characters,
+    as the portal requires. Both are required: a book without an author gets
+    something like "Unknown".
     """
 
     isbn: ItemIsbn = None
-    title: ItemTitle
-    author: ItemAuthor = None
+    title: PortalText
+    author: PortalText
 
 
 class PackageItemCreate(PackageItemBase):
