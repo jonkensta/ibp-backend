@@ -11,7 +11,10 @@ from pydantic import (
     Field,
     StringConstraints,
     field_serializer,
+    model_validator,
 )
+
+from .labels import label_package_id
 
 
 class JurisdictionEnum(str, Enum):
@@ -158,14 +161,29 @@ class Lookup(LookupBase):
 
 
 class Request(RequestBase):
-    """Schema for Request records as stored in the database."""
+    """Schema for Request records as stored in the database.
+
+    ``code`` is the request code printed on its label (e.g. ``TEX-12345-0``),
+    the request's address in ``/requests/{code}``.
+    """
 
     index: int
+    code: str
 
     class Config:  # pylint: disable=too-few-public-methods
         """Pydantic configuration for ORM mode."""
 
         from_attributes = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def add_code(cls, data: Any) -> Any:
+        """Compute ``code`` when validating a Request ORM object."""
+        if isinstance(data, dict):
+            return data
+        names = [name for name in cls.model_fields.keys() if name != "code"]
+        values = {name: getattr(data, name) for name in names}
+        return {**values, "code": label_package_id(data)}
 
 
 class Comment(CommentBase):
@@ -268,9 +286,10 @@ class RequestAddress(BaseModel):
     """Read-only mailing address for shipping a request to an inmate.
 
     ``name`` is the pre-formatted addressee line (``First Last #00012345``);
-    the remaining fields identify the request and give the inmate's unit
-    mailing address.  ``unit_recipient_name`` is the configured mailroom
-    recipient line (e.g. ``ATTN: MAILROOM STAFF``) from the shipping settings.
+    the remaining fields identify the request (``code`` is its label text,
+    e.g. ``TEX-12345-0``) and give the inmate's unit mailing address.
+    ``unit_recipient_name`` is the configured mailroom recipient line (e.g.
+    ``ATTN: MAILROOM STAFF``) from the shipping settings.
     """
 
     name: str
@@ -282,6 +301,7 @@ class RequestAddress(BaseModel):
 
     request_index: int
     request_id: Optional[int] = None
+    code: str
     action: ActionEnum
 
     unit_name: str

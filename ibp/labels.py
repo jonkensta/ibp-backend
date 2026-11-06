@@ -8,6 +8,7 @@ along the bottom.
 """
 
 import io
+import re
 import typing
 from dataclasses import dataclass
 
@@ -146,9 +147,47 @@ def get_shipping_method(unit: typing.Any) -> str:
 
 
 def label_package_id(request: Request) -> str:
-    """Return the package ID printed on a request label, e.g. TEX-12345-0."""
+    """Return the request code printed on a request label, e.g. TEX-12345-0.
+
+    This is the one formatter for request codes; ``parse_request_code`` reads
+    them back.
+    """
     jurisdiction_code = "TEX" if request.inmate_jurisdiction == "Texas" else "FED"
     return f"{jurisdiction_code}-{request.inmate_id}-{request.index}"
+
+
+@dataclass(frozen=True)
+class RequestKey:
+    """The stored key of a request: (jurisdiction, inmate ID, request index)."""
+
+    jurisdiction: str
+    inmate_id: int
+    index: int
+
+
+_JURISDICTIONS_BY_CODE = {"TEX": "Texas", "FED": "Federal"}
+
+# Digit limits keep the numbers well inside a 64-bit database integer.
+_REQUEST_CODE_PATTERN = re.compile(
+    r"(?P<jurisdiction>TEX|FED)-(?P<inmate_id>\d{1,12})-(?P<index>\d{1,9})",
+    re.IGNORECASE,
+)
+
+
+def parse_request_code(code: str) -> typing.Optional[RequestKey]:
+    """Parse a request code such as ``TEX-1234567-2``, or return None.
+
+    Case-insensitive; the inmate number may be zero-padded (``TEX-01234567-2``).
+    ``TEX`` is Texas and ``FED`` is Federal.
+    """
+    match = _REQUEST_CODE_PATTERN.fullmatch(code.strip())
+    if match is None:
+        return None
+    return RequestKey(
+        jurisdiction=_JURISDICTIONS_BY_CODE[match["jurisdiction"].upper()],
+        inmate_id=int(match["inmate_id"]),
+        index=int(match["index"]),
+    )
 
 
 def render_request_label(

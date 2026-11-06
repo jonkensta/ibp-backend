@@ -38,6 +38,8 @@ BASELINE_REVISION = "1e01dc9942d5"
 PRE_SHIPPING_SETTINGS_REVISION = "a7c31f9e5b24"
 # Last revision before the books table was added.
 PRE_BOOKS_REVISION = "b5e2d8c4a1f3"
+# Last revision before inmates.next_request_index was added.
+PRE_NEXT_REQUEST_INDEX_REVISION = "c3f1a9d27e64"
 
 _SYNC_SCHEME_MAPPING = {
     "postgresql+asyncpg": "postgresql",
@@ -66,20 +68,21 @@ def build_alembic_config(url: str) -> Config:
     return config
 
 
-def inspect_database(url: str) -> tuple[set[str], bool]:
-    """Return (table names, whether requests.request_id exists)."""
+def inspect_database(url: str) -> tuple[set[str], set[str]]:
+    """Return (table names, columns as ``table.column``) of the database."""
     engine = sa.create_engine(url)
     try:
         with engine.connect() as connection:
             inspector = sa.inspect(connection)
             tables = set(inspector.get_table_names())
-            has_request_id = "requests" in tables and any(
-                column["name"] == "request_id"
-                for column in inspector.get_columns("requests")
-            )
+            columns = {
+                f"{table}.{column['name']}"
+                for table in tables
+                for column in inspector.get_columns(table)
+            }
     finally:
         engine.dispose()
-    return tables, has_request_id
+    return tables, columns
 
 
 def seed_shipping_settings(url: str) -> None:
@@ -106,20 +109,30 @@ def seed_shipping_settings(url: str) -> None:
 def bootstrap() -> None:
     """Bring the database schema up to date."""
     url = get_sync_database_url()
-    tables, has_request_id = inspect_database(url)
+    tables, columns = inspect_database(url)
     config = build_alembic_config(url)
 
     if not tables:
         logger.info("Empty database detected; running alembic upgrade to head.")
         command.upgrade(config, "head")
     elif "alembic_version" not in tables:
-        if "books" in tables:
+        if "inmates.next_request_index" in columns:
             # Schema was created by Base.metadata.create_all from the current
             # models; adopt it as-is.
             logger.info(
                 "Existing schema without alembic_version detected; stamping head."
             )
             command.stamp(config, "head")
+        elif "books" in tables:
+            # Schema was created by create_all from pre-next_request_index
+            # models; adopt it there and replay the later migrations.
+            logger.info(
+                "Existing pre-next_request_index schema without alembic_version "
+                "detected; stamping %s and upgrading to head.",
+                PRE_NEXT_REQUEST_INDEX_REVISION,
+            )
+            command.stamp(config, PRE_NEXT_REQUEST_INDEX_REVISION)
+            command.upgrade(config, "head")
         elif "shipping_settings" in tables:
             # Schema was created by create_all from pre-books models; adopt it
             # there and replay the later migrations.
@@ -130,7 +143,7 @@ def bootstrap() -> None:
             )
             command.stamp(config, PRE_BOOKS_REVISION)
             command.upgrade(config, "head")
-        elif has_request_id:
+        elif "requests.request_id" in columns:
             # Schema was created by create_all from pre-shipping_settings
             # models; adopt it there and replay the later migrations.
             logger.info(
