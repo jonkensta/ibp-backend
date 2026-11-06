@@ -590,40 +590,32 @@ async def add_request(
     request_data: schemas.RequestCreate,
     session: AsyncSession = Depends(get_session),
 ):
-    """Add a new request for an inmate."""
+    """Add a new request for an inmate.
+
+    The index comes from the inmate's ``next_request_index``, allocated with a
+    single ``UPDATE ... RETURNING``, so indexes are never reused and two
+    stations adding at once get distinct ones. It is the first statement of
+    the transaction, so on SQLite it takes the write lock straight away and a
+    concurrent add waits for it instead of failing.
+    """
     async with session.begin():
-        statement = (
-            select(models.Inmate)
-            .where(
-                models.Inmate.jurisdiction == jurisdiction,
-                models.Inmate.id == inmate_id,
+        next_index = (
+            await session.execute(
+                sqlalchemy.update(models.Inmate)
+                .where(
+                    models.Inmate.jurisdiction == jurisdiction,
+                    models.Inmate.id == inmate_id,
+                )
+                .values(next_request_index=models.Inmate.next_request_index + 1)
+                .returning(models.Inmate.next_request_index - 1)
+                .execution_options(synchronize_session=False)
             )
-            .with_for_update()
-        )
+        ).scalar_one_or_none()
 
-        inmate = (await session.execute(statement)).scalar_one_or_none()
-
-        if inmate is None:
+        if next_index is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Inmate not found."
             )
-
-        used_indices = (
-            (
-                await session.execute(
-                    select(models.Request.index).where(
-                        models.Request.inmate_jurisdiction == jurisdiction,
-                        models.Request.inmate_id == inmate_id,
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-        next_index = next(
-            index for index in itertools.count() if index not in used_indices
-        )
 
         request = models.Request(
             **request_data.model_dump(),

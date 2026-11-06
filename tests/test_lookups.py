@@ -37,6 +37,7 @@ def seeded(api_db):
                 last_name="DOE",
                 unit_name="Alpha",
                 datetime_fetched=FRESH,
+                next_request_index=1,
             )
         )
         session.add(
