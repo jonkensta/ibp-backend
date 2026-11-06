@@ -23,9 +23,10 @@ failing or losing an increment.
 
 import datetime
 import logging
+from typing import Annotated
 
 import sqlalchemy
-from fastapi import Depends, HTTPException, Query, status
+from fastapi import Depends, HTTPException, Path, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -40,6 +41,9 @@ logger = logging.getLogger(__name__)
 
 REQUEST_NOT_FOUND = "Request not found."
 ITEM_NOT_FOUND = "Item not found."
+
+# An item id path parameter; out of range is a 422, before it reaches SQLite.
+ItemId = Annotated[int, Path(ge=1, le=schemas.MAX_DB_INT)]
 
 
 def now() -> datetime.datetime:
@@ -244,7 +248,7 @@ async def add_package_item(
 @app.put("/requests/{code}/items/{item_id}", response_model=schemas.PackageItem)
 async def update_package_item(
     code: str,
-    item_id: int,
+    item_id: ItemId,
     item_data: schemas.PackageItemUpdate,
     session: AsyncSession = Depends(get_session),
 ):
@@ -281,7 +285,7 @@ async def update_package_item(
 @app.delete("/requests/{code}/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_package_item(
     code: str,
-    item_id: int,
+    item_id: ItemId,
     confirm_registered: bool = Query(False),
     session: AsyncSession = Depends(get_session),
 ):
@@ -308,7 +312,7 @@ async def delete_package_item(
 )
 async def register_package_item(
     code: str,
-    item_id: int,
+    item_id: ItemId,
     registration: schemas.RegistrationCreate,
     session: AsyncSession = Depends(get_session),
 ):

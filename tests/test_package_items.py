@@ -760,3 +760,46 @@ def test_get_package_warnings(client, seeded):
     warnings = client.get(f"/requests/{PACKAGE}").json()["warnings"]
     assert warnings["entry_age"].startswith("Data entry for Texas inmate #00012345")
     assert set(warnings) == {"entry_age", "release"}
+
+
+# --- Integer bounds -------------------------------------------------------------
+
+HUGE = 2**100
+
+
+@pytest.mark.parametrize(
+    "method, suffix, body",
+    [
+        ("put", "", {**BOOK, "revision": 0}),
+        ("delete", "", None),
+        ("post", "/registrations", {"revision": 0}),
+    ],
+)
+@pytest.mark.parametrize("item_id", [HUGE, 0, -1])
+def test_out_of_range_item_id(client, seeded, method, suffix, body, item_id):
+    """An item id outside 1..2**63-1 is 422, not a database overflow."""
+    response = client.request(method, f"{ITEMS_URL}/{item_id}{suffix}", json=body)
+    assert response.status_code == 422
+    assert contents_revision(seeded) == 0
+
+
+@pytest.mark.parametrize("revision", [HUGE, -1])
+def test_out_of_range_revision(client, seeded, revision):
+    """A revision outside 0..2**63-1 is 422 on edit and registration."""
+    item = add(client)
+    assert edit(client, item, revision=revision).status_code == 422
+    response = client.post(
+        f"{ITEMS_URL}/{item['id']}/registrations", json={"revision": revision}
+    )
+    assert response.status_code == 422
+    assert client.get(ITEMS_URL).json()[0]["registered_at"] is None
+
+
+def test_largest_revision_is_accepted(client, seeded):
+    """2**63-1 passes validation and is just a stale revision."""
+    item = add(client)
+    assert edit(client, item, revision=2**63 - 1).status_code == 409
+    response = client.post(
+        f"{ITEMS_URL}/{item['id']}/registrations", json={"revision": 2**63 - 1}
+    )
+    assert response.status_code == 409

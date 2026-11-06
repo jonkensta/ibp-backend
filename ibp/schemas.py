@@ -458,6 +458,12 @@ def portal_length(value: str) -> str:
 
 PortalText = Annotated[str, BeforeValidator(clean_text), AfterValidator(portal_length)]
 
+# Largest value of a 64-bit signed integer column; bigger numbers reaching
+# SQLite would overflow into a 500.
+MAX_DB_INT = 2**63 - 1
+
+Revision = Annotated[int, Field(ge=0, le=MAX_DB_INT)]
+
 ItemIsbn = Annotated[Optional[str], AfterValidator(isbn_or_none)]
 
 
@@ -502,7 +508,7 @@ class PackageItemUpdate(PackageItemBase):
     untouched.
     """
 
-    revision: int
+    revision: Revision
     update_cache: bool = False
 
 
@@ -566,7 +572,7 @@ class RegistrationCreate(BaseModel):
     ``revision`` is the item revision the portal form was filled from.
     """
 
-    revision: int
+    revision: Revision
 
 
 class RegistrationQueueEntry(BaseModel):
