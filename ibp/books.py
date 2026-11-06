@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Optional
@@ -59,13 +60,30 @@ def isbn10_check_digit(first9: str) -> str:
     return "X" if check == 10 else str(check)
 
 
+# Unicode categories dropped from an entered ISBN: format characters (LRM,
+# zero-width space), space separators (no-break space) and dashes.
+_ISBN_IGNORED_CATEGORIES = {"Cf", "Zs", "Zl", "Zp", "Pd"}
+
+
+def compact_isbn(raw: str) -> str:
+    """Strip what normalize_isbn ignores, keeping the digits (and any X)."""
+    kept = "".join(
+        ch
+        for ch in raw
+        if not ch.isspace() and unicodedata.category(ch) not in _ISBN_IGNORED_CATEGORIES
+    )
+    return re.sub(r"^ISBN(?:1[03])?:?", "", kept, flags=re.IGNORECASE).upper()
+
+
 def normalize_isbn(raw: str) -> Optional[str]:
     """Return the ISBN-13 for an ISBN-10, ISBN-13 or 18-digit EAN, or None.
 
-    Hyphens and spaces are ignored; an 18-digit scan (ISBN-13 plus a
-    5-digit price add-on) is trimmed. Bad check digits are rejected.
+    Spaces, dashes and invisible characters (such as the left-to-right marks
+    a copy from a web page brings along) are ignored, as is a leading "ISBN",
+    "ISBN-10" or "ISBN-13" label; an 18-digit scan (ISBN-13 plus a 5-digit
+    price add-on) is trimmed. Bad check digits are rejected.
     """
-    digits = re.sub(r"[\s-]", "", raw).upper()
+    digits = compact_isbn(raw)
     if len(digits) == 18 and digits[:3] in ("978", "979"):
         digits = digits[:13]
     if re.fullmatch(r"\d{9}[\dX]", digits):
