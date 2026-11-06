@@ -77,7 +77,7 @@ def test_label_pdf_is_one_page_at_label_size(client):
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pdf"
     assert response.headers["content-disposition"] == (
-        'inline; filename="TEX-12345-0.pdf"'
+        'inline; filename="TEX-00012345-0.pdf"'
     )
 
     pdf = response.content
@@ -109,13 +109,16 @@ def test_label_by_lowercase_padded_code(client, suffix):
     response = client.get(f"/requests/tex-00012345-0/{suffix}")
     assert response.status_code == 200
     if suffix == "label.pdf":
-        assert 'filename="TEX-12345-0.pdf"' in response.headers["content-disposition"]
+        assert (
+            'filename="TEX-00012345-0.pdf"' in response.headers["content-disposition"]
+        )
 
 
 @pytest.mark.usefixtures("seeded")
 @pytest.mark.parametrize("suffix", ["label", "label.pdf"])
 @pytest.mark.parametrize(
-    "code", ["TEX-12345-7", "FED-12345-0", "TEX-99999-0", "TEX-12345", "nonsense"]
+    "code",
+    ["TEX-00012345-7", "FED-00012345-0", "TEX-00099999-0", "TEX-12345", "nonsense"],
 )
 def test_label_unknown_request(client, suffix, code):
     """Unknown and malformed codes are a 404 for both label formats."""

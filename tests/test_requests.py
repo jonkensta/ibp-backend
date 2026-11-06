@@ -45,7 +45,7 @@ def test_add_request(client, seeded):
         **NEW_REQUEST,
         "request_id": None,
         "index": 0,
-        "code": "TEX-12345-0",
+        "code": "TEX-00012345-0",
         "contents_revision": 0,
     }
 
@@ -69,8 +69,8 @@ def test_inmate_requests_include_code(client, seeded):
     client.post(REQUESTS_URL, json=NEW_REQUEST)
     requests = client.get("/inmates/Texas/12345").json()["requests"]
     assert sorted(request["code"] for request in requests) == [
-        "TEX-12345-0",
-        "TEX-12345-1",
+        "TEX-00012345-0",
+        "TEX-00012345-1",
     ]
 
 
@@ -114,7 +114,7 @@ def test_add_request_indices_are_per_inmate(client, seeded):
     assert _add(client) == 0
     response = client.post("/inmates/Federal/12345/requests", json=NEW_REQUEST)
     assert response.json()["index"] == 0
-    assert response.json()["code"] == "FED-12345-0"
+    assert response.json()["code"] == "FED-00012345-0"
     assert _add(client) == 1
 
 
@@ -218,7 +218,14 @@ def test_delete_request_by_lowercase_padded_code(client, seeded):
 
 @pytest.mark.parametrize(
     "code",
-    ["TEX-12345-5", "TEX-99999-0", "FED-12345-0", "TEX-12345", "XYZ-12345-0", "0"],
+    [
+        "TEX-00012345-5",
+        "TEX-00099999-0",
+        "FED-00012345-0",
+        "TEX-12345",
+        "XYZ-12345-0",
+        "0",
+    ],
 )
 def test_delete_request_not_found(client, seeded, code):
     """Unknown and malformed codes are 404s and delete nothing."""

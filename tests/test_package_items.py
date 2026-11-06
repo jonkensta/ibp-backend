@@ -10,11 +10,11 @@ from ibp import api, models
 # Fresh, so the inmate has no entry-age warning.
 FETCHED = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
 
-PACKAGE = "TEX-12345-0"
-TOSSED = "TEX-12345-1"
-OTHER_PACKAGE = "TEX-12345-2"
-FEDERAL_PACKAGE = "FED-7654321-0"
-OLDER_PACKAGE = "TEX-222-0"
+PACKAGE = "TEX-00012345-0"
+TOSSED = "TEX-00012345-1"
+OTHER_PACKAGE = "TEX-00012345-2"
+FEDERAL_PACKAGE = "FED-07654321-0"
+OLDER_PACKAGE = "TEX-00000222-0"
 
 ITEMS_URL = f"/requests/{PACKAGE}/items"
 
@@ -202,7 +202,7 @@ def test_item_ids_not_reused(client, seeded):
 # --- Not found and wrong request state ---------------------------------------
 
 
-@pytest.mark.parametrize("code", ["TEX-99999-0", "TEX-12345-9", "BAD", "TEX-x-0"])
+@pytest.mark.parametrize("code", ["TEX-00099999-0", "TEX-00012345-9", "BAD", "TEX-x-0"])
 @pytest.mark.parametrize(
     "method, suffix",
     [

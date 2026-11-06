@@ -167,7 +167,7 @@ class Lookup(LookupBase):
 class Request(RequestBase):
     """Schema for Request records as stored in the database.
 
-    ``code`` is the request code printed on its label (e.g. ``TEX-12345-0``),
+    ``code`` is the request code printed on its label (e.g. ``TEX-00012345-0``),
     the request's address in ``/requests/{code}``.
     """
 
@@ -292,7 +292,7 @@ class RequestAddress(BaseModel):
 
     ``name`` is the pre-formatted addressee line (``First Last #00012345``);
     the remaining fields identify the request (``code`` is its label text,
-    e.g. ``TEX-12345-0``) and give the inmate's unit mailing address.
+    e.g. ``TEX-00012345-0``) and give the inmate's unit mailing address.
     ``unit_recipient_name`` is the configured mailroom recipient line (e.g.
     ``ATTN: MAILROOM STAFF``) from the shipping settings.
     """

@@ -50,7 +50,7 @@ def test_parse_request_code_malformed(code):
 
 @pytest.mark.parametrize(
     "jurisdiction, inmate_id, index, code",
-    [("Texas", 12345, 0, "TEX-12345-0"), ("Federal", 7654321, 3, "FED-7654321-3")],
+    [("Texas", 12345, 0, "TEX-00012345-0"), ("Federal", 7654321, 3, "FED-07654321-3")],
 )
 def test_format_round_trips(jurisdiction, inmate_id, index, code):
     """label_package_id formats a code that parses back to the same key."""

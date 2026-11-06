@@ -1,6 +1,6 @@
 """Request endpoints, addressed by request code.
 
-A request's code is the text on its label, e.g. ``TEX-1234567-2``
+A request's code is the text on its label, e.g. ``TEX-01234567-2``
 (jurisdiction, inmate number, request index; see ``labels.parse_request_code``).
 A malformed code is a 404, like an unknown one. Requests are created at
 ``POST /inmates/{jurisdiction}/{inmate_id}/requests`` (``ibp/api.py``), whose
