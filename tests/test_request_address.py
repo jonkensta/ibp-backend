@@ -112,6 +112,7 @@ def test_request_address(client):
         **EXPECTED_ADDRESS,
         "request_index": 0,
         "request_id": 501,
+        "code": "TEX-12345-0",
         "action": "Filled",
     }
 
@@ -160,6 +161,7 @@ def test_legacy_request_address(client):
         **EXPECTED_ADDRESS,
         "request_index": 0,
         "request_id": 501,
+        "code": "TEX-12345-0",
         "action": "Filled",
     }
 

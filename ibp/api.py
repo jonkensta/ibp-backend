@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from . import db, metrics, models, schemas, warnings
 from .base import app
+from .labels import label_package_id
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
 from .upsert import inmates_by_name as upsert_inmates_by_name
 
@@ -246,6 +247,7 @@ def build_request_address(
         datetime_fetched=inmate.datetime_fetched,
         request_index=request.index,
         request_id=request.request_id,
+        code=label_package_id(request),
         action=schemas.ActionEnum(request.action),
         unit_name=unit.name,
         unit_recipient_name=settings.unit_recipient_name,

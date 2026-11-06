@@ -41,7 +41,12 @@ def test_add_request(client, seeded):
     """A new request is stored and returned with the next free index."""
     response = client.post(REQUESTS_URL, json=NEW_REQUEST)
     assert response.status_code == 200
-    assert response.json() == {**NEW_REQUEST, "request_id": None, "index": 0}
+    assert response.json() == {
+        **NEW_REQUEST,
+        "request_id": None,
+        "index": 0,
+        "code": "TEX-12345-0",
+    }
 
     with seeded() as session:
         request = session.query(models.Request).one()
@@ -55,6 +60,17 @@ def test_add_request_with_request_id(client, seeded):
     data = client.post(REQUESTS_URL, json=body).json()
     assert data["request_id"] == 777
     assert data["action"] == "Tossed"
+
+
+def test_inmate_requests_include_code(client, seeded):
+    """Every request in the inmate view carries its request code."""
+    client.post(REQUESTS_URL, json=NEW_REQUEST)
+    client.post(REQUESTS_URL, json=NEW_REQUEST)
+    requests = client.get("/inmates/Texas/12345").json()["requests"]
+    assert sorted(request["code"] for request in requests) == [
+        "TEX-12345-0",
+        "TEX-12345-1",
+    ]
 
 
 def test_add_request_indices_fill_gaps(client, seeded):
