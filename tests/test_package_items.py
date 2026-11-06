@@ -554,6 +554,18 @@ def test_length_limits(client, seeded, field, length, accepted):
         assert response.json()["detail"][0]["msg"] == "Must be 3 to 100 characters."
 
 
+@pytest.mark.parametrize("field", ["title", "author"])
+def test_length_counts_utf16_units(client, seeded, field):
+    """An emoji counts as two, as in the portal's JavaScript."""
+    response = client.post(ITEMS_URL, json={**BOOK, field: "x" * 99 + "\U0001f600"})
+    assert response.status_code == 422
+    response = client.post(ITEMS_URL, json={**BOOK, field: "x" * 98 + "\U0001f600"})
+    assert response.status_code == 201
+    assert response.json()[field] == "x" * 98 + "\U0001f600"
+    # Three characters, four units: long enough.
+    assert add(client, **{field: "x\U0001f600x"})[field] == "x\U0001f600x"
+
+
 def test_length_counts_cleaned_text(client, seeded):
     """Collapsed whitespace doesn't count; padding doesn't make it long enough."""
     assert len(add(client, title="T" * 50 + "     " + "T" * 49)["title"]) == 100

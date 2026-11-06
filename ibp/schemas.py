@@ -442,8 +442,13 @@ PORTAL_MIN_LENGTH = 3
 
 
 def portal_length(value: str) -> str:
-    """Accept a cleaned title or author only if the portal would."""
-    if not PORTAL_MIN_LENGTH <= len(value) <= PORTAL_MAX_LENGTH:
+    """Accept a cleaned title or author only if the portal would.
+
+    The portal counts in JavaScript string length (UTF-16 code units), so a
+    character outside the BMP, such as an emoji, counts as two.
+    """
+    units = len(value.encode("utf-16-le")) // 2
+    if not PORTAL_MIN_LENGTH <= units <= PORTAL_MAX_LENGTH:
         raise PydanticCustomError(
             "portal_length",
             f"Must be {PORTAL_MIN_LENGTH} to {PORTAL_MAX_LENGTH} characters.",
