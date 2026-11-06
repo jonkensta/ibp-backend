@@ -42,7 +42,8 @@ it from scratch, do so on a machine with a browser and copy the file over:
 
 ## Restore
 
-    rclone copy gdrive:backups/ibp/data-YYYY-MM-DD_HHMM.db.zst .
+    mkdir -p ~/restore && cd ~/restore
+    rclone copy gdrive:backups/ibp/data-YYYY-MM-DD_HHMM.db.zst .   # or cp from ~/backups/ibp/
     zstd -d data-YYYY-MM-DD_HHMM.db.zst -o data.db
     sqlite3 data.db "PRAGMA integrity_check;"     # must print: ok
 
@@ -50,9 +51,14 @@ it from scratch, do so on a machine with a browser and copy the file over:
     docker compose stop ibp-backend
     mv data/data.db data/data.db.before-restore   # keep until the restore is verified
     rm -f data/data.db-journal data/data.db-wal data/data.db-shm
-    install -m 0644 ~/data.db data/data.db        # owned by you, the container's user
+    install -m 0644 ~/restore/data.db data/data.db  # owned by you, the container's user
     docker compose start ibp-backend
     curl -s localhost/api/health                   # {"status":"ok","database":"connected"}
+
+Anything written after the backup was taken is lost. This restores into the
+running release; to go back to an older release whose schema is behind the
+current database, use the rollback steps in the deploy README instead (the old
+release can't start on the newer schema).
 
 A backup taken from the legacy app has the legacy schema; run it through
 `scripts/migrate.py` first (see DEPLOYMENT-PLAN).
