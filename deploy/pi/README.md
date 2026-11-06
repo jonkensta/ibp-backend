@@ -85,6 +85,7 @@ replaces the file, it is not merged with it) as `server.conf` and point
 ## Upgrading
 
     cd /srv/ibp
+    cp -p .env .env.pre-<new tag>             # for a rollback
     $EDITOR .env                              # new IBP_TAG
     sudo systemctl start ibp-backup.service  # fresh backup first
     docker compose pull && docker compose up -d
