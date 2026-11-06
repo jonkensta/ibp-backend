@@ -1,19 +1,23 @@
 """IBP pydantic schemas."""
 
 import datetime
+import unicodedata
 from enum import Enum
 from typing import Annotated, Any, Optional
 
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StringConstraints,
     field_serializer,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
 
+from .books import PORTAL_MAX_LENGTH, normalize_isbn
 from .labels import label_package_id
 
 
@@ -169,6 +173,7 @@ class Request(RequestBase):
 
     index: int
     code: str
+    contents_revision: int = 0
 
     class Config:  # pylint: disable=too-few-public-methods
         """Pydantic configuration for ORM mode."""
@@ -396,3 +401,171 @@ class Book(BaseModel):
     confidence: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ItemSourceEnum(str, Enum):
+    """Where a package item's title and author came from."""
+
+    ISBN = "isbn"
+    MANUAL = "manual"
+
+
+def clean_text(value: Any) -> Any:
+    """Drop control and format characters and collapse whitespace.
+
+    Whitespace controls (tabs, newlines) become spaces first, so words they
+    separate stay separate. Non-strings are left for the type check.
+    """
+    if not isinstance(value, str):
+        return value
+    kept = (
+        " " if char.isspace() else char
+        for char in value
+        if char.isspace() or unicodedata.category(char) not in ("Cc", "Cf")
+    )
+    return " ".join("".join(kept).split())
+
+
+def isbn_or_none(value: Optional[str]) -> Optional[str]:
+    """Normalize an ISBN to ISBN-13 (blank is None), or reject it."""
+    if value is None or not value.strip():
+        return None
+    normalized = normalize_isbn(value)
+    if normalized is None:
+        raise PydanticCustomError("isbn", "Not a valid ISBN.")
+    return normalized
+
+
+# Titles and authors are sent to the TDCJ Book Portal, whose inputs take at
+# most PORTAL_MAX_LENGTH characters; cleaning runs before the length checks.
+ItemTitle = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=PORTAL_MAX_LENGTH),
+    BeforeValidator(clean_text),
+]
+
+ItemAuthor = Annotated[
+    Optional[
+        Annotated[
+            str,
+            StringConstraints(max_length=PORTAL_MAX_LENGTH),
+            BeforeValidator(clean_text),
+        ]
+    ],
+    AfterValidator(blank_to_none),
+]
+
+ItemIsbn = Annotated[Optional[str], AfterValidator(isbn_or_none)]
+
+
+class PackageItemBase(BaseModel):
+    """Base schema for a book recorded in a package.
+
+    ``isbn`` is normalized to ISBN-13 (ISBN-10 converted, an 18-digit scan
+    with a price add-on trimmed). Title and author have control characters
+    removed and whitespace collapsed, and are at most 100 characters (the
+    portal's limit); the title cannot be empty.
+    """
+
+    isbn: ItemIsbn = None
+    title: ItemTitle
+    author: ItemAuthor = None
+
+
+class PackageItemCreate(PackageItemBase):
+    """Schema for recording a book in a package.
+
+    ``source`` is ``isbn`` when the title and author came from an ISBN
+    lookup (which needs an ISBN) or ``manual`` when typed in.
+    """
+
+    source: ItemSourceEnum
+
+    @model_validator(mode="after")
+    def check_source(self) -> "PackageItemCreate":
+        """An item from an ISBN lookup must have its ISBN."""
+        if self.source == ItemSourceEnum.ISBN and self.isbn is None:
+            raise ValueError("An item from an ISBN lookup needs its ISBN.")
+        return self
+
+
+class PackageItemUpdate(PackageItemBase):
+    """Schema for editing a package item (replaces title, author and ISBN).
+
+    ``revision`` is the item revision the edit is based on (409 if stale).
+    ``update_cache`` also saves the title and author to the ISBN lookup
+    cache, so future scans of that ISBN get them; without it the cache is
+    untouched.
+    """
+
+    revision: int
+    update_cache: bool = False
+
+
+class PackageItem(PackageItemBase):
+    """Schema for a package item as stored.
+
+    ``registered_at`` is empty until the book is registered on the TDCJ
+    Book Portal (Texas only); a registered item is read-only.
+    """
+
+    id: int
+    source: ItemSourceEnum
+    revision: int
+    registered_at: Optional[datetime.datetime] = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PackageItemCreated(PackageItem):
+    """A newly recorded package item.
+
+    ``previously_sent`` lists the codes of this inmate's other requests that
+    already contain the same ISBN (empty without an ISBN), so the station
+    can warn about a repeat.
+    """
+
+    previously_sent: list[str] = []
+
+
+class PackageInmate(InmateBase):
+    """The inmate a package goes to, with their unit."""
+
+    unit: Optional[Unit] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class Package(BaseModel):
+    """A filled request with its inmate, books and the inmate's warnings."""
+
+    request: Request
+    inmate: PackageInmate
+    items: list[PackageItem]
+    warnings: InmateWarnings
+
+
+class RegistrationCreate(BaseModel):
+    """Report a book as registered on the portal.
+
+    ``revision`` is the item revision the portal form was filled from.
+    """
+
+    revision: int
+
+
+class RegistrationQueueEntry(BaseModel):
+    """A Texas book not registered on the portal yet.
+
+    ``tdcj_number`` is the inmate number zero-padded to 8 digits, as the
+    portal shows it.
+    """
+
+    code: str
+    item_id: int
+    revision: int
+    title: str
+    author: Optional[str] = None
+    tdcj_number: str
