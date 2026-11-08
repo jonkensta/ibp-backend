@@ -422,3 +422,23 @@ class Book(Base):
     confidence: Mapped[Optional[str]] = mapped_column(String(10))
     candidates: Mapped[Optional[str]] = mapped_column(Text)
     fetched_at: Mapped[datetime.datetime] = mapped_column(TZDateTime, nullable=False)
+
+
+class Upc(Base):
+    """Sqlalchemy model for the UPC -> ISBN lookup cache.
+
+    Keyed by the full scanned code: the 12-digit UPC-A plus any 2- or 5-digit
+    add-on, since on older mass-market paperbacks the UPC alone may identify
+    only the publisher and price. ``isbn`` is NULL for a miss (no ISBN known),
+    which is retried after a while. ``source`` is the service that answered
+    (``upcitemdb``) or ``volunteer`` for an ISBN entered by hand after a miss.
+    """
+
+    __tablename__ = "upcs"
+
+    upc: Mapped[str] = mapped_column(String(17), primary_key=True)
+    isbn: Mapped[Optional[str]] = mapped_column(String(13))
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    looked_up_at: Mapped[datetime.datetime] = mapped_column(
+        TZDateTime, nullable=False
+    )

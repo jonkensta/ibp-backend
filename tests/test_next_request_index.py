@@ -88,6 +88,7 @@ def test_bootstrap_adopts_pre_next_request_index_schema(tmp_path, monkeypatch):
         ibp.models.Base.metadata.create_all(engine)
         with engine.begin() as connection:
             for statement in [
+                "DROP TABLE upcs",
                 "DROP TABLE registrations",
                 "DROP TABLE package_items",
                 "ALTER TABLE requests DROP COLUMN contents_revision",
