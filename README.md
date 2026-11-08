@@ -53,6 +53,22 @@ that answered is used (and, if Claude is configured, not cached, so the next
 lookup tries the merge again). Claude spend is capped by the Anthropic
 workspace's spend limit.
 
+Some mass-market paperbacks carry a retail UPC-A barcode instead of the ISBN
+one; `GET /books/upc/{code}` handles those (`ibp/upcs.py`). `code` is the
+12-digit UPC plus any 2- or 5-digit add-on (12, 14 or 17 digits, UPC-A check
+digit on the first 12; anything else is a 422). The UPC is mapped to an ISBN
+from the `upcs` table (keyed by the full code), else by
+[UPCitemdb](https://www.upcitemdb.com/) (asked with the 12 digits), and the
+answer is the ISBN lookup above plus `isbn` and `upc_source` (`upcitemdb` or
+`volunteer`). A UPC with no known ISBN is a 404 and is remembered for 30
+days before UPCitemdb is asked again; UPCitemdb rate-limited or unreachable
+is a 503 and is not remembered. `PUT /books/upc/{code}` with
+`{"isbn": "..."}` records the ISBN a volunteer found after a miss (204); it
+needs the add-on (a bare 12-digit UPC on older paperbacks may identify only
+publisher and price, so it is a 422) and is a 409 if the code already maps to
+a different ISBN. UPCitemdb's free trial endpoint allows 100 lookups a day
+without a key; set `UPCITEMDB_KEY` (`upcitemdb_key`) to use the paid one.
+
 ## Deployment
 
 Production runs on `ibp-server`, a Raspberry Pi 4B, as a Docker Compose
