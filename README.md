@@ -61,7 +61,7 @@ code (with its add-on) wins; else the 12 digits are mapped to an ISBN from
 the `upcs` table or by [UPCitemdb](https://www.upcitemdb.com/), which knows
 no add-ons, so its answer (hit or miss) is cached under the 12 digits and
 shared by every add-on. The answer is the ISBN lookup above plus `isbn` and
-`upc_source` (`upcitemdb` or `volunteer`). A UPC with no known ISBN is a 404
+`upc_source` (`upcitemdb`, `barcodelookup` or `volunteer`). A UPC with no known ISBN is a 404
 `{"detail": "No ISBN known for this UPC.", "reason": "no_isbn"}`, remembered
 for 30 days before UPCitemdb is asked again; a UPC whose ISBN no provider
 knows is a 404 `{"detail": "Book not found.", "reason": "no_book", "isbn":
@@ -72,7 +72,10 @@ digits map to; it needs the add-on (a bare 12-digit UPC on older paperbacks
 may identify only publisher and price, so it is a 422) and is a 409 if the
 full code already maps to a different ISBN. Writes are conditional, so a
 concurrent request never overwrites an ISBN another one stored. UPCitemdb's free trial endpoint allows 100 lookups a day
-without a key; set `UPCITEMDB_KEY` (`upcitemdb_key`) to use the paid one.
+per public IP without a key; set `UPCITEMDB_KEY` (`upcitemdb_key`) to use the
+paid one. With `BARCODELOOKUP_KEY` (`barcodelookup_key`) set, a UPCitemdb
+503 falls back to [Barcode Lookup](https://www.barcodelookup.com/api) (free
+plan: 50 lookups a month); a 503 then means both were unavailable.
 
 ## Deployment
 

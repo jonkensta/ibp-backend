@@ -4,8 +4,11 @@ Some mass-market paperbacks carry a UPC-A (often with a 2- or 5-digit add-on)
 instead of the ISBN barcode. UPCitemdb maps many UPCs to an ISBN; the
 endpoint then does the normal ISBN lookup (see ``ibp.book_api``).
 
-UPCitemdb's free trial endpoint needs no key but allows 100 requests a day;
-with ``[books] upcitemdb_key`` set, the paid endpoint is used instead.
+UPCitemdb's free trial endpoint needs no key but allows 100 requests a day
+per public IP; with ``[books] upcitemdb_key`` set, the paid endpoint is used
+instead. When UPCitemdb is rate-limited or down and ``[books]
+barcodelookup_key`` is set, Barcode Lookup is asked instead (its free plan
+allows 50 requests a month, so it is only a fallback).
 """
 
 from __future__ import annotations
@@ -23,13 +26,14 @@ logger = logging.getLogger(__name__)
 
 TRIAL_URL = "https://api.upcitemdb.com/prod/trial/lookup"
 PAID_URL = "https://api.upcitemdb.com/prod/v1/lookup"
+BARCODELOOKUP_URL = "https://api.barcodelookup.com/v3/products"
 
 # UPC-A plus an optional 2- or 5-digit add-on.
 CODE_LENGTHS = (12, 14, 17)
 
 
 class UpcServiceUnavailable(Exception):
-    """UPCitemdb is rate-limited or unreachable; the answer must not be cached."""
+    """The UPC service is rate-limited or unreachable; don't cache the answer."""
 
 
 def upc_check_digit_ok(upc: str) -> bool:
@@ -111,3 +115,81 @@ async def upcitemdb(upc: str) -> Optional[str]:
         logger.warning("UPCitemdb lookup of %s returned code %s", upc, code)
         raise UpcServiceUnavailable("UPC lookup service failed.")
     return first_isbn(payload)
+
+
+# "ISBN-10 0140449132, ISBN-13 9780140449136" in Barcode Lookup's
+# barcode_formats.
+_FORMAT_ISBN = re.compile(r"ISBN-1[03]\s+([\dX]{10}(?:\d{3})?)", re.IGNORECASE)
+
+
+def product_isbn(product: dict[str, Any]) -> Optional[str]:
+    """The ISBN-13 of one Barcode Lookup product, from barcode_formats or a
+    978/979 barcode_number."""
+    for match in _FORMAT_ISBN.finditer(str(product.get("barcode_formats") or "")):
+        if isbn := normalize_isbn(match.group(1)):
+            return isbn
+    number = str(product.get("barcode_number") or "")
+    if re.fullmatch(r"97[89]\d{10}", number):
+        return normalize_isbn(number)
+    return None
+
+
+async def barcodelookup(upc: str, key: str) -> Optional[str]:
+    """Ask Barcode Lookup for the ISBN-13 of a 12-digit UPC; None if it has none.
+
+    Raises UpcServiceUnavailable when rate-limited, failing or unreachable.
+    The key goes in the query string (the API has no header for it), so
+    neither URLs nor httpx errors (which may quote the URL) are logged.
+    """
+    timeout = config.getfloat("books", "timeout", fallback=DEFAULT_TIMEOUT)
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout, headers={"User-Agent": USER_AGENT}
+        ) as client:
+            response = await client.get(
+                BARCODELOOKUP_URL, params={"barcode": upc, "key": key}
+            )
+    except httpx.HTTPError as error:
+        logger.warning("Barcode Lookup of %s failed: %s", upc, type(error).__name__)
+        raise UpcServiceUnavailable("UPC lookup service unreachable.") from None
+
+    if response.status_code == 404:
+        return None
+    if response.status_code != 200:
+        logger.warning(
+            "Barcode Lookup of %s failed: HTTP %s", upc, response.status_code
+        )
+        raise UpcServiceUnavailable(
+            "UPC lookup service rate-limited."
+            if response.status_code in (403, 429)
+            else "UPC lookup service failed."
+        )
+    try:
+        payload = response.json()
+    except ValueError:
+        logger.warning("Barcode Lookup of %s returned bad JSON", upc)
+        raise UpcServiceUnavailable("UPC lookup service failed.") from None
+    products = payload.get("products") if isinstance(payload, dict) else None
+    if not isinstance(products, list):
+        # A 200 without a product list is a failure, not a miss to cache.
+        logger.warning("Barcode Lookup of %s returned no product list", upc)
+        raise UpcServiceUnavailable("UPC lookup service failed.")
+    for product in products:
+        if isinstance(product, dict) and (isbn := product_isbn(product)):
+            return isbn
+    return None
+
+
+async def lookup_isbn(upc: str) -> tuple[Optional[str], str]:
+    """The ISBN-13 for a 12-digit UPC (None if unknown) and the service's name.
+
+    UPCitemdb first; Barcode Lookup only when UPCitemdb is unavailable and a
+    key is set. Raises UpcServiceUnavailable when no service could answer.
+    """
+    try:
+        return await upcitemdb(upc), "upcitemdb"
+    except UpcServiceUnavailable:
+        key = setting("barcodelookup_key")
+        if not key:
+            raise
+    return await barcodelookup(upc, key), "barcodelookup"
