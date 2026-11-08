@@ -165,8 +165,9 @@ async def upc_isbn(session: AsyncSession, code: str) -> UpcRow | JSONResponse:
 
     A volunteer's mapping of the full code (with its add-on) wins. Else the
     12-digit core is answered from the cache, or asked of UPCitemdb (or, when
-    it is unavailable, Barcode Lookup; neither knows add-ons), and that answer, hit or miss, is cached under the
-    core; a miss is retried after ``UPC_MISS_TTL``.
+    it is unavailable, Barcode Lookup; neither knows add-ons), and that
+    answer, hit or miss, is cached under the core; a miss is retried after
+    ``UPC_MISS_TTL``.
     """
     core = code[:12]
     if upcs.has_add_on(code):
