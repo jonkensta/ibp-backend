@@ -3,7 +3,7 @@
 import datetime
 import unicodedata
 from enum import Enum
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import (
     AfterValidator,
@@ -416,6 +416,19 @@ class UpcMapping(BaseModel):
     """An ISBN a volunteer entered for a UPC the lookup didn't know."""
 
     isbn: str
+
+
+class UpcNotFound(BaseModel):
+    """Why a UPC lookup found no book.
+
+    ``reason`` is ``no_isbn`` when no ISBN is known for the UPC (a volunteer
+    may teach one), or ``no_book`` when the UPC maps to ``isbn`` but no
+    provider knows that ISBN.
+    """
+
+    detail: str
+    reason: Literal["no_isbn", "no_book"]
+    isbn: Optional[str] = None
 
 
 class ItemSourceEnum(str, Enum):
