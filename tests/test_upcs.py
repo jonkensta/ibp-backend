@@ -27,6 +27,8 @@ def with_check_digit(first11: str) -> str:
 
 UPC = with_check_digit("07099900123")
 UPC_ADD_ON = UPC + "00799"
+# Another title sharing the same 12-digit UPC (publisher + price).
+UPC_OTHER_ADD_ON = UPC + "00899"
 BAD_CHECK = UPC[:11] + str((int(UPC[11]) + 1) % 10)
 
 
@@ -251,7 +253,7 @@ def test_get_rejects_invalid_code(client, monkeypatch, code):
 
 
 def test_get_looks_up_caches_and_reuses(client, api_db, monkeypatch):
-    """A new UPC asks the service (12 digits), caches the mapping, then the book."""
+    """A new UPC asks the service (12 digits), caches it under the 12 digits."""
     calls = stub_service(monkeypatch, CRIME)
     book_calls = stub_books(monkeypatch)
     response = client.get(f"/books/upc/{UPC_ADD_ON}")
@@ -265,7 +267,8 @@ def test_get_looks_up_caches_and_reuses(client, api_db, monkeypatch):
         "upc_source": "upcitemdb",
     }
     assert calls == [UPC]
-    assert get_row(api_db, UPC_ADD_ON) == (CRIME, "upcitemdb")
+    assert get_row(api_db, UPC) == (CRIME, "upcitemdb")
+    assert get_row(api_db, UPC_ADD_ON) is None
 
     # Cache hit: neither the service nor the ISBN providers are asked again.
     assert client.get(f"/books/upc/{UPC_ADD_ON}").json()["isbn"] == CRIME
@@ -293,7 +296,10 @@ def test_get_miss_is_cached(client, api_db, monkeypatch):
     stub_books(monkeypatch)
     response = client.get(f"/books/upc/{UPC}")
     assert response.status_code == 404
-    assert response.json()["detail"] == "No ISBN known for this UPC."
+    assert response.json() == {
+        "detail": "No ISBN known for this UPC.",
+        "reason": "no_isbn",
+    }
     assert get_row(api_db, UPC) == (None, "upcitemdb")
     assert client.get(f"/books/upc/{UPC}").status_code == 404
     assert calls == [UPC]
@@ -371,7 +377,11 @@ def test_get_isbn_not_found_is_404(client, api_db, monkeypatch):
     stub_books(monkeypatch, known=())
     response = client.get(f"/books/upc/{UPC}")
     assert response.status_code == 404
-    assert response.json()["detail"] == "Book not found."
+    assert response.json() == {
+        "detail": "Book not found.",
+        "reason": "no_book",
+        "isbn": CRIME,
+    }
     assert get_row(api_db, UPC) == (CRIME, "upcitemdb")
 
 
@@ -408,14 +418,177 @@ def test_put_records_mapping_then_get_uses_it(client, api_db, monkeypatch):
     assert not calls
 
 
-def test_put_replaces_miss(client, api_db, monkeypatch):
-    """A cached miss is replaced by the volunteer's mapping."""
-    stub_service(monkeypatch, None)
-    assert client.get(f"/books/upc/{UPC_ADD_ON}").status_code == 404
-    assert get_row(api_db, UPC_ADD_ON) == (None, "upcitemdb")
+def test_put_after_miss_teaches_full_code(client, api_db, monkeypatch):
+    """After a core miss, the volunteer's ISBN goes under the full code."""
+    calls = stub_service(monkeypatch, None)
+    stub_books(monkeypatch)
+    assert client.get(f"/books/upc/{UPC_ADD_ON}").json()["reason"] == "no_isbn"
+    assert get_row(api_db, UPC) == (None, "upcitemdb")
     response = client.put(f"/books/upc/{UPC_ADD_ON}", json={"isbn": HOBBIT})
     assert response.status_code == 204
     assert get_row(api_db, UPC_ADD_ON) == (HOBBIT, "volunteer")
+    assert get_row(api_db, UPC) == (None, "upcitemdb")
+
+    response = client.get(f"/books/upc/{UPC_ADD_ON}")
+    assert (response.json()["isbn"], response.json()["upc_source"]) == (
+        HOBBIT,
+        "volunteer",
+    )
+    # The other add-on still shares the core's (fresh) miss.
+    assert client.get(f"/books/upc/{UPC_OTHER_ADD_ON}").status_code == 404
+    assert calls == [UPC]
+
+
+def test_put_replaces_full_code_miss(client, api_db):
+    """A NULL-ISBN row under the full code is replaced (conditional UPDATE)."""
+    add_row(api_db, UPC_ADD_ON, None)
+    response = client.put(f"/books/upc/{UPC_ADD_ON}", json={"isbn": HOBBIT})
+    assert response.status_code == 204
+    assert get_row(api_db, UPC_ADD_ON) == (HOBBIT, "volunteer")
+    # The miss is gone: a second, different ISBN now conflicts.
+    response = client.put(f"/books/upc/{UPC_ADD_ON}", json={"isbn": CRIME})
+    assert response.status_code == 409
+    assert get_row(api_db, UPC_ADD_ON) == (HOBBIT, "volunteer")
+
+
+def test_shared_core_add_ons(client, api_db, monkeypatch):
+    """Two add-ons share the core's UPCitemdb answer, cached once."""
+    calls = stub_service(monkeypatch, CRIME)
+    stub_books(monkeypatch)
+    assert client.get(f"/books/upc/{UPC_ADD_ON}").json()["isbn"] == CRIME
+    assert client.get(f"/books/upc/{UPC_OTHER_ADD_ON}").json()["isbn"] == CRIME
+    assert calls == [UPC]
+    assert get_row(api_db, UPC) == (CRIME, "upcitemdb")
+    assert get_row(api_db, UPC_ADD_ON) is None
+    assert get_row(api_db, UPC_OTHER_ADD_ON) is None
+
+
+def test_volunteer_overrides_core_mapping(client, api_db, monkeypatch):
+    """A core mapped to ISBN A doesn't block teaching ISBN B for core+add-on."""
+    add_row(api_db, UPC, CRIME)
+    stub_service(monkeypatch, AssertionError("not called"))
+    stub_books(monkeypatch)
+    response = client.put(f"/books/upc/{UPC_OTHER_ADD_ON}", json={"isbn": HOBBIT})
+    assert response.status_code == 204
+    assert get_row(api_db, UPC) == (CRIME, "upcitemdb")
+
+    response = client.get(f"/books/upc/{UPC_OTHER_ADD_ON}")
+    assert (response.json()["isbn"], response.json()["upc_source"]) == (
+        HOBBIT,
+        "volunteer",
+    )
+    # The first title, and the bare UPC, still get the core's mapping.
+    assert client.get(f"/books/upc/{UPC_ADD_ON}").json()["isbn"] == CRIME
+    assert client.get(f"/books/upc/{UPC}").json()["isbn"] == CRIME
+
+
+# --- Races: another request commits while UPCitemdb is being asked ---------
+
+
+def stub_service_racing(monkeypatch, api_db, answer, winner):
+    """The service answers ``answer`` after another request stores ``winner``.
+
+    ``winner`` is the (code, isbn, source) of the row the other request commits.
+    """
+
+    async def service(_upc):
+        add_or_update(api_db, *winner)
+        return answer
+
+    monkeypatch.setattr(upcs, "upcitemdb", service)
+
+
+def add_or_update(api_db, code, isbn, source):
+    """Commit a ``upcs`` row for ``code`` from a separate session."""
+    with api_db() as session:
+        row = session.get(models.Upc, code)
+        if row is None:
+            session.add(
+                models.Upc(
+                    upc=code,
+                    isbn=isbn,
+                    source=source,
+                    looked_up_at=datetime.datetime.now(datetime.timezone.utc),
+                )
+            )
+        else:
+            row.isbn, row.source = isbn, source
+        session.commit()
+
+
+def test_get_insert_race_answers_from_winner(client, api_db, monkeypatch):
+    """Losing the INSERT race, GET answers from the winning row."""
+    stub_service_racing(monkeypatch, api_db, None, (UPC, HOBBIT, "upcitemdb"))
+    stub_books(monkeypatch)
+    response = client.get(f"/books/upc/{UPC}")
+    assert response.status_code == 200
+    assert response.json()["isbn"] == HOBBIT
+    assert get_row(api_db, UPC) == (HOBBIT, "upcitemdb")
+
+
+def test_get_stale_miss_refresh_keeps_new_isbn(client, api_db, monkeypatch):
+    """Refreshing an expired miss doesn't overwrite an ISBN stored meanwhile."""
+    add_row(api_db, UPC, None, age=datetime.timedelta(days=31))
+    stub_service_racing(monkeypatch, api_db, CRIME, (UPC, HOBBIT, "upcitemdb"))
+    stub_books(monkeypatch)
+    response = client.get(f"/books/upc/{UPC}")
+    assert response.json()["isbn"] == HOBBIT
+    assert get_row(api_db, UPC) == (HOBBIT, "upcitemdb")
+
+
+def test_get_stale_miss_refresh_with_miss_keeps_new_isbn(client, api_db, monkeypatch):
+    """A delayed miss doesn't erase an ISBN stored meanwhile either."""
+    add_row(api_db, UPC, None, age=datetime.timedelta(days=31))
+    stub_service_racing(monkeypatch, api_db, None, (UPC, HOBBIT, "upcitemdb"))
+    stub_books(monkeypatch)
+    assert client.get(f"/books/upc/{UPC}").json()["isbn"] == HOBBIT
+    assert get_row(api_db, UPC) == (HOBBIT, "upcitemdb")
+
+
+def test_get_prefers_volunteer_taught_meanwhile(client, api_db, monkeypatch):
+    """A full-code mapping taught during the service call wins over a miss."""
+    stub_service_racing(monkeypatch, api_db, None, (UPC_ADD_ON, HOBBIT, "volunteer"))
+    stub_books(monkeypatch)
+    response = client.get(f"/books/upc/{UPC_ADD_ON}")
+    assert response.status_code == 200
+    assert (response.json()["isbn"], response.json()["upc_source"]) == (
+        HOBBIT,
+        "volunteer",
+    )
+    assert get_row(api_db, UPC) == (None, "upcitemdb")
+
+
+def test_write_upc_paths(api_db):
+    """write_upc: insert, conditional replace of a miss, keep an existing ISBN."""
+    # pylint: disable=import-outside-toplevel
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    from ibp import book_api
+
+    with api_db() as session:
+        path = session.get_bind().url.database
+
+    async def run():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+        try:
+            async with AsyncSession(engine) as session:
+                inserted = await book_api.write_upc(session, UPC, None, "upcitemdb")
+                replaced = await book_api.write_upc(session, UPC, CRIME, "upcitemdb")
+                kept = await book_api.write_upc(session, UPC, HOBBIT, "volunteer")
+                kept_miss = await book_api.write_upc(session, UPC, None, "upcitemdb")
+            return inserted, replaced, kept, kept_miss
+        finally:
+            await engine.dispose()
+
+    inserted, replaced, kept, kept_miss = asyncio.run(run())
+    assert (inserted.isbn, replaced.isbn, kept.isbn, kept_miss.isbn) == (
+        None,
+        CRIME,
+        CRIME,
+        CRIME,
+    )
+    assert (kept.source, kept_miss.source) == ("upcitemdb", "upcitemdb")
+    assert get_row(api_db, UPC) == (CRIME, "upcitemdb")
 
 
 def test_put_conflict_keeps_mapping(client, api_db):
