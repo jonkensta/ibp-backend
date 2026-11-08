@@ -202,6 +202,7 @@ def api_db(
     monkeypatch.setattr(providers, "query_by_name", no_providers)
     monkeypatch.setattr(books, "fetch_candidates", no_book_providers)
     monkeypatch.setattr(upcs, "upcitemdb", no_book_providers)
+    monkeypatch.setattr(upcs, "barcodelookup", no_book_providers)
 
     app.dependency_overrides[api.get_session] = get_test_session
     try:

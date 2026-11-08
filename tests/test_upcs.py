@@ -13,6 +13,7 @@ from alembic import command
 from ibp import books, db_bootstrap, models, upcs
 
 # The real client, imported before conftest's api_db guard replaces it.
+from ibp.upcs import barcodelookup as real_barcodelookup
 from ibp.upcs import upcitemdb as real_upcitemdb
 
 HOBBIT = "9780547928227"
@@ -642,3 +643,166 @@ def test_bootstrap_adopts_pre_upcs_create_all_schema(tmp_path, monkeypatch):
     monkeypatch.setattr(db_bootstrap, "get_sync_database_url", lambda: url)
     db_bootstrap.bootstrap()
     assert "upcs" in table_names(url)
+
+
+# --- Barcode Lookup fallback -------------------------------------------------
+
+
+def set_keys(monkeypatch, **keys):
+    """Configure ``[books]`` options such as ``barcodelookup_key``."""
+    real_setting = books.setting
+    monkeypatch.setattr(
+        upcs,
+        "setting",
+        lambda option, fallback="": keys.get(option, real_setting(option, fallback)),
+    )
+
+
+def product(**fields):
+    """A Barcode Lookup 200 response with one product."""
+    return httpx.Response(200, json={"products": [fields]})
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"barcode_formats": f"ISBN-10 0140449132, ISBN-13 {CRIME}"},
+        {"barcode_formats": "ISBN-10 0140449132"},
+        {"barcode_formats": "UPC-A 0" + CRIME[:11], "barcode_number": CRIME},
+    ],
+    ids=["formats-isbn13", "formats-isbn10", "barcode-number"],
+)
+def test_product_isbn(fields):
+    """The ISBN comes from barcode_formats or a 978/979 barcode_number."""
+    assert upcs.product_isbn(fields) == CRIME
+
+
+def test_product_isbn_none_for_non_books():
+    """A product with no ISBN anywhere has none."""
+    assert (
+        upcs.product_isbn({"barcode_formats": f"UPC-A {UPC}", "barcode_number": UPC})
+        is None
+    )
+
+
+def test_barcodelookup_request_and_hit(monkeypatch):
+    """The UPC and key go in the query string; the ISBN is parsed out."""
+    requests = mock_upcitemdb(
+        monkeypatch, lambda _r: product(barcode_formats=f"ISBN-13 {CRIME}")
+    )
+    assert asyncio.run(real_barcodelookup(UPC, "secret")) == CRIME
+    assert str(requests[0].url) == f"{upcs.BARCODELOOKUP_URL}?barcode={UPC}&key=secret"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [httpx.Response(404), product(barcode_number=UPC)],
+    ids=["404", "no-isbn"],
+)
+def test_barcodelookup_unknown_is_a_miss(monkeypatch, response):
+    """404 or a product without an ISBN is a miss."""
+    mock_upcitemdb(monkeypatch, lambda _r: response)
+    assert asyncio.run(real_barcodelookup(UPC, "k")) is None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(403, text="quota"),
+        httpx.Response(429, text="slow down"),
+        httpx.Response(500, text="oops"),
+        httpx.Response(200, text="not json"),
+    ],
+)
+def test_barcodelookup_unavailable(monkeypatch, response):
+    """Quota, server errors and bad JSON raise UpcServiceUnavailable."""
+    mock_upcitemdb(monkeypatch, lambda _r: response)
+    with pytest.raises(upcs.UpcServiceUnavailable):
+        asyncio.run(real_barcodelookup(UPC, "k"))
+
+
+def test_barcodelookup_error_hides_key(monkeypatch, caplog):
+    """A connection error is logged by type only: httpx errors may quote the URL."""
+
+    def refuse(request):
+        raise httpx.ConnectError(f"down: {request.url}", request=request)
+
+    mock_upcitemdb(monkeypatch, refuse)
+    with pytest.raises(upcs.UpcServiceUnavailable) as raised:
+        asyncio.run(real_barcodelookup(UPC, "secret"))
+    assert "secret" not in caplog.text
+    assert "secret" not in str(raised.value)
+    assert raised.value.__cause__ is None
+
+
+def stub_fallback(monkeypatch, answer):
+    """Make upcs.barcodelookup return (or raise) ``answer``; return the calls."""
+    calls = []
+
+    async def service(upc, key):
+        calls.append((upc, key))
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(upcs, "barcodelookup", service)
+    return calls
+
+
+RATE_LIMITED = upcs.UpcServiceUnavailable("UPC lookup service rate-limited.")
+
+
+def test_lookup_isbn_prefers_upcitemdb(monkeypatch):
+    """A UPCitemdb answer, hit or miss, never touches the fallback."""
+    set_keys(monkeypatch, barcodelookup_key="k")
+    fallback = stub_fallback(monkeypatch, CRIME)
+    stub_service(monkeypatch, None)
+    assert asyncio.run(upcs.lookup_isbn(UPC)) == (None, "upcitemdb")
+    stub_service(monkeypatch, HOBBIT)
+    assert asyncio.run(upcs.lookup_isbn(UPC)) == (HOBBIT, "upcitemdb")
+    assert not fallback
+
+
+def test_lookup_isbn_without_key_reraises(monkeypatch):
+    """No Barcode Lookup key: UPCitemdb's unavailability stands."""
+    set_keys(monkeypatch, barcodelookup_key="")
+    fallback = stub_fallback(monkeypatch, CRIME)
+    stub_service(monkeypatch, RATE_LIMITED)
+    with pytest.raises(upcs.UpcServiceUnavailable):
+        asyncio.run(upcs.lookup_isbn(UPC))
+    assert not fallback
+
+
+def test_get_falls_back_to_barcodelookup(client, api_db, monkeypatch):
+    """UPCitemdb rate-limited: Barcode Lookup answers and is cached as the source."""
+    set_keys(monkeypatch, barcodelookup_key="k")
+    stub_service(monkeypatch, RATE_LIMITED)
+    fallback = stub_fallback(monkeypatch, CRIME)
+    stub_books(monkeypatch)
+    response = client.get(f"/books/upc/{UPC_ADD_ON}")
+    assert response.status_code == 200
+    assert response.json()["isbn"] == CRIME
+    assert response.json()["upc_source"] == "barcodelookup"
+    assert fallback == [(UPC, "k")]
+    assert get_row(api_db, UPC) == (CRIME, "barcodelookup")
+
+
+def test_get_fallback_miss_is_cached(client, api_db, monkeypatch):
+    """A Barcode Lookup miss is a cached no_isbn 404 like a UPCitemdb one."""
+    set_keys(monkeypatch, barcodelookup_key="k")
+    stub_service(monkeypatch, RATE_LIMITED)
+    stub_fallback(monkeypatch, None)
+    response = client.get(f"/books/upc/{UPC}")
+    assert response.status_code == 404
+    assert response.json()["reason"] == "no_isbn"
+    assert get_row(api_db, UPC) == (None, "barcodelookup")
+
+
+def test_get_both_unavailable_is_503_uncached(client, api_db, monkeypatch):
+    """Both services down: 503, nothing cached."""
+    set_keys(monkeypatch, barcodelookup_key="k")
+    stub_service(monkeypatch, RATE_LIMITED)
+    stub_fallback(monkeypatch, upcs.UpcServiceUnavailable("UPC lookup service failed."))
+    response = client.get(f"/books/upc/{UPC}")
+    assert response.status_code == 503
+    assert get_row(api_db, UPC) is None

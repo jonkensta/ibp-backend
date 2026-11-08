@@ -25,6 +25,7 @@ services:
       GOOGLE_BOOKS_KEY: ${GOOGLE_BOOKS_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       UPCITEMDB_KEY: ${UPCITEMDB_KEY:-}
+      BARCODELOOKUP_KEY: ${BARCODELOOKUP_KEY:-}
     # Own the database as the host user, so host-side tools (ibp-backup,
     # sqlite3) and the container agree on file ownership.
     user: "${IBP_UID:-1000}:${IBP_GID:-1000}"

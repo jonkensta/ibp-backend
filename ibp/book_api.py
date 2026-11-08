@@ -164,8 +164,8 @@ async def upc_isbn(session: AsyncSession, code: str) -> UpcRow | JSONResponse:
     """The ``upcs`` row giving ``code``'s ISBN, else the no_isbn 404.
 
     A volunteer's mapping of the full code (with its add-on) wins. Else the
-    12-digit core is answered from the cache, or asked of UPCitemdb (which
-    knows no add-ons), and that answer, hit or miss, is cached under the
+    12-digit core is answered from the cache, or asked of UPCitemdb (or, when
+    it is unavailable, Barcode Lookup; neither knows add-ons), and that answer, hit or miss, is cached under the
     core; a miss is retried after ``UPC_MISS_TTL``.
     """
     core = code[:12]
@@ -177,12 +177,12 @@ async def upc_isbn(session: AsyncSession, code: str) -> UpcRow | JSONResponse:
     row = await read_upc(session, core)
     if row is None or (row.isbn is None and now() - row.looked_up_at >= UPC_MISS_TTL):
         try:
-            found = await upcs.upcitemdb(core)
+            found, source = await upcs.lookup_isbn(core)
         except upcs.UpcServiceUnavailable as error:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
             ) from error
-        row = await write_upc(session, core, found, "upcitemdb")
+        row = await write_upc(session, core, found, source)
         if upcs.has_add_on(code):
             # A volunteer may have taught the full code meanwhile.
             full = await read_upc(session, code)
