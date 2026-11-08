@@ -170,7 +170,11 @@ async def barcodelookup(upc: str, key: str) -> Optional[str]:
         logger.warning("Barcode Lookup of %s returned bad JSON", upc)
         raise UpcServiceUnavailable("UPC lookup service failed.") from None
     products = payload.get("products") if isinstance(payload, dict) else None
-    for product in products or []:
+    if not isinstance(products, list):
+        # A 200 without a product list is a failure, not a miss to cache.
+        logger.warning("Barcode Lookup of %s returned no product list", upc)
+        raise UpcServiceUnavailable("UPC lookup service failed.")
+    for product in products:
         if isinstance(product, dict) and (isbn := product_isbn(product)):
             return isbn
     return None

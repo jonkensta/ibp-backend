@@ -712,6 +712,10 @@ def test_barcodelookup_unknown_is_a_miss(monkeypatch, response):
         httpx.Response(429, text="slow down"),
         httpx.Response(500, text="oops"),
         httpx.Response(200, text="not json"),
+        httpx.Response(200, json={}),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json={"error": "provider failure"}),
+        httpx.Response(200, json={"products": "oops"}),
     ],
 )
 def test_barcodelookup_unavailable(monkeypatch, response):
@@ -805,4 +809,14 @@ def test_get_both_unavailable_is_503_uncached(client, api_db, monkeypatch):
     stub_fallback(monkeypatch, upcs.UpcServiceUnavailable("UPC lookup service failed."))
     response = client.get(f"/books/upc/{UPC}")
     assert response.status_code == 503
+    assert get_row(api_db, UPC) is None
+
+
+def test_get_malformed_fallback_is_503_uncached(client, api_db, monkeypatch):
+    """A Barcode Lookup 200 without a product list is a 503, not a cached miss."""
+    set_keys(monkeypatch, barcodelookup_key="k")
+    stub_service(monkeypatch, RATE_LIMITED)
+    monkeypatch.setattr(upcs, "barcodelookup", real_barcodelookup)
+    mock_upcitemdb(monkeypatch, lambda _r: httpx.Response(200, json={}))
+    assert client.get(f"/books/upc/{UPC}").status_code == 503
     assert get_row(api_db, UPC) is None
