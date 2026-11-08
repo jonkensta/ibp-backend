@@ -403,6 +403,21 @@ class Book(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class UpcBook(Book):
+    """A book found by its UPC: ``isbn`` is the ISBN-13 the UPC maps to.
+
+    ``upc_source`` says who mapped it: ``upcitemdb`` or ``volunteer``.
+    """
+
+    upc_source: str
+
+
+class UpcMapping(BaseModel):
+    """An ISBN a volunteer entered for a UPC the lookup didn't know."""
+
+    isbn: str
+
+
 class ItemSourceEnum(str, Enum):
     """Where a package item's title and author came from."""
 
