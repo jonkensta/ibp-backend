@@ -14,6 +14,8 @@ from .conftest import TOPLEVEL
 from .test_migrate_end_to_end import run_migrate
 
 PACKAGE_TABLES = {"package_items", "registrations"}
+# Tables added after the package tables, absent from a phase 1 schema too.
+LATER_TABLES = {"upcs"}
 
 
 def head_revision() -> str:
@@ -102,7 +104,7 @@ def test_bootstrap_adopts_pre_package_items_schema(tmp_path: Path, monkeypatch):
         tables = [
             table
             for name, table in ibp.models.Base.metadata.tables.items()
-            if name not in PACKAGE_TABLES
+            if name not in PACKAGE_TABLES | LATER_TABLES
         ]
         ibp.models.Base.metadata.create_all(engine, tables=tables)
         with engine.begin() as connection:
