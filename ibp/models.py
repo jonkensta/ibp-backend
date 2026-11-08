@@ -439,6 +439,4 @@ class Upc(Base):
     upc: Mapped[str] = mapped_column(String(17), primary_key=True)
     isbn: Mapped[Optional[str]] = mapped_column(String(13))
     source: Mapped[str] = mapped_column(String(20), nullable=False)
-    looked_up_at: Mapped[datetime.datetime] = mapped_column(
-        TZDateTime, nullable=False
-    )
+    looked_up_at: Mapped[datetime.datetime] = mapped_column(TZDateTime, nullable=False)
