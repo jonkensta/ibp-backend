@@ -19,7 +19,8 @@ refund = importlib.util.module_from_spec(_spec)
 sys.modules["ibp_label_refund"] = refund  # dataclasses look the module up
 _loader.exec_module(refund)
 
-NOW = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+# run() reads the real clock, so label ages are relative to it.
+NOW = datetime.now(timezone.utc)
 
 
 def shipment(days_old: float, **overrides):
