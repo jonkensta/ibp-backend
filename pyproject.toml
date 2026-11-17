@@ -6,7 +6,7 @@ authors = [
     { name = "Jon Starr", email = "github@jstarr.me" },
 ]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11.5"
 keywords = ["fastapi", "sqlalchemy", "api", "database"]
 license = { text = "MIT" } # Or choose another appropriate license
 
