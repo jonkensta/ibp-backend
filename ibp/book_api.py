@@ -2,12 +2,11 @@
 
 import datetime
 from dataclasses import asdict, dataclass
-from typing import Optional, cast
+from typing import Optional
 
 import sqlalchemy as sa
 from fastapi import Depends, HTTPException, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,9 +14,9 @@ from . import books, models, schemas, upcs
 from .api import get_session
 from .base import app
 
-# How long a UPC that no service maps to an ISBN is answered from the cache
-# before the service is asked again.
-UPC_MISS_TTL = datetime.timedelta(days=30)
+# The only writer of ``upcs`` rows now (older rows may say ``upcitemdb`` or
+# ``barcodelookup``, from UPC lookup services since removed).
+VOLUNTEER = "volunteer"
 
 
 def now() -> datetime.datetime:
@@ -125,74 +124,21 @@ async def read_upc(session: AsyncSession, code: str) -> Optional[UpcRow]:
     return None if row is None else UpcRow(*row)
 
 
-async def write_upc(
-    session: AsyncSession, code: str, isbn: Optional[str], source: str
-) -> Optional[UpcRow]:
-    """Store ``isbn`` for ``code`` unless the row already has an ISBN.
+async def write_upc(session: AsyncSession, code: str, isbn: str) -> Optional[UpcRow]:
+    """Store a volunteer's ``isbn`` for ``code`` unless ``code`` has a row.
 
-    Atomic: a miss (NULL ISBN) is replaced with a conditional UPDATE, else
-    the row is inserted; a row that has an ISBN, or that another request
-    inserted first, is kept. Returns the row as it now stands, so the caller
-    answers from the winner.
+    A row already there, or one another request inserts first, is kept.
+    Returns the row as it now stands, so the caller can tell whether its
+    ISBN won.
     """
-    ours = UpcRow(isbn=isbn, source=source, looked_up_at=now())
-    values = asdict(ours)
-    for _attempt in range(2):
-        result = await session.execute(
-            sa.update(models.Upc)
-            .where(models.Upc.upc == code, models.Upc.isbn.is_(None))
-            .values(**values)
-            .execution_options(synchronize_session=False)
-        )
-        if cast(CursorResult, result).rowcount:
-            await session.commit()
-            return ours
-        try:
-            await session.execute(sa.insert(models.Upc).values(upc=code, **values))
-            await session.commit()
-            return ours
-        except IntegrityError:
-            await session.rollback()
-        row = await read_upc(session, code)
-        if row is None or row.isbn is not None:
-            return row
-        # A miss appeared between the UPDATE and the INSERT: try once more.
+    ours = UpcRow(isbn=isbn, source=VOLUNTEER, looked_up_at=now())
+    try:
+        await session.execute(sa.insert(models.Upc).values(upc=code, **asdict(ours)))
+        await session.commit()
+        return ours
+    except IntegrityError:
+        await session.rollback()
     return await read_upc(session, code)
-
-
-async def upc_isbn(session: AsyncSession, code: str) -> UpcRow | JSONResponse:
-    """The ``upcs`` row giving ``code``'s ISBN, else the no_isbn 404.
-
-    A volunteer's mapping of the full code (with its add-on) wins. Else the
-    12-digit core is answered from the cache, or asked of UPCitemdb (or, when
-    it is unavailable, Barcode Lookup; neither knows add-ons), and that
-    answer, hit or miss, is cached under the core; a miss is retried after
-    ``UPC_MISS_TTL``.
-    """
-    core = code[:12]
-    if upcs.has_add_on(code):
-        full = await read_upc(session, code)
-        if full is not None and full.isbn is not None:
-            return full
-
-    row = await read_upc(session, core)
-    if row is None or (row.isbn is None and now() - row.looked_up_at >= UPC_MISS_TTL):
-        try:
-            found, source = await upcs.lookup_isbn(core)
-        except upcs.UpcServiceUnavailable as error:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
-            ) from error
-        row = await write_upc(session, core, found, source)
-        if upcs.has_add_on(code):
-            # A volunteer may have taught the full code meanwhile.
-            full = await read_upc(session, code)
-            if full is not None and full.isbn is not None:
-                return full
-
-    if row is None or row.isbn is None:
-        return no_isbn()
-    return row
 
 
 @app.get(
@@ -203,19 +149,18 @@ async def upc_isbn(session: AsyncSession, code: str) -> UpcRow | JSONResponse:
 async def get_book_by_upc(code: str, session: AsyncSession = Depends(get_session)):
     """Title and author for a UPC-A (plus any add-on) printed on a book.
 
-    A volunteer's mapping of the full code wins; else the 12-digit UPC is
-    mapped to an ISBN from the ``upcs`` cache or by UPCitemdb, cached under
-    the 12 digits (see ``upc_isbn``). Then the book is the normal ISBN
-    lookup. Both 404s say why in ``reason``: ``no_isbn`` (no ISBN known for
-    the UPC; cached for 30 days) or ``no_book`` (the UPC maps to ``isbn``,
-    which no provider knows). UPCitemdb rate-limited or down is a 503, not
-    cached.
+    Answered only from the ``upcs`` map volunteers fill (see
+    ``put_book_upc``), by an exact match on the full code: a bare 12-digit
+    UPC is shared by many titles, so a code with an add-on never falls back
+    to it. The ISBN found is then the normal ISBN lookup. Both 404s say why
+    in ``reason``: ``no_isbn`` (no ISBN known for the code; rows with a NULL
+    ISBN are misses left by the removed lookup services) or ``no_book`` (the
+    code maps to ``isbn``, which no book provider knows).
     """
     check_upc_code(code)
-    row = await upc_isbn(session, code)
-    if isinstance(row, JSONResponse):
-        return row
-    assert row.isbn is not None
+    row = await read_upc(session, code)
+    if row is None or row.isbn is None:
+        return no_isbn()
     try:
         book = await book_for_isbn(session, row.isbn)
     except HTTPException as error:
@@ -231,14 +176,12 @@ async def put_book_upc(
     mapping: schemas.UpcMapping,
     session: AsyncSession = Depends(get_session),
 ):
-    """Record the ISBN a volunteer found for a UPC the lookup didn't know.
+    """Record the ISBN a volunteer scanned for a UPC the map didn't know.
 
-    Stored under the full code, which must include its add-on: on older
-    mass-market paperbacks the bare 12-digit UPC may identify only the
-    publisher and price, shared by many titles. Only the full code's own
-    mapping is checked, so the volunteer's ISBN overrides whatever the
-    12-digit UPC maps to; a full code already mapped to a different ISBN is
-    a 409 and keeps its mapping.
+    The code must include its add-on: the bare 12-digit UPC identifies only
+    the publisher and price point, shared by many titles, so mapping it
+    would give them all one ISBN. A code already mapped to a different ISBN
+    is a 409 and keeps its mapping.
     """
     check_upc_code(code)
     if not upcs.has_add_on(code):
@@ -251,7 +194,7 @@ async def put_book_upc(
     if isbn is None:
         raise HTTPException(status_code=422, detail="Not a valid ISBN.")
 
-    row = await write_upc(session, code, isbn, "volunteer")
+    row = await write_upc(session, code, isbn)
     if row is None or row.isbn != isbn:
         mapped = f"ISBN {row.isbn}" if row and row.isbn else "another ISBN"
         raise HTTPException(

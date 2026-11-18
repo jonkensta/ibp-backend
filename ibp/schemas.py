@@ -406,14 +406,14 @@ class Book(BaseModel):
 class UpcBook(Book):
     """A book found by its UPC: ``isbn`` is the ISBN-13 the UPC maps to.
 
-    ``upc_source`` says who mapped it: ``upcitemdb`` or ``volunteer``.
+    ``upc_source`` says who mapped it: ``volunteer``.
     """
 
     upc_source: str
 
 
 class UpcMapping(BaseModel):
-    """An ISBN a volunteer entered for a UPC the lookup didn't know."""
+    """An ISBN a volunteer scanned for a UPC the map didn't know."""
 
     isbn: str
 
