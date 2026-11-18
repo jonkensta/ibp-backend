@@ -21,7 +21,8 @@ class EnvInterpolatingConfigParser(configparser.ConfigParser):
         ${DATABASE_URL:-sqlite:///data.db} - reads from env var, uses default if not set
     """
 
-    #: The file this configuration was read from, if any.
+    #: The last file this configuration was read from (the override over
+    #: sample.conf, if any).
     path: Path | None = None
 
     def get(self, section, option, **kwargs):
@@ -61,31 +62,40 @@ def get_toplevel_path() -> Path:
     return Path(__file__).parent.parent
 
 
-def load_config_file(filepath: Path) -> EnvInterpolatingConfigParser:
-    """Read one config file, raising if it is missing or unreadable.
+def load_config_files(filepaths: list[Path]) -> EnvInterpolatingConfigParser:
+    """Read config files in order, each overriding the ones before it.
 
-    ``ConfigParser.read`` silently skips files it cannot open, which would
-    leave the server running on an empty configuration.
+    A section or option a later file leaves out keeps the earlier file's
+    value. Every file must exist and be readable: ``ConfigParser.read``
+    silently skips files it cannot open, which would leave the server running
+    on a configuration nobody wrote.
     """
     server_config = EnvInterpolatingConfigParser()
-    with open(filepath, encoding="utf-8") as file:
-        server_config.read_file(file)
-    server_config.path = filepath.resolve()
+    for filepath in filepaths:
+        with open(filepath, encoding="utf-8") as file:
+            server_config.read_file(file)
+    server_config.path = filepaths[-1].resolve()
     return server_config
 
 
 def read_server_config():
     """Read configuration file at module load time.
 
-    Config file resolution order:
+    ``sample.conf`` in the project toplevel supplies the defaults, and the
+    first of these, if any, is read over it:
+
     1. CONF environment variable (if set) - explicit path override; a
        relative path is resolved against the project toplevel. It must exist.
     2. server.conf (if exists) - local/production config
-    3. sample.conf (fallback) - template
+
+    So an override file need only hold the options it changes. At least one
+    file must exist.
 
     Supports environment variable substitution via ${VAR} or ${VAR:-default} syntax.
     """
     toplevel = get_toplevel_path()
+    sample = toplevel / "sample.conf"
+    defaults = [sample] if sample.exists() else []
 
     # Check for explicit override via CONF environment variable
     config_file = os.getenv("CONF")
@@ -96,19 +106,16 @@ def read_server_config():
                 f"CONF is set to {config_file!r}, but no config file exists at "
                 f"{filepath}"
             )
-        return load_config_file(filepath)
+        return load_config_files([*defaults, filepath])
 
-    # Search default locations in order of precedence
-    for config_file in ["server.conf", "sample.conf"]:
-        filepath = toplevel / config_file
-        if filepath.exists():
-            return load_config_file(filepath)
-
-    # No config file found
-    raise FileNotFoundError(
-        "No configuration file found. "
-        "Set CONF environment variable or create server.conf/sample.conf"
-    )
+    server = toplevel / "server.conf"
+    filepaths = [*defaults, server] if server.exists() else defaults
+    if not filepaths:
+        raise FileNotFoundError(
+            "No configuration file found. "
+            "Set CONF environment variable or create server.conf/sample.conf"
+        )
+    return load_config_files(filepaths)
 
 
 config = read_server_config()
