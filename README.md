@@ -28,18 +28,19 @@ config, uses `data.db` in the project directory. Create the schema first with
 
 ## Configuration
 
-The server reads exactly one INI config file, found in this order:
+The server reads `sample.conf`, the committed template whose values are the
+production defaults, and then reads the first of these over it, if any:
 
 1. the path in the `CONF` environment variable (relative paths are resolved
    against the project directory). If `CONF` is set and the file does not
    exist, startup fails with an error naming the path.
-2. `server.conf` in the project directory, if it exists (gitignored; copy
-   `sample.conf` to start one).
-3. `sample.conf`, the committed template, whose defaults are the production
-   values.
+2. `server.conf` in the project directory, if it exists (gitignored).
 
-The file is not merged with `sample.conf`, so a `server.conf` must contain
-every section. Values may use `${VAR}` (required environment variable) or
+The override only needs the sections and options it changes; anything it
+leaves out keeps its `sample.conf` value, so to turn off an inherited one,
+set it empty (for example `anthropic_api_key =` under `[books]`, which would
+otherwise come from `ANTHROPIC_API_KEY`). Startup fails if no file exists.
+Values may use `${VAR}` (required environment variable) or
 `${VAR:-default}`; for example the database URI is
 `${DATABASE_URL:-sqlite+aiosqlite:///data.db}`.
 
