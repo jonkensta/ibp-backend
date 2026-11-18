@@ -55,28 +55,24 @@ lookup tries the merge again). Claude spend is capped by the Anthropic
 workspace's spend limit.
 
 Some mass-market paperbacks carry a retail UPC-A barcode instead of the ISBN
-one; `GET /books/upc/{code}` handles those (`ibp/upcs.py`). `code` is the
-12-digit UPC plus any 2- or 5-digit add-on (12, 14 or 17 digits, UPC-A check
-digit on the first 12; anything else is a 422). A volunteer's mapping of the full
-code (with its add-on) wins; else the 12 digits are mapped to an ISBN from
-the `upcs` table or by [UPCitemdb](https://www.upcitemdb.com/), which knows
-no add-ons, so its answer (hit or miss) is cached under the 12 digits and
-shared by every add-on. The answer is the ISBN lookup above plus `isbn` and
-`upc_source` (`upcitemdb`, `barcodelookup` or `volunteer`). A UPC with no known ISBN is a 404
-`{"detail": "No ISBN known for this UPC.", "reason": "no_isbn"}`, remembered
-for 30 days before UPCitemdb is asked again; a UPC whose ISBN no provider
-knows is a 404 `{"detail": "Book not found.", "reason": "no_book", "isbn":
-"<ISBN-13>"}`. UPCitemdb rate-limited or unreachable is a 503 and is not
-remembered. `PUT /books/upc/{code}` with `{"isbn": "..."}` records the ISBN
-a volunteer found under the full code (204), overriding whatever the 12
-digits map to; it needs the add-on (a bare 12-digit UPC on older paperbacks
-may identify only publisher and price, so it is a 422) and is a 409 if the
-full code already maps to a different ISBN. Writes are conditional, so a
-concurrent request never overwrites an ISBN another one stored. UPCitemdb's free trial endpoint allows 100 lookups a day
-per public IP without a key; set `UPCITEMDB_KEY` (`upcitemdb_key`) to use the
-paid one. With `BARCODELOOKUP_KEY` (`barcodelookup_key`) set, a UPCitemdb
-503 falls back to [Barcode Lookup](https://www.barcodelookup.com/api) (free
-plan: 50 lookups a month); a 503 then means both were unavailable.
+one; `GET /books/upc/{code}` handles those from the `upcs` table, a local
+UPC -> ISBN map that volunteers fill (`ibp/upcs.py`; no outside service is
+asked). `code` is the 12-digit UPC plus any 2- or 5-digit add-on (12, 14 or
+17 digits, UPC-A check digit on the first 12; anything else is a 422). The
+12 digits identify only the publisher and price point, shared by many
+titles, and the add-on tells them apart, so a code is answered only by an
+exact match on the full code. The answer is the ISBN lookup above plus `isbn`
+and `upc_source` (`volunteer`). A code with no known ISBN is a 404
+`{"detail": "No ISBN known for this UPC.", "reason": "no_isbn"}`; one whose
+ISBN no provider knows is a 404 `{"detail": "Book not found.", "reason":
+"no_book", "isbn": "<ISBN-13>"}`. `PUT /books/upc/{code}` with `{"isbn":
+"..."}` records the ISBN a volunteer scanned for the code (204); it needs the
+add-on (a bare 12-digit UPC would map many titles to one ISBN, so it is a
+422) and is a 409 if the code already maps to a different ISBN. The Book
+Portal extension sends it when an unknown UPC with an add-on is followed by
+an ISBN scan. Rows keyed by a bare 12-digit UPC with a NULL `isbn` are misses
+cached by UPCitemdb and Barcode Lookup, which v1.0.10 to v1.0.12 asked; they
+answer nothing.
 
 ## Deployment
 

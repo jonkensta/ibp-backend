@@ -425,14 +425,13 @@ class Book(Base):
 
 
 class Upc(Base):
-    """Sqlalchemy model for the UPC -> ISBN lookup cache.
+    """Sqlalchemy model for the UPC -> ISBN map that volunteers fill.
 
-    UPCitemdb answers (``source`` ``upcitemdb``) are keyed by the 12-digit
-    UPC-A, the only part the service sees; ``isbn`` is NULL for a miss, which
-    is retried after a while. A volunteer's ISBN (``source`` ``volunteer``) is
-    keyed by the full code with its 2- or 5-digit add-on, since on older
-    mass-market paperbacks the 12 digits may identify only the publisher and
-    price, and wins over the 12-digit row.
+    A volunteer's ISBN (``source`` ``volunteer``) is keyed by the full code
+    with its 2- or 5-digit add-on, since the 12-digit UPC identifies only the
+    publisher and price point. Rows keyed by a bare 12-digit UPC, with
+    ``source`` ``upcitemdb`` or ``barcodelookup`` and ``isbn`` NULL, are
+    misses cached by UPC lookup services since removed; they answer nothing.
     """
 
     __tablename__ = "upcs"
