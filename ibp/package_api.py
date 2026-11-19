@@ -26,7 +26,7 @@ import logging
 from typing import Annotated
 
 import sqlalchemy
-from fastapi import Depends, HTTPException, Path, Query, status
+from fastapi import Depends, HTTPException, Path, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -79,13 +79,14 @@ def tdcj_number(inmate_id: int) -> str:
     return f"{inmate_id:08d}"
 
 
-async def bump_contents_revision(session: AsyncSession, code: str) -> RequestKey:
-    """Increment a request's ``contents_revision``, or 404 if it doesn't exist.
+async def update_contents_revision(
+    session: AsyncSession, key: RequestKey, increment: int
+) -> None:
+    """Add ``increment`` to a request's ``contents_revision``, or 404.
 
-    Meant as the first statement of a write transaction (see the module
-    docstring); raising later in the transaction rolls the increment back.
+    With ``increment=0`` it changes nothing but still takes SQLite's write
+    lock, for a write that only knows later whether the contents change.
     """
-    key = request_key(code)
     found = (
         await session.execute(
             sqlalchemy.update(models.Request)
@@ -94,13 +95,23 @@ async def bump_contents_revision(session: AsyncSession, code: str) -> RequestKey
                 models.Request.inmate_id == key.inmate_id,
                 models.Request.index == key.index,
             )
-            .values(contents_revision=models.Request.contents_revision + 1)
+            .values(contents_revision=models.Request.contents_revision + increment)
             .returning(models.Request.index)
             .execution_options(synchronize_session=False)
         )
     ).scalar_one_or_none()
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail=REQUEST_NOT_FOUND)
+
+
+async def bump_contents_revision(session: AsyncSession, code: str) -> RequestKey:
+    """Increment a request's ``contents_revision``, or 404 if it doesn't exist.
+
+    Meant as the first statement of a write transaction (see the module
+    docstring); raising later in the transaction rolls the increment back.
+    """
+    key = request_key(code)
+    await update_contents_revision(session, key, 1)
     return key
 
 
@@ -367,6 +378,145 @@ async def register_package_item(
         )
         await session.flush()
         logger.debug("registered package item %d", item.id)
+        return schemas.PackageItem.model_validate(item)
+
+
+async def matching_item(
+    session: AsyncSession, key: RequestKey, report: schemas.PortalRegistrationCreate
+) -> models.PackageItem | None:
+    """The unregistered item of a package that a portal report is about.
+
+    First the oldest with the reported ISBN, else the oldest with the same
+    title (ignoring case) and no other ISBN, else none.
+    """
+    items = (
+        await session.execute(
+            select(models.PackageItem)
+            .where(item_belongs_to(key), models.PackageItem.registered_at.is_(None))
+            .order_by(models.PackageItem.id)
+        )
+    ).scalars()
+    candidates = list(items)
+    if report.isbn is not None:
+        for item in candidates:
+            if item.isbn == report.isbn:
+                return item
+    title = report.title.casefold()
+    for item in candidates:
+        if item.isbn in (None, report.isbn) and item.title.casefold() == title:
+            return item
+    return None
+
+
+@app.post(
+    "/requests/{code}/portal-registrations",
+    response_model=schemas.PackageItem,
+    status_code=status.HTTP_201_CREATED,
+    responses={200: {"description": "A retry of a report already recorded."}},
+)
+async def record_portal_registration(
+    code: str,
+    report: schemas.PortalRegistrationCreate,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+):
+    """Record a book the portal just saved for this package (extension scan mode).
+
+    In one transaction: the package's matching unregistered book (see
+    ``matching_item``) is marked registered, or, if there is none, a new
+    book is recorded already registered; then a ``registrations`` row is
+    appended. A matched book takes the submitted title and author (what TDCJ
+    has now), and its ISBN if it had none. The same confirmation number
+    reported again for this request returns the book it recorded (200).
+
+    409 for a tossed or federal request, or a ``tdcj_number`` that isn't the
+    request's inmate.
+    """
+    key = request_key(code)
+    async with session.begin():
+        await update_contents_revision(session, key, 0)
+        request = await load_request(session, code)
+        check_not_tossed(request)
+        if key.jurisdiction != schemas.JurisdictionEnum.TEXAS.value:
+            raise conflict("Only Texas books are registered on the portal.")
+        if report.tdcj_number != tdcj_number(key.inmate_id):
+            raise conflict("The portal shipment is for a different inmate.")
+
+        recorded = (
+            await session.execute(
+                select(models.Registration.item_id).where(
+                    models.Registration.inmate_jurisdiction == key.jurisdiction,
+                    models.Registration.inmate_id == key.inmate_id,
+                    models.Registration.request_index == key.index,
+                    models.Registration.confirmation_number
+                    == report.confirmation_number,
+                )
+            )
+        ).scalar_one_or_none()
+        if recorded is not None:
+            item = await session.get(models.PackageItem, recorded)
+            if item is None:
+                raise conflict(
+                    "The registration was recorded, but its book was deleted."
+                )
+            response.status_code = status.HTTP_200_OK
+            return schemas.PackageItem.model_validate(item)
+
+        timestamp = now()
+        item = await matching_item(session, key, report)
+        if item is None:
+            item = models.PackageItem(
+                inmate_jurisdiction=key.jurisdiction,
+                inmate_id=key.inmate_id,
+                request_index=key.index,
+                revision=0,
+                isbn=report.isbn,
+                title=report.title,
+                author=report.author,
+                source=(
+                    schemas.ItemSourceEnum.ISBN
+                    if report.isbn is not None
+                    else schemas.ItemSourceEnum.MANUAL
+                ).value,
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            session.add(item)
+            await update_contents_revision(session, key, 1)
+        else:
+            isbn = item.isbn if item.isbn is not None else report.isbn
+            if (item.isbn, item.title, item.author) != (
+                isbn,
+                report.title,
+                report.author,
+            ):
+                if (item.title, item.author) != (report.title, report.author):
+                    item.source = schemas.ItemSourceEnum.MANUAL.value
+                item.isbn = isbn
+                item.title = report.title
+                item.author = report.author
+                item.revision += 1
+                item.updated_at = timestamp
+                await update_contents_revision(session, key, 1)
+
+        item.registered_at = timestamp
+        item.confirmation_number = report.confirmation_number
+        await session.flush()
+        session.add(
+            models.Registration(
+                item_id=item.id,
+                inmate_jurisdiction=key.jurisdiction,
+                inmate_id=key.inmate_id,
+                request_index=key.index,
+                title=item.title,
+                author=item.author,
+                tdcj_number=report.tdcj_number,
+                registered_at=timestamp,
+                confirmation_number=report.confirmation_number,
+            )
+        )
+        await session.flush()
+        logger.debug("recorded portal registration of package item %d", item.id)
         return schemas.PackageItem.model_validate(item)
 
 

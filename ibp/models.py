@@ -293,6 +293,8 @@ class PackageItem(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(TZDateTime(), nullable=False)
     updated_at: Mapped[datetime.datetime] = mapped_column(TZDateTime(), nullable=False)
     registered_at: Mapped[Optional[datetime.datetime]] = mapped_column(TZDateTime())
+    # The portal's confirmation number, when the extension reported one.
+    confirmation_number: Mapped[Optional[str]] = mapped_column(String(32))
 
     request: Mapped["Request"] = relationship(
         "Request", back_populates="items", uselist=False
@@ -306,6 +308,8 @@ class Registration(Base):
     (without a foreign key) after the item itself is deleted, and a request
     with registrations cannot be deleted. ``tdcj_number`` is the inmate
     number as sent to the portal (zero-padded to 8 digits).
+    ``confirmation_number`` is the portal's confirmation number when the
+    extension reported one (scan mode does; the older batch report doesn't).
     """
 
     __tablename__ = "registrations"
@@ -329,6 +333,7 @@ class Registration(Base):
     registered_at: Mapped[datetime.datetime] = mapped_column(
         TZDateTime(), nullable=False
     )
+    confirmation_number: Mapped[Optional[str]] = mapped_column(String(32))
 
 
 class Comment(HasInmateIndex, Base):

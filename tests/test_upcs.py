@@ -284,6 +284,14 @@ def test_bootstrap_adopts_pre_upcs_create_all_schema(tmp_path, monkeypatch):
     engine = sqlalchemy.create_engine(url)
     tables = [t for name, t in models.Base.metadata.tables.items() if name != "upcs"]
     models.Base.metadata.create_all(engine, tables=tables)
+    with engine.begin() as connection:
+        # Added after this schema's era.
+        for table in ["package_items", "registrations"]:
+            connection.execute(
+                sqlalchemy.text(
+                    f"ALTER TABLE {table} DROP COLUMN confirmation_number"
+                )  # nosec
+            )
     engine.dispose()
 
     monkeypatch.setattr(db_bootstrap, "get_sync_database_url", lambda: url)
