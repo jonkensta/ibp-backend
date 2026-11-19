@@ -47,10 +47,11 @@ class InmateStatusEnum(str, Enum):
     """Whether an inmate's provider confirmed them when a request was addressed.
 
     ``current``: the inmate's data was fresh, or the provider was re-queried
-    and lists them (the address reflects any transfer). ``not_listed``: the
-    provider answered without error but has no such inmate (TDCJ drops
-    released inmates). ``unverified``: the provider query failed, so the
-    stored data is used as is.
+    and lists them (the address reflects any transfer). ``not_listed``: TDCJ
+    answered without error but has no such inmate (it drops released
+    inmates; Texas only, other providers' empty answers are ``unverified``).
+    ``unverified``: the provider query failed, so the stored data is used as
+    is.
     """
 
     CURRENT = "current"

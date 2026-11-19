@@ -25,6 +25,11 @@ def format_addressee(inmate: models.Inmate) -> str:
     return " ".join([*parts, f"#{inmate.id:08d}"])
 
 
+# Jurisdictions whose provider drops released inmates and reliably reports
+# "no such inmate" (TDCJ), so a missing record means the inmate is gone.
+NOT_LISTED_MEANS_GONE = frozenset({"Texas"})
+
+
 async def refresh_stale_inmate(
     session: AsyncSession, inmate: models.Inmate
 ) -> tuple[schemas.InmateStatusEnum, Optional[str]]:
@@ -66,6 +71,11 @@ async def refresh_stale_inmate(
     if match is None:
         if errors:
             logger.warning("provider query failed; addressing from stored data")
+            return schemas.InmateStatusEnum.UNVERIFIED, None
+        if jurisdiction not in NOT_LISTED_MEANS_GONE:
+            # FBOP keeps released inmates listed, and an empty answer from it
+            # can't be told from one it failed to parse.
+            logger.warning("provider returned no record; addressing from stored data")
             return schemas.InmateStatusEnum.UNVERIFIED, None
         logger.info("provider does not list the addressed inmate")
         return schemas.InmateStatusEnum.NOT_LISTED, None

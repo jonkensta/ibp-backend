@@ -85,9 +85,10 @@ inmate, so a transfer is picked up. `inmate_status` reports the outcome:
 
 - `current`: the data was fresh, or the provider was re-queried and lists the
   inmate (`datetime_fetched` is then the new fetch time).
-- `not_listed`: the provider answered without error but has no such inmate
-  (TDCJ drops released inmates). The stored address is returned and the
-  inmate left unchanged; shippy decides whether to ship.
+- `not_listed`: TDCJ answered without error but has no such inmate (it drops
+  released inmates). Texas only: an empty answer from another provider is
+  `unverified`. The stored address is returned and the inmate left unchanged;
+  shippy then buys no postage.
 - `unverified`: the provider query failed or timed out; the stored address is
   returned.
 

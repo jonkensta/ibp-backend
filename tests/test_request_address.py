@@ -434,6 +434,29 @@ def test_other_jurisdiction_record_does_not_count(client, stale, by_id):
     assert response.json()["unit_name"] == "Alpha"
 
 
+def test_federal_inmate_with_no_record_is_unverified(client, stale, by_id):
+    """Only TDCJ's empty answer means gone; FBOP's is unverified."""
+    with stale.begin() as session:
+        session.add(
+            models.Unit(
+                jurisdiction="Federal",
+                name="FCI Gamma",
+                street1="3 Oak St",
+                city="Bastrop",
+                state="TX",
+                zipcode="78602",
+                shipping_method="Individual",
+            )
+        )
+        inmate = session.get(models.Inmate, ("Federal", 7654321))
+        inmate.unit_name = "FCI Gamma"
+        inmate.datetime_fetched = STALE
+    response = client.get("/inmates/Federal/7654321/requests/0/address")
+    assert response.status_code == 200, response.text
+    assert response.json()["inmate_status"] == "unverified"
+    assert by_id.calls == [(7654321, ["Federal"])]
+
+
 @pytest.mark.parametrize("url", ADDRESS_URLS)
 def test_stale_inmate_provider_error(client, stale, by_id, url):
     """A failed provider query is unverified; the stored address is used."""
