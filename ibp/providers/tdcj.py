@@ -21,6 +21,11 @@ SEARCH_URL = urljoin(BASE_URL, SEARCH_PATH)
 
 REQUIRED_FIELDS = {"TDCJ Number", "Name", "Unit of Assignment"}
 
+# What TDCJ's results page says when a search matched nobody. A page with
+# neither this nor a results table (an error or maintenance page) is an error,
+# not "no such inmate": shipping treats an inmate TDCJ doesn't list as gone.
+NO_RESULTS_TEXT = "No Inmates were found matching the search criteria"
+
 
 def format_inmate_id(inmate_id: typing.Union[int, str]) -> str:
     """Format a TDCJ inmate ID."""
@@ -36,6 +41,8 @@ async def _curl_search_url(
 ):
     args = [
         "--ipv4",
+        # An HTTP error status fails the query instead of parsing as no results.
+        "--fail",
         "-d",
         "btnSearch=Search",
         "-d",
@@ -74,7 +81,9 @@ async def query(
     table = soup.find("table", class_="tdcj_table")
 
     if table is None or not isinstance(table, Tag):
-        return []
+        if NO_RESULTS_TEXT.lower() in soup.get_text(" ", strip=True).lower():
+            return []
+        raise ProviderError("TDCJ returned a page with no results table")
 
     for linebreak in table.find_all("br"):
         linebreak.replace_with(" ")
