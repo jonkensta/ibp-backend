@@ -1,14 +1,17 @@
-"""Tests for the read-only request address endpoints used by shippy."""
+"""Tests for the request address endpoints used by shippy."""
 
 # pylint: disable=redefined-outer-name
 
 import datetime
 
 import pytest
-from ibp import api, models
+from ibp import addresses, api, models, providers
 
-# Fresh, so the (contrasting) inmate view does not try to re-scrape.
-FETCHED = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+NOW = datetime.datetime.now(datetime.timezone.utc)
+# Fresh, so addressing (and the contrasting inmate view) does not re-query.
+FETCHED = NOW - datetime.timedelta(hours=1)
+# Older than [warnings] inmates_cache_ttl (24 h), so addressing re-queries.
+STALE = NOW - datetime.timedelta(days=100)
 
 
 @pytest.fixture
@@ -75,6 +78,7 @@ def no_side_effects(seeded, monkeypatch):
 
     monkeypatch.setattr(api, "upsert_inmates_by_inmate_id", no_upsert)
     monkeypatch.setattr(api, "upsert_inmates_by_name", no_upsert)
+    monkeypatch.setattr(addresses, "upsert_refresh_inmate", no_upsert)
 
     def lookup_count() -> int:
         with seeded() as session:
@@ -92,6 +96,7 @@ EXPECTED_ADDRESS = {
     "jurisdiction": "Texas",
     "id": 12345,
     "datetime_fetched": FETCHED.isoformat(),
+    "inmate_status": "current",
     "unit_name": "Alpha",
     "unit_recipient_name": "ATTN: MAILROOM STAFF",
     "street1": "1 Main St",
@@ -308,3 +313,167 @@ def test_aliases_hidden_from_openapi(client):
         "/inmates/{jurisdiction}/{inmate_id}/requests/{request_index}/address",
     ]:
         assert alias not in paths
+
+
+# Every path that returns a request address, for request TEX-00012345-0.
+ADDRESS_URLS = [
+    "/requests/TEX-12345-0/address",
+    "/requests/legacy/501/address",
+    # Deprecated aliases (shippy).
+    "/inmates/Texas/12345/requests/0/address",
+    "/inmates/by-request/501/address",
+]
+
+
+@pytest.fixture
+def stale(seeded):
+    """Make the Texas inmate stale and add a second Texas unit, Beta."""
+    with seeded.begin() as session:
+        session.get(models.Inmate, ("Texas", 12345)).datetime_fetched = STALE
+        session.add(
+            models.Unit(
+                jurisdiction="Texas",
+                name="Beta",
+                street1="2 Elm St",
+                city="Huntsville",
+                state="TX",
+                zipcode="77320",
+                shipping_method="Individual",
+            )
+        )
+    return seeded
+
+
+@pytest.fixture
+def by_id(monkeypatch):
+    """Fake provider ID query; set ``.responses`` / ``.errors``, see ``.calls``."""
+
+    async def query(id_, jurisdictions=None, timeout=None):
+        query.calls.append((id_, list(jurisdictions or [])))
+        return query.responses, query.errors
+
+    query.calls, query.responses, query.errors = [], [], []
+    monkeypatch.setattr(providers, "query_by_inmate_id", query)
+    return query
+
+
+def _result(**overrides) -> providers.QueryResult:
+    values = {
+        "id": 12345,
+        "jurisdiction": "Texas",
+        "first_name": "JANE",
+        "last_name": "DOE",
+        "unit": "Beta",
+        "datetime_fetched": NOW,
+    }
+    values.update(overrides)
+    return providers.QueryResult(**values)
+
+
+def _stored_inmate(db) -> tuple:
+    with db() as session:
+        inmate = session.get(models.Inmate, ("Texas", 12345))
+        fetched = inmate.datetime_fetched.replace(tzinfo=datetime.timezone.utc)
+        return inmate.unit_name, fetched
+
+
+@pytest.mark.usefixtures("seeded")
+def test_fresh_inmate_is_not_requeried(client, by_id):
+    """A fresh inmate is addressed from stored data without a provider call."""
+    response = client.get("/requests/TEX-12345-0/address")
+    assert response.status_code == 200
+    assert response.json()["inmate_status"] == "current"
+    assert by_id.calls == []
+
+
+@pytest.mark.parametrize("url", ADDRESS_URLS)
+def test_stale_inmate_is_refreshed(client, stale, by_id, url):
+    """A stale inmate is re-queried from its own provider; a transfer is used."""
+    by_id.responses = [_result()]
+
+    response = client.get(url)
+    assert response.status_code == 200, response.text
+    address = response.json()
+    assert address["inmate_status"] == "current"
+    assert address["unit_name"] == "Beta"
+    assert (address["street1"], address["city"]) == ("2 Elm St", "Huntsville")
+    assert address["shipping_method"] == "Individual"
+    assert address["datetime_fetched"] == NOW.isoformat()
+    assert address["code"] == "TEX-00012345-0"
+
+    assert by_id.calls == [(12345, ["Texas"])]
+    assert _stored_inmate(stale) == ("Beta", NOW)
+
+
+def test_refreshed_inmate_is_fresh_again(client, stale, by_id):
+    """After a refresh the next address uses the stored data."""
+    by_id.responses = [_result()]
+    assert client.get("/requests/TEX-12345-0/address").status_code == 200
+    assert client.get("/requests/TEX-12345-1/address").json()["unit_name"] == "Beta"
+    assert len(by_id.calls) == 1
+
+
+@pytest.mark.parametrize("url", ADDRESS_URLS)
+def test_stale_inmate_not_listed(client, stale, by_id, url):
+    """No record and no error: not_listed, stored address, inmate unchanged."""
+    response = client.get(url)
+    assert response.status_code == 200, response.text
+    address = response.json()
+    assert address["inmate_status"] == "not_listed"
+    assert address["unit_name"] == "Alpha"
+    assert address["datetime_fetched"] == STALE.isoformat()
+    assert _stored_inmate(stale) == ("Alpha", STALE)
+
+
+def test_other_jurisdiction_record_does_not_count(client, stale, by_id):
+    """Only a record for the inmate's own jurisdiction lists them."""
+    by_id.responses = [_result(jurisdiction="Federal", unit="Beta")]
+    response = client.get("/requests/TEX-12345-0/address")
+    assert response.status_code == 200
+    assert response.json()["inmate_status"] == "not_listed"
+    assert response.json()["unit_name"] == "Alpha"
+
+
+@pytest.mark.parametrize("url", ADDRESS_URLS)
+def test_stale_inmate_provider_error(client, stale, by_id, url):
+    """A failed provider query is unverified; the stored address is used."""
+    by_id.errors = [TimeoutError("curl command timed out after 5.0 seconds.")]
+
+    response = client.get(url)
+    assert response.status_code == 200, response.text
+    address = response.json()
+    assert address["inmate_status"] == "unverified"
+    assert address["unit_name"] == "Alpha"
+    assert address["datetime_fetched"] == STALE.isoformat()
+    assert _stored_inmate(stale) == ("Alpha", STALE)
+
+
+def test_refresh_to_unknown_unit_is_409(client, stale, by_id):
+    """A transfer to a unit IBP doesn't know is a 409 naming that unit.
+
+    The refresh is still saved, so the stale unit is not used again.
+    """
+    by_id.responses = [_result(unit="Gamma")]
+
+    response = client.get("/requests/TEX-12345-0/address")
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Texas inmate #00012345 is listed at unit 'Gamma', which is not in "
+        "IBP's units list; add the unit to address a package."
+    )
+    assert _stored_inmate(stale) == (None, NOW)
+
+
+def test_refresh_records_no_lookup(client, stale, by_id):
+    """Refreshing for an address does not record a lookup."""
+    by_id.responses = [_result()]
+    assert client.get("/requests/TEX-12345-0/address").status_code == 200
+    with stale() as session:
+        assert session.query(models.Lookup).count() == 0
+
+
+def test_unknown_request_does_not_query(client, stale, by_id):
+    """A 404 is decided before any provider call."""
+    assert client.get("/requests/TEX-12345-7/address").status_code == 404
+    assert client.get("/inmates/Texas/12345/requests/7/address").status_code == 404
+    assert by_id.calls == []

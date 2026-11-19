@@ -43,6 +43,21 @@ class ShippingMethodEnum(str, Enum):
     FEDERAL_TUB = "Federal Tub"
 
 
+class InmateStatusEnum(str, Enum):
+    """Whether an inmate's provider confirmed them when a request was addressed.
+
+    ``current``: the inmate's data was fresh, or the provider was re-queried
+    and lists them (the address reflects any transfer). ``not_listed``: the
+    provider answered without error but has no such inmate (TDCJ drops
+    released inmates). ``unverified``: the provider query failed, so the
+    stored data is used as is.
+    """
+
+    CURRENT = "current"
+    NOT_LISTED = "not_listed"
+    UNVERIFIED = "unverified"
+
+
 class UnitBase(BaseModel):
     """Base schema for Unit model."""
 
@@ -294,7 +309,10 @@ class RequestAddress(BaseModel):
     the remaining fields identify the request (``code`` is its label text,
     e.g. ``TEX-00012345-0``) and give the inmate's unit mailing address.
     ``unit_recipient_name`` is the configured mailroom recipient line (e.g.
-    ``ATTN: MAILROOM STAFF``) from the shipping settings.
+    ``ATTN: MAILROOM STAFF``) from the shipping settings. ``inmate_status``
+    says whether the inmate's provider confirmed them (see
+    :class:`InmateStatusEnum`); ``datetime_fetched`` is when the stored data
+    was last fetched from it.
     """
 
     name: str
@@ -303,6 +321,7 @@ class RequestAddress(BaseModel):
     jurisdiction: JurisdictionEnum
     id: int
     datetime_fetched: Optional[datetime.datetime] = None
+    inmate_status: InmateStatusEnum
 
     request_index: int
     request_id: Optional[int] = None

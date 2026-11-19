@@ -17,13 +17,8 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from . import models, schemas
-from .api import (
-    address_by_legacy_request_id,
-    build_request_address,
-    get_session,
-    inmate_by_legacy_request_id,
-    load_shipping_settings,
-)
+from .addresses import address_request
+from .api import address_by_legacy_request_id, get_session, inmate_by_legacy_request_id
 from .base import app
 from .labels import (
     RequestKey,
@@ -93,7 +88,7 @@ async def get_address_by_legacy_id(
 ):
     """Get the shipping address of a request by its legacy request ID.
 
-    Read-only: does not record a lookup or query the inmate providers.
+    Behaves like ``GET /requests/{code}/address``.
     """
     return await address_by_legacy_request_id(session, legacy_id)
 
@@ -155,14 +150,23 @@ def has_rows(
 
 @app.get("/requests/{code}/address", response_model=schemas.RequestAddress)
 async def get_request_address(code: str, session: AsyncSession = Depends(get_session)):
-    """Get the shipping address for a request.
+    """Get the shipping address for a request, as shippy prints it.
 
-    Read-only: does not record a lookup or query the inmate providers, so it
-    is safe to call once per shipped package. An inmate without a unit cannot
-    be addressed (409).
+    Records no lookup. If the inmate's data is stale (older than ``[warnings]
+    inmates_cache_ttl``), the inmate's own provider (TDCJ or FBOP) is queried
+    first and the inmate updated, so the address follows a transfer.
+    ``inmate_status`` reports the outcome: ``current`` (fresh, or refreshed
+    and listed), ``not_listed`` (the provider answered but has no such
+    inmate, e.g. released; the stored address is returned and the inmate left
+    unchanged) or ``unverified`` (the provider query failed; the stored
+    address is returned). An inmate without a unit, including one the
+    provider lists at a unit IBP doesn't know, cannot be addressed (409).
     """
-    request = await load_request_with_unit(session, code)
-    return build_request_address(request, await load_shipping_settings(session))
+
+    async def load(session: AsyncSession) -> models.Request:
+        return await load_request_with_unit(session, code)
+
+    return await address_request(session, load)
 
 
 @app.get("/requests/{code}/label", response_class=Response)

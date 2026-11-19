@@ -13,8 +13,12 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from . import db, metrics, models, schemas, warnings
+from .addresses import (
+    address_request,
+    load_shipping_settings,
+    shipping_settings_to_schema,
+)
 from .base import app
-from .labels import label_package_id
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
 from .upsert import inmates_by_name as upsert_inmates_by_name
 
@@ -220,13 +224,16 @@ async def inmate_by_legacy_request_id(
 async def address_by_legacy_request_id(
     session: AsyncSession, legacy_id: int
 ) -> schemas.RequestAddress:
-    """Return the shipping address of a legacy request."""
-    request = await load_request_by_legacy_id(
-        session,
-        legacy_id,
-        selectinload(models.Request.inmate).selectinload(models.Inmate.unit),
-    )
-    return build_request_address(request, await load_shipping_settings(session))
+    """Return the shipping address of a legacy request (see ``address_request``)."""
+
+    async def load(session: AsyncSession) -> models.Request:
+        return await load_request_by_legacy_id(
+            session,
+            legacy_id,
+            selectinload(models.Request.inmate).selectinload(models.Inmate.unit),
+        )
+
+    return await address_request(session, load)
 
 
 # Deprecated aliases of /requests/legacy/{legacy_id}/... (ibp/request_api.py),
@@ -257,93 +264,6 @@ async def get_request_address_by_legacy_request_id(
 ):
     """Deprecated alias of ``GET /requests/legacy/{legacy_id}/address``."""
     return await address_by_legacy_request_id(session, request_id)
-
-
-def format_addressee(inmate: models.Inmate) -> str:
-    """Format an inmate's addressee line, e.g. ``Jane Doe #00012345``."""
-    parts = [part.title() for part in (inmate.first_name, inmate.last_name) if part]
-    return " ".join([*parts, f"#{inmate.id:08d}"])
-
-
-def build_request_address(
-    request: models.Request, settings: schemas.ShippingSettings
-) -> schemas.RequestAddress:
-    """Build a request's shipping address from its inmate and unit.
-
-    The request's inmate and the inmate's unit must already be loaded.  An
-    inmate without a unit cannot be shipped to, so that is a 409 error.
-    ``settings`` supplies the unit mailroom recipient line.
-    """
-    inmate = request.inmate
-    unit = inmate.unit
-
-    if unit is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"{inmate.jurisdiction} inmate #{inmate.id:08d} is not assigned "
-                "to a unit; cannot address a package."
-            ),
-        )
-
-    return schemas.RequestAddress(
-        name=format_addressee(inmate),
-        first_name=inmate.first_name,
-        last_name=inmate.last_name,
-        jurisdiction=schemas.JurisdictionEnum(inmate.jurisdiction),
-        id=inmate.id,
-        datetime_fetched=inmate.datetime_fetched,
-        request_index=request.index,
-        request_id=request.request_id,
-        code=label_package_id(request),
-        action=schemas.ActionEnum(request.action),
-        unit_name=unit.name,
-        unit_recipient_name=settings.unit_recipient_name,
-        street1=unit.street1,
-        street2=unit.street2,
-        city=unit.city,
-        state=unit.state,
-        zipcode=unit.zipcode,
-        shipping_method=(
-            schemas.ShippingMethodEnum(unit.shipping_method)
-            if unit.shipping_method
-            else None
-        ),
-    )
-
-
-def shipping_settings_to_schema(
-    row: Optional[models.ShippingSettings],
-) -> schemas.ShippingSettings:
-    """Convert the settings row (or the defaults, if missing) to its schema."""
-    values = (
-        {column: getattr(row, column) for column in models.DEFAULT_SHIPPING_SETTINGS}
-        if row is not None
-        else models.DEFAULT_SHIPPING_SETTINGS
-    )
-    return schemas.ShippingSettings.model_validate(
-        {
-            "return_address": {
-                "name": values["return_name"],
-                "street1": values["return_street1"],
-                "street2": values["return_street2"],
-                "city": values["return_city"],
-                "state": values["return_state"],
-                "zipcode": values["return_zipcode"],
-            },
-            "unit_recipient_name": values["unit_recipient_name"],
-        }
-    )
-
-
-async def load_shipping_settings(session: AsyncSession) -> schemas.ShippingSettings:
-    """Load the shipping settings, falling back to the defaults if unset.
-
-    The row is seeded by the migration and by ``ibp.db_bootstrap``; the
-    fallback only matters for a schema built by ``create_all`` alone.
-    """
-    row = await session.get(models.ShippingSettings, models.SHIPPING_SETTINGS_ID)
-    return shipping_settings_to_schema(row)
 
 
 @app.get("/shipping-settings", response_model=schemas.ShippingSettings)
@@ -669,38 +589,40 @@ async def get_request_address(
 ):
     """Get the shipping address for a request (deprecated alias).
 
-    Read-only: does not record a lookup or query the inmate providers, so it
-    is safe to call once per shipped package.
+    Like ``GET /requests/{code}/address``, a stale inmate is refreshed first.
     """
-    inmate = (
-        await session.execute(
-            select(models.Inmate).where(
-                models.Inmate.jurisdiction == jurisdiction,
-                models.Inmate.id == inmate_id,
+
+    async def load(session: AsyncSession) -> models.Request:
+        inmate = (
+            await session.execute(
+                select(models.Inmate).where(
+                    models.Inmate.jurisdiction == jurisdiction,
+                    models.Inmate.id == inmate_id,
+                )
             )
-        )
-    ).scalar_one_or_none()
+        ).scalar_one_or_none()
 
-    if inmate is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"{jurisdiction.value} inmate #{inmate_id:08d} not found.",
-        )
+        if inmate is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"{jurisdiction.value} inmate #{inmate_id:08d} not found.",
+            )
 
-    request = await get_request_with_unit(
-        session, jurisdiction, inmate_id, request_index
-    )
-
-    if request is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                f"Request #{request_index} not found for "
-                f"{jurisdiction.value} inmate #{inmate_id:08d}."
-            ),
+        request = await get_request_with_unit(
+            session, jurisdiction, inmate_id, request_index
         )
 
-    return build_request_address(request, await load_shipping_settings(session))
+        if request is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"Request #{request_index} not found for "
+                    f"{jurisdiction.value} inmate #{inmate_id:08d}."
+                ),
+            )
+        return request
+
+    return await address_request(session, load)
 
 
 @app.post(
