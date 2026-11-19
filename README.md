@@ -74,6 +74,27 @@ an ISBN scan. Rows keyed by a bare 12-digit UPC with a NULL `isbn` are misses
 cached by UPCitemdb and Barcode Lookup, which v1.0.10 to v1.0.12 asked; they
 answer nothing.
 
+## Request addresses
+
+`GET /requests/{code}/address` (and `GET /requests/legacy/{legacy_id}/address`,
+plus the deprecated aliases shippy still calls) returns the mailing address
+for a request's package. It records no lookup, but if the inmate's data is
+older than `[warnings] inmates_cache_ttl` (24 hours), it first re-queries the
+inmate's own provider (TDCJ or FBOP, `[providers] timeout`) and updates the
+inmate, so a transfer is picked up. `inmate_status` reports the outcome:
+
+- `current`: the data was fresh, or the provider was re-queried and lists the
+  inmate (`datetime_fetched` is then the new fetch time).
+- `not_listed`: TDCJ answered without error but has no such inmate (it drops
+  released inmates). Texas only: an empty answer from another provider is
+  `unverified`. The stored address is returned and the inmate left unchanged;
+  shippy then buys no postage.
+- `unverified`: the provider query failed or timed out; the stored address is
+  returned.
+
+An inmate without a unit is a 409, including one the provider now lists at a
+unit missing from the `units` table (the detail names that unit).
+
 ## Deployment
 
 Production runs on `ibp-server`, a Raspberry Pi 4B, as a Docker Compose

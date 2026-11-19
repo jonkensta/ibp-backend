@@ -1,5 +1,7 @@
 """IBP inmate provider upsert methods."""
 
+from typing import Optional
+
 from sqlalchemy.future import select
 
 from . import models, providers
@@ -49,6 +51,38 @@ async def inmates_by_inmate_id(session, id_: int) -> list[str]:
             await session.merge(inmate)
 
     return errors
+
+
+async def refresh_inmate(
+    session, jurisdiction: providers.Jurisdiction, id_: int
+) -> tuple[Optional[providers.QueryResult], list[Exception]]:
+    """Re-query one inmate from its own jurisdiction's provider and upsert it.
+
+    Only ``jurisdiction``'s provider is asked, so every error returned is that
+    provider's. Returns the provider's record of the inmate (``None`` if the
+    query failed or the provider has no such inmate) and the errors. When the
+    provider has no record, the stored inmate is left unchanged.
+    """
+    timeout = config.getfloat("providers", "timeout")
+
+    # pylint: disable=no-value-for-parameter
+    responses, errors = await providers.query_by_inmate_id(
+        id_, jurisdictions=[jurisdiction], timeout=timeout
+    )
+
+    async with session.begin_nested():
+        for response in responses:
+            await session.merge(await _build_inmate_from_response(session, response))
+
+    match = next(
+        (
+            response
+            for response in responses
+            if response.jurisdiction == jurisdiction and response.id == id_
+        ),
+        None,
+    )
+    return match, errors
 
 
 async def inmates_by_name(session, first_name: str, last_name: str):
