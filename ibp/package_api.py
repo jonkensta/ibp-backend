@@ -427,10 +427,12 @@ async def record_portal_registration(
     book is recorded already registered; then a ``registrations`` row is
     appended. A matched book takes the submitted title and author (what TDCJ
     has now), and its ISBN if it had none. The same confirmation number
-    reported again for this request returns the book it recorded (200).
+    reported again for this request with the same title returns the book it
+    recorded (200).
 
-    409 for a tossed or federal request, or a ``tdcj_number`` that isn't the
-    request's inmate.
+    409 for a tossed or federal request, a ``tdcj_number`` that isn't the
+    request's inmate, or a confirmation number already recorded for this
+    request with another title.
     """
     key = request_key(code)
     async with session.begin():
@@ -444,17 +446,26 @@ async def record_portal_registration(
 
         recorded = (
             await session.execute(
-                select(models.Registration.item_id).where(
+                select(models.Registration)
+                .where(
                     models.Registration.inmate_jurisdiction == key.jurisdiction,
                     models.Registration.inmate_id == key.inmate_id,
                     models.Registration.request_index == key.index,
                     models.Registration.confirmation_number
                     == report.confirmation_number,
                 )
+                .order_by(models.Registration.id)
+                .limit(1)
             )
         ).scalar_one_or_none()
         if recorded is not None:
-            item = await session.get(models.PackageItem, recorded)
+            # Only the same book again is a retry; another book under a
+            # confirmation number already used must not be dropped silently.
+            if recorded.title.casefold() != report.title.casefold():
+                raise conflict(
+                    "That confirmation number is already recorded for another book."
+                )
+            item = await session.get(models.PackageItem, recorded.item_id)
             if item is None:
                 raise conflict(
                     "The registration was recorded, but its book was deleted."

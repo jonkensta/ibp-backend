@@ -136,6 +136,18 @@ def test_retry_is_idempotent(client, seeded):
     assert contents_revision(seeded) == revision
 
 
+def test_same_confirmation_number_for_another_book(client, seeded):
+    """Another book under a recorded confirmation number is refused, not dropped."""
+    report(client)
+    response = report(client, isbn=OTHER_ISBN, title="Another Book")
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "That confirmation number is already recorded for another book."
+    }
+    assert len(registrations(seeded)) == 1
+    assert len(client.get(ITEMS_URL).json()) == 1
+
+
 def test_retry_after_book_deleted(client, seeded):
     """A retry for a book deleted since is refused; the record stays."""
     item = report(client).json()
