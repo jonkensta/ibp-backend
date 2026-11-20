@@ -154,6 +154,7 @@ def test_list_items(client, seeded):
         "source",
         "revision",
         "registered_at",
+        "confirmation_number",
         "created_at",
         "updated_at",
     }

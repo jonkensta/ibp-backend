@@ -565,12 +565,14 @@ class PackageItem(PackageItemBase):
 
     ``registered_at`` is empty until the book is registered on the TDCJ
     Book Portal (Texas only); a registered item is read-only.
+    ``confirmation_number`` is the portal's, when the extension reported it.
     """
 
     id: int
     source: ItemSourceEnum
     revision: int
     registered_at: Optional[datetime.datetime] = None
+    confirmation_number: Optional[str] = None
     created_at: datetime.datetime
     updated_at: datetime.datetime
 
@@ -621,6 +623,30 @@ class RegistrationCreate(BaseModel):
     """
 
     revision: Revision
+
+
+ConfirmationNumber = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=32, pattern=r"^[A-Za-z0-9-]+$"
+    ),
+]
+
+TdcjNumber = Annotated[str, StringConstraints(pattern=r"^\d{8}$")]
+
+
+class PortalRegistrationCreate(PackageItemBase):
+    """A book the portal just saved, reported from the extension's scan mode.
+
+    ``title`` and ``author`` are what was submitted to the portal and
+    ``tdcj_number`` the inmate it went to (8 digits, which must be the
+    request's inmate). ``confirmation_number`` is the one the portal showed
+    on its success page; reporting the same one again for the same request
+    is a harmless retry.
+    """
+
+    tdcj_number: TdcjNumber
+    confirmation_number: ConfirmationNumber
 
 
 class RegistrationQueueEntry(BaseModel):
