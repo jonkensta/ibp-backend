@@ -71,6 +71,15 @@ def _request_postmarkdate_warning(
 ) -> typing.Iterable[typing.Tuple[str, str]]:
     "Yield a postmarkdate warning about a request if any." ""
 
+    key = "postmarkdate"
+
+    # A date in the future is a mistake whatever the earlier requests are, and
+    # it says more than the spacing checks below, which share this key. The
+    # date is local: production sets TZ=America/Chicago (deploy/pi/compose.yaml).
+    if postmarkdate > datetime.date.today():
+        yield key, "The postmark date is in the future."
+        return
+
     def was_filled(request_):
         return request_.action == "Filled"
 
@@ -85,7 +94,6 @@ def _request_postmarkdate_warning(
     days = config.getint("warnings", "min_postmark_timedelta")
     min_td = datetime.timedelta(days=days)
 
-    key = "postmarkdate"
     if td.days < 0:
         yield key, "There is a request with a postmark after this one."
     elif td.days == 0:
