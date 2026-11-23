@@ -156,6 +156,31 @@ three are empty when none were stated, and there is no history.
   results or the legacy inmate routes the Book Portal extension calls.
 - Kept when a provider refresh updates the inmate, and never logged.
 
+## Book suggestions
+
+`GET /book-suggestions?title=...&author=...` offers a better spelling of a
+title and author a volunteer typed by hand (`ibp/book_search.py`). Both are
+cleaned and must be 3 to 100 characters, as the portal requires (else 422).
+The answer is always a 200: `{"suggestion": {"title", "author", "confidence",
+"notes"}}` or `{"suggestion": null}`, which is also the answer when a
+provider or Claude fails, when `[books] suggestions` is off, without
+`ANTHROPIC_API_KEY`, and for IBP's own items (the Resource Guide and the
+Self-Care zine). Only the typed title and author leave the server: to the
+book providers of the ISBN lookup (Google and ISBNdb only with their keys)
+and to Anthropic. The suggestion carries no ISBN and nothing is stored but an
+in-process cache (30 days for a suggestion, 7 for none; failures aren't
+cached).
+
+A suggestion is offered only when Claude says one candidate is the same book
+with high confidence *and* a fixed rule agrees: the title and author are a
+candidate's; the main title (before any subtitle) or author differs from what
+was typed by more than case, punctuation, articles, diacritics, name order or
+initials; each typed main-title word is within 1 edit of the suggested one (2
+for words over 5 letters, none for a word with a digit), with no word added
+and a `difflib` ratio of at least 0.80; the surname is within 2 edits; the
+typed text is not itself a listed book; and no other book scores within 0.05
+of the chosen one.
+
 ## Deployment
 
 Production runs on `ibp-server`, a Raspberry Pi 4B, as a Docker Compose

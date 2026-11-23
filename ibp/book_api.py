@@ -1,18 +1,21 @@
 """ISBN and UPC lookup endpoints (see ``ibp.books`` and ``ibp.upcs``)."""
 
 import datetime
+import logging
 from dataclasses import asdict, dataclass
-from typing import Optional
+from typing import Annotated, Optional
 
 import sqlalchemy as sa
-from fastapi import Depends, HTTPException, Response, status
+from fastapi import Depends, HTTPException, Query, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import books, models, schemas, upcs
+from . import book_search, books, models, schemas, upcs
 from .api import get_session
 from .base import app
+
+logger = logging.getLogger(__name__)
 
 # The only writer of ``upcs`` rows now (older rows may say ``upcitemdb`` or
 # ``barcodelookup``, from UPC lookup services since removed).
@@ -75,6 +78,30 @@ async def get_book(isbn: str, session: AsyncSession = Depends(get_session)):
             detail="Not a valid ISBN.",
         )
     return await book_for_isbn(session, normalized)
+
+
+@app.get("/book-suggestions", response_model=schemas.BookSuggestions)
+async def get_book_suggestions(
+    title: Annotated[schemas.PortalText, Query()],
+    author: Annotated[schemas.PortalText, Query()],
+):
+    """A better spelling of a title and author a volunteer typed, or null.
+
+    Both must be 3 to 100 characters, as the portal requires. Only the typed
+    text goes out (to the book providers and Anthropic); nothing is stored
+    but an in-process cache. A failure anywhere is a null suggestion, never
+    an error (see ``ibp.book_search``).
+    """
+    try:
+        suggestion = await book_search.suggest(title, author)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("Book suggestion failed")
+        suggestion = None
+    if suggestion is None:
+        return schemas.BookSuggestions(suggestion=None)
+    return schemas.BookSuggestions(
+        suggestion=schemas.BookSuggestion(**asdict(suggestion))
+    )
 
 
 def check_upc_code(code: str) -> None:

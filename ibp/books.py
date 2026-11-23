@@ -20,7 +20,7 @@ import re
 import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Literal, Optional
+from typing import Awaitable, Callable, Literal, Optional, TypeVar
 
 import anthropic
 import httpx
@@ -156,7 +156,11 @@ async def isbndb(client: httpx.AsyncClient, isbn: str) -> Optional[Candidate]:
     if response.status_code == 404:
         return None
     response.raise_for_status()
-    book = response.json().get("book") or {}
+    return isbndb_candidate(response.json().get("book") or {})
+
+
+def isbndb_candidate(book: dict) -> Optional[Candidate]:
+    """A Candidate from one ISBNdb book record (None without a title)."""
     if not book.get("title"):
         return None
     return Candidate(
@@ -195,7 +199,11 @@ async def google_books(client: httpx.AsyncClient, isbn: str) -> Optional[Candida
     )
     response.raise_for_status()
     items = response.json().get("items") or []
-    info = items[0].get("volumeInfo") or {} if items else {}
+    return google_candidate(items[0].get("volumeInfo") or {} if items else {})
+
+
+def google_candidate(info: dict) -> Optional[Candidate]:
+    """A Candidate from one Google Books ``volumeInfo`` (None without a title)."""
     if not info.get("title"):
         return None
     return Candidate(
@@ -223,6 +231,11 @@ def parse_loc_mods(xml: str) -> Optional[Candidate]:
     mods = ET.fromstring(xml).find(f".//{MODS}mods")
     if mods is None:
         return None
+    return mods_candidate(mods)
+
+
+def mods_candidate(mods: ET.Element) -> Optional[Candidate]:
+    """Title, primary author, publisher and date from one MODS record."""
     title_info = next(
         (t for t in mods.findall(f"{MODS}titleInfo") if not t.get("type")), None
     )
@@ -319,18 +332,26 @@ async def fetch_candidates(isbn: str) -> dict[str, Candidate]:
 
 # --- Claude merge -----------------------------------------------------------
 
+# How a title and an author are written for the portal; shared with the
+# title/author suggestions in ``ibp.book_search``.
+TITLE_RULE = f"""\
+- Title: the book's real title as printed on the cover, with a subtitle only \
+if it is part of how the book is known. Drop edition notes, series numbering \
+in brackets, format words (paperback, large print) and trailing junk. Use \
+normal title case. At most {PORTAL_MAX_LENGTH} characters."""
+
+AUTHOR_RULE = f"""\
+- Author: the primary author(s) as "First Last", comma-separated, at most \
+{PORTAL_MAX_LENGTH} characters. Leave out editors, translators and \
+illustrators unless there is no author. Empty if no source names one."""
+
 SYSTEM_PROMPT = f"""\
 You merge book metadata from several ISBN lookup services into the single \
 best title and author for a packing slip and a prison book-portal form.
 
 Rules:
-- Title: the book's real title as printed on the cover, with a subtitle only \
-if it is part of how the book is known. Drop edition notes, series numbering \
-in brackets, format words (paperback, large print) and trailing junk. Use \
-normal title case. At most {PORTAL_MAX_LENGTH} characters.
-- Author: the primary author(s) as "First Last", comma-separated, at most \
-{PORTAL_MAX_LENGTH} characters. Leave out editors, translators and \
-illustrators unless there is no author. Empty if no source names one.
+{TITLE_RULE}
+{AUTHOR_RULE}
 - Prefer what most sources agree on. If one source is clearly a different \
 book (wrong ISBN mapping), ignore it and say so in notes.
 - confidence: high if the sources agree once formatting is set aside, medium \
@@ -357,10 +378,17 @@ def candidates_json(isbn: str, candidates: dict[str, Candidate]) -> str:
     )
 
 
-async def merge_with_claude(
-    isbn: str, candidates: dict[str, Candidate]
-) -> Optional[Merged]:
-    """Claude's merge of the candidates, or None if it isn't available."""
+ParsedT = TypeVar("ParsedT", bound=BaseModel)
+
+
+async def ask_claude(
+    what: str, system: str, content: str, output_format: type[ParsedT]
+) -> Optional[ParsedT]:
+    """Claude's structured answer, or None if unavailable, failed or refused.
+
+    Uses ``[books] model`` and ``anthropic_api_key`` (None without one).
+    ``what`` names the request in log messages.
+    """
     api_key = setting("anthropic_api_key")
     if not api_key:
         return None
@@ -371,25 +399,38 @@ async def merge_with_claude(
             model=model,
             max_tokens=2048,
             output_config={"effort": "low"},
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": candidates_json(isbn, candidates)}],
-            output_format=Merged,
+            system=system,
+            messages=[{"role": "user", "content": content}],
+            output_format=output_format,
         )
     except anthropic.APIStatusError as error:
-        logger.warning("Claude merge of %s failed: HTTP %s", isbn, error.status_code)
+        logger.warning("Claude %s failed: HTTP %s", what, error.status_code)
         return None
     except anthropic.APIConnectionError as error:
-        logger.warning("Claude merge of %s failed: %s", isbn, error)
+        logger.warning("Claude %s failed: %s", what, error)
         return None
     finally:
         await client.close()
-    merged = response.parsed_output
-    if response.stop_reason == "refusal" or merged is None or not merged.title.strip():
+    parsed = response.parsed_output
+    if response.stop_reason == "refusal" or parsed is None:
         logger.warning(
-            "Claude merge of %s gave no answer (stop_reason=%s)",
-            isbn,
-            response.stop_reason,
+            "Claude %s gave no answer (stop_reason=%s)", what, response.stop_reason
         )
+        return None
+    return parsed
+
+
+async def merge_with_claude(
+    isbn: str, candidates: dict[str, Candidate]
+) -> Optional[Merged]:
+    """Claude's merge of the candidates, or None if it isn't available."""
+    merged = await ask_claude(
+        f"merge of {isbn}", SYSTEM_PROMPT, candidates_json(isbn, candidates), Merged
+    )
+    if merged is None:
+        return None
+    if not merged.title.strip():
+        logger.warning("Claude merge of %s gave no answer (empty title)", isbn)
         return None
     logger.info(
         "Claude merged %s (%s confidence): %s", isbn, merged.confidence, merged.notes
