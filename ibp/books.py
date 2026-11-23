@@ -20,7 +20,7 @@ import re
 import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Literal, Optional
+from typing import Awaitable, Callable, Literal, Optional, TypeVar
 
 import anthropic
 import httpx
@@ -378,10 +378,17 @@ def candidates_json(isbn: str, candidates: dict[str, Candidate]) -> str:
     )
 
 
-async def merge_with_claude(
-    isbn: str, candidates: dict[str, Candidate]
-) -> Optional[Merged]:
-    """Claude's merge of the candidates, or None if it isn't available."""
+ParsedT = TypeVar("ParsedT", bound=BaseModel)
+
+
+async def ask_claude(
+    what: str, system: str, content: str, output_format: type[ParsedT]
+) -> Optional[ParsedT]:
+    """Claude's structured answer, or None if unavailable, failed or refused.
+
+    Uses ``[books] model`` and ``anthropic_api_key`` (None without one).
+    ``what`` names the request in log messages.
+    """
     api_key = setting("anthropic_api_key")
     if not api_key:
         return None
@@ -392,25 +399,38 @@ async def merge_with_claude(
             model=model,
             max_tokens=2048,
             output_config={"effort": "low"},
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": candidates_json(isbn, candidates)}],
-            output_format=Merged,
+            system=system,
+            messages=[{"role": "user", "content": content}],
+            output_format=output_format,
         )
     except anthropic.APIStatusError as error:
-        logger.warning("Claude merge of %s failed: HTTP %s", isbn, error.status_code)
+        logger.warning("Claude %s failed: HTTP %s", what, error.status_code)
         return None
     except anthropic.APIConnectionError as error:
-        logger.warning("Claude merge of %s failed: %s", isbn, error)
+        logger.warning("Claude %s failed: %s", what, error)
         return None
     finally:
         await client.close()
-    merged = response.parsed_output
-    if response.stop_reason == "refusal" or merged is None or not merged.title.strip():
+    parsed = response.parsed_output
+    if response.stop_reason == "refusal" or parsed is None:
         logger.warning(
-            "Claude merge of %s gave no answer (stop_reason=%s)",
-            isbn,
-            response.stop_reason,
+            "Claude %s gave no answer (stop_reason=%s)", what, response.stop_reason
         )
+        return None
+    return parsed
+
+
+async def merge_with_claude(
+    isbn: str, candidates: dict[str, Candidate]
+) -> Optional[Merged]:
+    """Claude's merge of the candidates, or None if it isn't available."""
+    merged = await ask_claude(
+        f"merge of {isbn}", SYSTEM_PROMPT, candidates_json(isbn, candidates), Merged
+    )
+    if merged is None:
+        return None
+    if not merged.title.strip():
+        logger.warning("Claude merge of %s gave no answer (empty title)", isbn)
         return None
     logger.info(
         "Claude merged %s (%s confidence): %s", isbn, merged.confidence, merged.notes

@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -165,6 +166,37 @@ def test_lookup_without_key_caches_fallback(monkeypatch):
     """Without Claude configured, the provider answer is final and cached."""
     stub_lookup(monkeypatch, None, api_key="")
     assert asyncio.run(books.lookup(HOBBIT)).cacheable
+
+
+@pytest.mark.parametrize(("title", "merged"), [("The Hobbit", True), (" ", False)])
+def test_merge_with_claude(monkeypatch, title, merged):
+    """The merge asks Claude with the ISBN prompt; an empty title is no merge."""
+    answer = books.Merged(title=title, author="", confidence="high", notes="")
+    calls = []
+
+    class Messages:  # pylint: disable=too-few-public-methods
+        """A fake ``messages`` with ``parse``."""
+
+        async def parse(self, **kwargs):
+            """Record the call and answer."""
+            calls.append(kwargs)
+            return SimpleNamespace(parsed_output=answer, stop_reason="end_turn")
+
+    class Client:  # pylint: disable=too-few-public-methods
+        """A fake ``AsyncAnthropic``."""
+
+        def __init__(self, **_kwargs):
+            self.messages = Messages()
+
+        async def close(self):
+            """Nothing to close."""
+
+    monkeypatch.setattr(books.anthropic, "AsyncAnthropic", Client)
+    monkeypatch.setattr(books, "setting", lambda option, fallback="": "sk-test")
+    result = asyncio.run(books.merge_with_claude(HOBBIT, CANDIDATES))
+    assert (result == answer) is merged
+    assert calls[0]["system"] == books.SYSTEM_PROMPT
+    assert calls[0]["output_format"] is books.Merged
 
 
 def test_clip_enforces_portal_limit():
