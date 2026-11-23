@@ -18,7 +18,7 @@ each named by the link's ``basis``:
   local date. A Filled request whose inmate's unit (as it is now) ships by
   box or tub links to every box of the first session to that unit on or
   after the request's processed date, if that session is within
-  ``LINK_WINDOW`` of it.
+  ``BULK_LINK_WINDOW`` of it.
 
 A label that was never mailed (``never_mailed``) gets no links. Nothing
 here works out delivery: the stored events are left for that.
@@ -34,9 +34,12 @@ from sqlalchemy.orm import Session, selectinload
 
 from . import clock, models
 
-# How far apart a request's processed date and its label's purchase date
-# (or its bulk session's date) may be.
+# How long before an untagged individual label's purchase date its request
+# may have been processed.
 LINK_WINDOW = datetime.timedelta(days=60)
+# How long after a request's processed date its bulk session may be. Units
+# ship about every two weeks, so a later session is unlikely to hold it.
+BULK_LINK_WINDOW = datetime.timedelta(days=14)
 # Unit shipping methods that send requests in bulk boxes (not Individual).
 BOX_METHODS = frozenset({"Box", "Federal Tub"})
 # Statuses that mean USPS has not handled a package.
@@ -177,7 +180,7 @@ def _unit_requests(
                 models.Inmate.jurisdiction == jurisdiction,
                 models.Inmate.unit_name == unit_name,
                 models.Request.action == "Filled",
-                models.Request.date_processed >= first - LINK_WINDOW,
+                models.Request.date_processed >= first - BULK_LINK_WINDOW,
                 models.Request.date_processed <= last,
             )
         ).all()
@@ -196,7 +199,7 @@ def _unit_session_links(
             session, unit, dates[0], dates[-1]
         ):
             position = bisect.bisect_left(dates, processed)
-            if position == len(dates) or dates[position] - processed > LINK_WINDOW:
+            if position == len(dates) or dates[position] - processed > BULK_LINK_WINDOW:
                 continue
             for shipment_id in by_date[dates[position]]:
                 links[(jurisdiction, inmate_id, index, shipment_id)] = "unit_session"

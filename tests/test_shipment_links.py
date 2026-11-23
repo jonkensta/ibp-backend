@@ -225,13 +225,24 @@ def test_bulk_session_on_the_processed_date_counts(session):
     }
 
 
-def test_bulk_session_more_than_60_days_later_is_not_linked(session):
-    """A request long before the first stored session isn't linked to it."""
+def test_bulk_session_more_than_14_days_later_is_not_linked(session):
+    """A request more than 14 days before the next session isn't linked."""
     seed_box_unit(session)
-    add_request(session, 11111111, 0, "2025-12-01")
+    add_request(session, 11111111, 0, "2026-02-18")
     box(session, "2026-03-05T15:00")
     session.commit()
     assert not rebuild(session)
+
+
+def test_bulk_session_14_days_later_is_linked(session):
+    """A session exactly 14 days after the processed date still links."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-02-19")
+    late = box(session, "2026-03-05T15:00")
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", 11111111, 0, late.easypost_id, "unit_session"),
+    }
 
 
 def test_unit_that_ships_individually_gets_no_bulk_links(session):
