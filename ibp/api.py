@@ -108,15 +108,66 @@ def old_data_clause():
     )
 
 
-def stale_inmate_clause(errors: list, incomplete: Iterable[str] = ()):
+def prefix_match(column, term: str):
+    """SQL clause: ``column`` starts with ``term``, ignoring case."""
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return column.ilike(escaped + "%", escape="\\")
+
+
+def is_initial(name: str) -> bool:
+    """Whether a name part is only an initial, like "J" or "J."."""
+    return len(name.strip(" .")) <= 1
+
+
+def provider_would_return_clause(jurisdiction: str, candidates: list[tuple[str, str]]):
+    """SQL clause for ``jurisdiction``'s rows its provider's search returns.
+
+    The providers match names more narrowly than the local search: TDCJ
+    needs the last name exactly and the first name as a prefix; FBOP needs
+    both names exactly and finds nobody by an initial. Both ignore case. A
+    row matches if the provider would have returned it for any of the
+    ``candidates`` (first, last) assignments.
+    """
+    lower = sqlalchemy.func.lower
+    first_name, last_name = models.Inmate.first_name, models.Inmate.last_name
+
+    if jurisdiction == "Texas":
+        matches = [
+            sqlalchemy.and_(
+                lower(last_name) == last.lower(), prefix_match(first_name, first)
+            )
+            for first, last in candidates
+        ]
+    elif jurisdiction == "Federal":
+        matches = [
+            sqlalchemy.and_(
+                lower(first_name) == first.lower(), lower(last_name) == last.lower()
+            )
+            for first, last in candidates
+            if not is_initial(first)
+        ]
+    else:
+        matches = []
+
+    return sqlalchemy.and_(
+        models.Inmate.jurisdiction == jurisdiction,
+        sqlalchemy.or_(sqlalchemy.false(), *matches),
+    )
+
+
+def stale_inmate_clause(
+    candidates: list[tuple[str, str]], errors: list, incomplete: Iterable[str] = ()
+):
     """SQL clause for the inmates a name search should set aside as stale.
 
     A name search upserts everything the providers return before it reads the
-    table, so a matching row that is still old afterwards is one its provider
-    no longer lists under that name, most likely a released inmate. Such a row
+    table, so a row its provider would have returned (see
+    :func:`provider_would_return_clause`) that is still old afterwards is one
+    the provider no longer lists, most likely a released inmate. Such a row
     is stale once its data is older than ``[search] stale_after_days`` (or was
     never fetched); the grace period covers a provider that briefly omits
-    someone.
+    someone. A local match the provider's own search would not have returned
+    says nothing about that person, so it is never stale.
 
     A provider that failed, or capped its answer (``incomplete`` lists those
     jurisdictions), may have left out people it still lists, so none of that
@@ -129,10 +180,14 @@ def stale_inmate_clause(errors: list, incomplete: Iterable[str] = ()):
         return sqlalchemy.false()
 
     unsure = failed | set(incomplete)
-    clause = old_data_clause()
-    if unsure:
-        clause = sqlalchemy.and_(clause, models.Inmate.jurisdiction.not_in(unsure))
-    return clause
+    answered = [
+        provider_would_return_clause(jurisdiction, candidates)
+        for jurisdiction in ("Texas", "Federal")
+        if jurisdiction not in unsure
+    ]
+    return sqlalchemy.and_(
+        old_data_clause(), sqlalchemy.or_(sqlalchemy.false(), *answered)
+    )
 
 
 async def query_inmates_by_name(
@@ -150,10 +205,6 @@ async def query_inmates_by_name(
     records never sit above the people a provider just returned.
     """
     lower = sqlalchemy.func.lower
-
-    def prefix_match(column, term: str):
-        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        return column.ilike(escaped + "%", escape="\\")
 
     matches = []
     for first, last in candidates:
@@ -227,7 +278,7 @@ async def search_inmates(
             errors.extend(results.errors)
             incomplete.update(results.incomplete)
 
-        stale = stale_inmate_clause(errors, incomplete)
+        stale = stale_inmate_clause(candidates, errors, incomplete)
         inmates = await query_inmates_by_name(session, candidates, ~stale)
         stale_inmates = await query_inmates_by_name(session, candidates, stale)
         logger.debug(

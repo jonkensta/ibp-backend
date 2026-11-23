@@ -80,13 +80,24 @@ answer nothing.
 providers (TDCJ, FBOP) and saves what they return, then answers from the
 `inmates` table, so the table serves as a cache when a provider is down.
 
-A name search sets aside matches that are stale: data older than
-`[search] stale_after_days` (30 days), or never fetched, for an inmate whose
-provider answered just now without returning them, most likely because they
-were released. Those come back as `stale_inmates`, not in `inmates`. If a
-provider failed, or capped its answer (FBOP sends at most 100 records), none
-of its jurisdiction's matches are stale. An ID search never sets its match
-aside.
+A name search sets aside matches that are stale: an inmate the provider was
+just asked for and did not return, most likely because they were released.
+Those come back as `stale_inmates`, not in `inmates`. A match is stale only if
+all of these hold:
+
+- its data is older than `[search] stale_after_days` (30 days), or was never
+  fetched;
+- its provider neither failed nor capped its answer for this search. TDCJ
+  lists 50 results a page and is read up to 10 pages; FBOP sends at most 100
+  records, with no paging. An error that names no provider means nothing is
+  stale;
+- the provider's own search would have returned it for one of the query's
+  (first, last) orderings. The local search matches both names by prefix, but
+  TDCJ needs the exact last name (the first name may be a prefix), and FBOP
+  needs both names exactly and finds nobody by an initial.
+
+Other old matches stay in `inmates`, below fresh ones with the same name. An
+ID search never sets its match aside.
 
 ## Request addresses
 

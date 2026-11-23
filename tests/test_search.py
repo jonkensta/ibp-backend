@@ -172,9 +172,29 @@ def test_name_search_upserts_and_dedupes_errors(client, seeded, by_name):
 OLD = NOW - datetime.timedelta(days=31)
 
 
+def _add_inmate(db, row, fetched):
+    jurisdiction, id_, first, last = row
+    with db.begin() as session:
+        session.add(
+            models.Inmate(
+                jurisdiction=jurisdiction,
+                id=id_,
+                first_name=first,
+                last_name=last,
+                datetime_fetched=fetched,
+            )
+        )
+
+
 @pytest.fixture
 def aged(seeded):
-    """Age two cached GARCIA matches: one past the stale cutoff, one never fetched."""
+    """Old cached matches for "maria garcia", past the cutoff or never fetched.
+
+    66666 and 7777777 are named so that TDCJ and FBOP would return them;
+    22222 and 3333333 match locally by prefix only.
+    """
+    _add_inmate(seeded, ("Texas", 66666, "MARIA", "GARCIA"), OLD)
+    _add_inmate(seeded, ("Federal", 7777777, "MARIA", "GARCIA"), None)
     with seeded.begin() as session:
         session.get(models.Inmate, ("Texas", 22222)).datetime_fetched = OLD
         session.get(models.Inmate, ("Federal", 3333333)).datetime_fetched = None
@@ -192,39 +212,60 @@ def _ids(inmates):
 
 
 def test_name_search_sets_stale_matches_aside(client, aged, by_name):
-    """Old or never-fetched matches the providers did not return are stale."""
+    """Old matches the providers would have returned, and did not, are stale."""
     data = _search(client, "maria garcia")
-    assert _ids(data["inmates"]) == [11111]
-    assert _ids(data["stale_inmates"]) == [3333333, 22222]
+    assert _ids(data["inmates"]) == [11111, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [7777777, 66666]
+
+
+def test_name_search_prefix_last_name_is_not_stale(client, aged, by_name):
+    """TDCJ wants the exact last name, so it never returns GARCIA-LOPEZ here."""
+    _add_inmate(aged, ("Texas", 88888, "MARIA", "GARCIA-LOPEZ"), OLD)
+    data = _search(client, "maria garcia")
+    assert 88888 in _ids(data["inmates"])
+    assert 88888 not in _ids(data["stale_inmates"])
+
+
+def test_name_search_prefix_first_name(client, aged, by_name):
+    """TDCJ matches a first-name prefix, so its old row is stale; FBOP doesn't."""
+    data = _search(client, "mar garcia")
+    assert _ids(data["inmates"]) == [11111, 7777777, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [66666]
+
+
+def test_name_search_initial_never_makes_federal_stale(client, aged, by_name):
+    """FBOP finds nobody by an initial; TDCJ does, as a first-name prefix."""
+    data = _search(client, "m garcia")
+    assert 7777777 in _ids(data["inmates"])
+    assert _ids(data["stale_inmates"]) == [66666]
 
 
 def test_name_search_recent_match_is_not_stale(client, seeded, by_name):
     """A match fetched within the grace period stays in the results."""
-    with seeded.begin() as session:
-        recent = NOW - datetime.timedelta(days=29)
-        session.get(models.Inmate, ("Texas", 22222)).datetime_fetched = recent
+    recent = NOW - datetime.timedelta(days=29)
+    _add_inmate(seeded, ("Texas", 66666, "MARIA", "GARCIA"), recent)
 
     data = _search(client, "maria garcia")
-    assert 22222 in _ids(data["inmates"])
+    assert 66666 in _ids(data["inmates"])
     assert data["stale_inmates"] == []
 
 
 def test_name_search_provider_result_refreshes_old_match(client, aged, by_name):
     """A match the provider returns is fresh again, so it is not stale."""
     by_name.responses = [
-        _result(id=22222, first_name="GARCIA", last_name="MARIANO", unit="Alpha")
+        _result(id=66666, first_name="MARIA", last_name="GARCIA", unit="Alpha")
     ]
     data = _search(client, "maria garcia")
-    assert _ids(data["inmates"]) == [11111, 22222]
-    assert _ids(data["stale_inmates"]) == [3333333]
+    assert _ids(data["inmates"]) == [11111, 66666, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [7777777]
 
 
 def test_name_search_failed_provider_keeps_its_old_matches(client, aged, by_name):
     """With TDCJ down its old matches show (cache); FBOP's are still stale."""
     by_name.errors = [_provider_error("Texas")]
     data = _search(client, "maria garcia")
-    assert _ids(data["inmates"]) == [11111, 22222]
-    assert _ids(data["stale_inmates"]) == [3333333]
+    assert _ids(data["inmates"]) == [11111, 66666, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [7777777]
 
 
 def test_name_search_capped_provider_keeps_its_old_matches(client, aged, by_name):
@@ -232,15 +273,24 @@ def test_name_search_capped_provider_keeps_its_old_matches(client, aged, by_name
     by_name.incomplete = ["Texas"]
     data = _search(client, "maria garcia")
     assert data["errors"] == []
-    assert _ids(data["inmates"]) == [11111, 22222]
-    assert _ids(data["stale_inmates"]) == [3333333]
+    assert _ids(data["inmates"]) == [11111, 66666, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [7777777]
+
+
+def test_name_search_capped_fbop_keeps_its_old_matches(client, aged, by_name):
+    """A capped FBOP answer keeps FBOP's old rows; TDCJ's are still stale."""
+    by_name.incomplete = ["Federal"]
+    data = _search(client, "maria garcia")
+    assert data["errors"] == []
+    assert _ids(data["inmates"]) == [11111, 7777777, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [66666]
 
 
 def test_name_search_unattributed_error_keeps_all_matches(client, aged, by_name):
     """An error that names no provider could be anyone's: nothing is stale."""
     by_name.errors = ["something broke"]
     data = _search(client, "maria garcia")
-    assert _ids(data["inmates"]) == [11111, 3333333, 22222]
+    assert _ids(data["inmates"]) == [11111, 7777777, 66666, 3333333, 22222]
     assert data["stale_inmates"] == []
 
 
