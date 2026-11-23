@@ -36,6 +36,7 @@ from .api import get_session
 from .base import app
 from .labels import RequestKey, label_package_id
 from .request_api import load_request, request_key
+from .titles import title_key
 
 logger = logging.getLogger(__name__)
 
@@ -387,7 +388,8 @@ async def matching_item(
     """The unregistered item of a package that a portal report is about.
 
     First the oldest with the reported ISBN, else the oldest with the same
-    title (ignoring case) and no other ISBN, else none.
+    title (compared by ``titles.title_key``: case, accents, punctuation and
+    the article ignored) and no other ISBN, else none.
     """
     items = (
         await session.execute(
@@ -401,9 +403,9 @@ async def matching_item(
         for item in candidates:
             if item.isbn == report.isbn:
                 return item
-    title = report.title.casefold()
+    title = title_key(report.title)
     for item in candidates:
-        if item.isbn in (None, report.isbn) and item.title.casefold() == title:
+        if item.isbn in (None, report.isbn) and title_key(item.title) == title:
             return item
     return None
 

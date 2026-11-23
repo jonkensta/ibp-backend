@@ -100,10 +100,40 @@ def test_matched_book_takes_submitted_text(client, seeded):
 
 def test_matches_by_title_without_isbn(client, seeded):
     """A station book without an ISBN matches by title and gets the ISBN."""
-    recorded = add(client, **MANUAL_BOOK)
+    recorded = add(client, **MANUAL_BOOK, isbn=None)
     item = report(client, title="a zine", author="Unknown").json()
     assert item["id"] == recorded["id"]
     assert (item["isbn"], item["title"], item["source"]) == (ISBN, "a zine", "manual")
+
+
+@pytest.mark.parametrize(
+    ("recorded", "reported"),
+    [
+        ("Hobbit, The", "The Hobbit"),
+        ("War and Peace", "War & Peace"),
+        ("Les Miserables", "Les Misérables"),
+        ("don quixote!", "Don Quixote"),
+    ],
+)
+def test_title_match_ignores_spelling(client, seeded, recorded, reported):
+    """Case, accents, punctuation, '&' and the article's place don't matter."""
+    station = add(client, **{**MANUAL_BOOK, "isbn": None, "title": recorded})
+    item = report(client, title=reported).json()
+    assert item["id"] == station["id"]
+    assert item["title"] == reported
+    assert len(client.get(ITEMS_URL).json()) == 1
+
+
+@pytest.mark.parametrize(
+    ("recorded", "reported"),
+    [("Dune", "Dune Messiah"), ("The Hobbit", "The Hobbits")],
+)
+def test_title_match_needs_the_same_words(client, seeded, recorded, reported):
+    """Another word, or a word added, is another book: no match."""
+    station = add(client, **{**MANUAL_BOOK, "isbn": None, "title": recorded})
+    item = report(client, title=reported).json()
+    assert item["id"] != station["id"]
+    assert len(client.get(ITEMS_URL).json()) == 2
 
 
 def test_title_match_skips_another_isbn(client, seeded):
