@@ -131,7 +131,7 @@ def test_bootstrap_adopts_pre_package_items_schema(tmp_path: Path, monkeypatch):
 
 
 def test_bootstrap_stamps_current_schema(tmp_path: Path, monkeypatch):
-    """A create_all schema from the current models is stamped head as is."""
+    """A create_all schema from the current models ends up at head."""
     url = f"sqlite:///{tmp_path / 'current.db'}"
     engine = sqlalchemy.create_engine(url)
     try:

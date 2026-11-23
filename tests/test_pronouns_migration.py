@@ -90,7 +90,7 @@ def test_bootstrap_adopts_pre_pronouns_schema(tmp_path: Path, monkeypatch):
 
 
 def test_bootstrap_stamps_schema_with_pronouns(tmp_path: Path, monkeypatch):
-    """A create_all schema that has inmates.pronouns is stamped head as is."""
+    """A create_all schema that has inmates.pronouns ends up at head."""
     url = f"sqlite:///{tmp_path / 'current.db'}"
     engine = sqlalchemy.create_engine(url)
     try:

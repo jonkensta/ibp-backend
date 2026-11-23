@@ -498,8 +498,10 @@ def stamp_schema() -> None:
     """Record the schema version so the database is ready for the app.
 
     The schema was just created by ``Base.metadata.create_all`` from the
-    current models, so ``ibp.db_bootstrap`` stamps it as alembic ``head``
-    (or, if alembic_version already exists, runs a no-op upgrade).
+    current models, so ``ibp.db_bootstrap`` stamps it at the last schema
+    revision and upgrades it to alembic ``head``, which rewrites the legacy
+    Texas race and sex codes as words (or, if alembic_version already
+    exists, it runs a no-op upgrade).
     """
     print("\nStamping alembic schema version (ibp.db_bootstrap)")
     ibp.db_bootstrap.bootstrap()

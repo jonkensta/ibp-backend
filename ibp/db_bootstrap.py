@@ -6,9 +6,9 @@ entrypoint).  It inspects the configured database and does the right thing:
 - Empty database (no tables): run ``alembic upgrade head`` to build the full
   schema from the baseline migration.
 - Tables exist but no ``alembic_version`` table: the database was created by
-  ``Base.metadata.create_all`` (e.g. via ``scripts/migrate.py``).  If the
-  schema already matches the current models, stamp it as ``head``; if it
-  predates later migrations, stamp the newest revision it matches and upgrade.
+  ``Base.metadata.create_all`` (e.g. via ``scripts/migrate.py``).  Stamp the
+  newest schema revision it matches and upgrade to ``head``, which also runs
+  any later data-only migrations (they are safe to run on any data).
 - Otherwise: run ``alembic upgrade head`` to apply any pending migrations.
 
 Finally, the single ``shipping_settings`` row is seeded with the production
@@ -48,6 +48,11 @@ PRE_UPCS_REVISION = "f7a3c9d1b2e6"
 PRE_CONFIRMATION_NUMBER_REVISION = "a9d4e2c6b8f1"
 # Last revision before the inmates.pronouns columns were added.
 PRE_PRONOUNS_REVISION = "b8e1f4a2c9d7"
+# Last revision before Texas race and sex codes were rewritten as words. That
+# migration adds no column, so a schema with every column of the current
+# models is adopted here and upgraded, rewriting any codes it holds (e.g.
+# legacy ones from scripts/migrate.py); stamping it head would skip that.
+PRE_RACE_SEX_WORDS_REVISION = "c4e7a2f9d1b3"
 
 _SYNC_SCHEME_MAPPING = {
     "postgresql+asyncpg": "postgresql",
@@ -126,11 +131,15 @@ def bootstrap() -> None:
     elif "alembic_version" not in tables:
         if "inmates.pronouns" in columns:
             # Schema was created by Base.metadata.create_all from the current
-            # models; adopt it as-is.
+            # models; adopt it at the last schema revision and run the data
+            # migrations after it.
             logger.info(
-                "Existing schema without alembic_version detected; stamping head."
+                "Existing schema without alembic_version detected; stamping %s "
+                "and upgrading to head.",
+                PRE_RACE_SEX_WORDS_REVISION,
             )
-            command.stamp(config, "head")
+            command.stamp(config, PRE_RACE_SEX_WORDS_REVISION)
+            command.upgrade(config, "head")
         elif "registrations.confirmation_number" in columns:
             # Schema was created by create_all from pre-pronouns models; adopt
             # it there and replay the later migrations.
