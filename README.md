@@ -46,7 +46,8 @@ Values may use `${VAR}` (required environment variable) or
 
 `[server] timezone` (an IANA name, default `America/Chicago`) decides what
 "today" is, e.g. for the future-postmark warning; startup fails on an unknown
-name. It does not depend on the container's `TZ`.
+name. It does not depend on the container's `TZ`. `GET /server-config` reports
+it read-only (`{"timezone": "America/Chicago"}`) for the frontend's calendar.
 
 The `[books]` section configures the ISBN lookup (`GET /books/{isbn}`): it
 queries ISBNdb, Open Library, Google Books and the Library of Congress at

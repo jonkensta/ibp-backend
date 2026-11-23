@@ -45,3 +45,22 @@ def test_unknown_timezone_fails_clearly(name):
     config = _config(f"[server]\ntimezone = {name}\n")
     with pytest.raises(ValueError, match=r"\[server\] timezone = .* is not a known"):
         clock.read_timezone(config)
+
+
+def test_server_config_returns_the_timezone(client):
+    """GET /server-config reports the configured zone."""
+    response = client.get("/server-config")
+    assert response.status_code == 200
+    assert response.json() == {"timezone": "America/Chicago"}
+
+
+def test_server_config_follows_the_config(client, monkeypatch: pytest.MonkeyPatch):
+    """The endpoint reports whatever zone the config file set."""
+    monkeypatch.setattr(clock, "TIMEZONE", clock.ZoneInfo("Asia/Tokyo"))
+    assert client.get("/server-config").json() == {"timezone": "Asia/Tokyo"}
+
+
+def test_server_config_is_read_only(client):
+    """The zone comes from the config file and cannot be changed over the API."""
+    response = client.put("/server-config", json={"timezone": "Asia/Tokyo"})
+    assert response.status_code == 405
