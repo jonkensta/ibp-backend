@@ -607,9 +607,14 @@ class PackageItemCreated(PackageItem):
 
 
 class PackageInmate(InmateBase):
-    """The inmate a package goes to, with their unit."""
+    """The inmate a package goes to, with their unit.
+
+    ``pronouns`` are the ones the person stated in a letter, if any, shown at
+    the packing station (without who recorded them or when).
+    """
 
     unit: Optional[Unit] = None
+    pronouns: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -669,3 +674,82 @@ class RegistrationQueueEntry(BaseModel):
     title: str
     author: Optional[str] = None
     tdcj_number: str
+
+
+# Pronouns an inmate stated in a letter (see the README). Kept tight so the
+# field cannot become a place for notes.
+PRONOUNS_MAX_LENGTH = 30
+PRONOUNS_PATTERN = r"^[A-Za-z][A-Za-z /,.'-]*$"
+SET_BY_MAX_LENGTH = 40
+
+StatedPronouns = Annotated[
+    str,
+    BeforeValidator(clean_text),
+    StringConstraints(
+        min_length=1, max_length=PRONOUNS_MAX_LENGTH, pattern=PRONOUNS_PATTERN
+    ),
+]
+
+VolunteerInitials = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=SET_BY_MAX_LENGTH
+    ),
+]
+
+
+class PronounsSet(BaseModel):
+    """Record the pronouns an inmate stated in a letter.
+
+    ``pronouns`` is cleaned like other free text and must then be 1 to 30
+    letters, spaces and ``/,.'-``, starting with a letter. ``set_by`` is the
+    recording volunteer's initials.
+    """
+
+    pronouns: StatedPronouns
+    set_by: VolunteerInitials
+
+
+class PronounsClear(BaseModel):
+    """Clear an inmate's recorded pronouns; ``set_by`` is the volunteer's initials."""
+
+    set_by: VolunteerInitials
+
+
+class InmatePronouns(BaseModel):
+    """An inmate's recorded pronouns, who recorded them and when."""
+
+    pronouns: str
+    set_by: str
+    set_at: datetime.datetime
+
+    @field_serializer("set_at")
+    def serialize_dt(self, dt: datetime.datetime, _info):
+        """Serialize datetime to ISO format with UTC timezone if naive."""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        return dt.isoformat()
+
+
+class InmateView(Inmate):
+    """An inmate as the inmate view shows it, with any recorded pronouns.
+
+    Only ``GET /inmates/{jurisdiction}/{inmate_id}`` and its lookups ``POST``
+    return this. All three pronouns fields are empty unless the person
+    stated their pronouns in a letter; they are never inferred from ``sex``.
+    Other inmate responses (search results, the legacy inmate routes, request
+    addresses) leave them out.
+    """
+
+    pronouns: Optional[str] = None
+    pronouns_set_by: Optional[str] = None
+    pronouns_set_at: Optional[datetime.datetime] = None
+
+    @field_serializer("pronouns_set_at")
+    def serialize_pronouns_set_at(self, dt: Optional[datetime.datetime], _info):
+        """Serialize datetime to ISO format with UTC timezone if naive."""
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
+        return dt.isoformat()

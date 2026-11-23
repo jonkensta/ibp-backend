@@ -169,6 +169,15 @@ class Inmate(Base):
         Integer, nullable=False, default=0, server_default=sqlalchemy.text("0")
     )
 
+    # Pronouns the person stated in a letter, and the initials of the
+    # volunteer who recorded them and when. All NULL when none were stated;
+    # set and cleared together, and never filled from the provider's ``sex``.
+    # Provider upserts (ibp/upsert.py) merge an Inmate without these, so they
+    # survive a refresh.
+    pronouns: Mapped[Optional[str]] = mapped_column(String(30))
+    pronouns_set_by: Mapped[Optional[str]] = mapped_column(String(40))
+    pronouns_set_at: Mapped[Optional[datetime.datetime]] = mapped_column(TZDateTime())
+
     requests: Mapped[list["Request"]] = relationship(
         "Request",
         back_populates="inmate",

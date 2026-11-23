@@ -108,9 +108,14 @@ def test_bootstrap_adopts_pre_package_items_schema(tmp_path: Path, monkeypatch):
         ]
         ibp.models.Base.metadata.create_all(engine, tables=tables)
         with engine.begin() as connection:
-            connection.execute(
-                sqlalchemy.text("ALTER TABLE requests DROP COLUMN contents_revision")
-            )
+            # Added by the package_items migration or later ones.
+            for statement in [
+                "ALTER TABLE requests DROP COLUMN contents_revision",
+                "ALTER TABLE inmates DROP COLUMN pronouns",
+                "ALTER TABLE inmates DROP COLUMN pronouns_set_by",
+                "ALTER TABLE inmates DROP COLUMN pronouns_set_at",
+            ]:
+                connection.execute(sqlalchemy.text(statement))
         insert_request(engine)
 
         monkeypatch.setattr(db_bootstrap, "get_sync_database_url", lambda: url)

@@ -93,6 +93,9 @@ def test_bootstrap_adopts_pre_next_request_index_schema(tmp_path, monkeypatch):
                 "DROP TABLE package_items",
                 "ALTER TABLE requests DROP COLUMN contents_revision",
                 "ALTER TABLE inmates DROP COLUMN next_request_index",
+                "ALTER TABLE inmates DROP COLUMN pronouns",
+                "ALTER TABLE inmates DROP COLUMN pronouns_set_by",
+                "ALTER TABLE inmates DROP COLUMN pronouns_set_at",
             ]:
                 connection.execute(sqlalchemy.text(statement))
         insert_inmates(engine)

@@ -120,6 +120,26 @@ inmate, so a transfer is picked up. `inmate_status` reports the outcome:
 An inmate without a unit is a 409, including one the provider now lists at a
 unit missing from the `units` table (the detail names that unit).
 
+## Pronouns
+
+A volunteer can record the pronouns a person stated in a letter:
+`PUT /inmates/{jurisdiction}/{inmate_id}/pronouns` with `pronouns` (1 to 30
+letters, spaces and `/,.'-`, so it can't hold notes) and `set_by` (the
+volunteer's initials), and `POST .../pronouns/clear` with `set_by` to remove
+them. They are stored in `inmates.pronouns`, with who set them and when; all
+three are empty when none were stated, and there is no history.
+
+- Recorded only when the person stated them: never inferred, defaulted or
+  backfilled, and never derived from the provider's `sex`.
+- Shown only in the inmate view (`GET /inmates/{jurisdiction}/{inmate_id}`
+  and its lookups `POST`) and, without who or when, with the inmate at the
+  packing station (`GET /requests/{code}`).
+- Never on a label or slip and never in the shipping address
+  (`GET /requests/{code}/address`), since the label goes out on the package
+  and pronouns next to a name could put the person at risk. Not in search
+  results or the legacy inmate routes the Book Portal extension calls.
+- Kept when a provider refresh updates the inmate, and never logged.
+
 ## Deployment
 
 Production runs on `ibp-server`, a Raspberry Pi 4B, as a Docker Compose

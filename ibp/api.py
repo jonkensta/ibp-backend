@@ -451,7 +451,7 @@ def inmate_view_statement(jurisdiction: schemas.JurisdictionEnum, inmate_id: int
 MAX_LOOKUPS_PER_INMATE = 3
 
 
-@app.get("/inmates/{jurisdiction}/{inmate_id}", response_model=schemas.Inmate)
+@app.get("/inmates/{jurisdiction}/{inmate_id}", response_model=schemas.InmateView)
 async def get_inmate(
     jurisdiction: schemas.JurisdictionEnum,
     inmate_id: int,
@@ -477,7 +477,7 @@ async def get_inmate(
 
 @app.post(
     "/inmates/{jurisdiction}/{inmate_id}/lookups",
-    response_model=schemas.Inmate,
+    response_model=schemas.InmateView,
     status_code=status.HTTP_201_CREATED,
 )
 async def record_lookup(
@@ -499,7 +499,7 @@ async def record_lookup(
     # winner's refresh, if any, is committed too).
     for attempt in itertools.count(1):
         try:
-            inmate = await _record_lookup_once(session, jurisdiction, inmate_id)
+            await _record_lookup_once(session, jurisdiction, inmate_id)
         except sqlalchemy.exc.IntegrityError:
             if attempt >= LOOKUP_ATTEMPTS:
                 raise
@@ -507,8 +507,17 @@ async def record_lookup(
             continue
         break
 
-    await session.refresh(inmate)
-    return inmate
+    # Reload what the commit expired. Not session.refresh(inmate): an inmate
+    # just refreshed from its provider (merged in ibp/upsert.py) has lost the
+    # view's loader options, so a refresh would leave its relationships to
+    # lazy-load, which fails under asyncio.
+    return (
+        await session.execute(
+            inmate_view_statement(jurisdiction, inmate_id).execution_options(
+                populate_existing=True
+            )
+        )
+    ).scalar_one()
 
 
 # Attempts to record a lookup before giving up on concurrent index collisions.
@@ -830,6 +839,88 @@ async def delete_comment(
         logger.debug("deleting comment")
 
         await session.delete(comment)
+
+
+async def load_inmate_for_update(
+    session: AsyncSession, jurisdiction: schemas.JurisdictionEnum, inmate_id: int
+) -> models.Inmate:
+    """Return an inmate locked for update, or 404 "Inmate not found."."""
+    inmate = (
+        await session.execute(
+            select(models.Inmate)
+            .where(
+                models.Inmate.jurisdiction == jurisdiction,
+                models.Inmate.id == inmate_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+
+    if inmate is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Inmate not found."
+        )
+
+    return inmate
+
+
+@app.put(
+    "/inmates/{jurisdiction}/{inmate_id}/pronouns",
+    response_model=schemas.InmatePronouns,
+)
+async def set_pronouns(
+    jurisdiction: schemas.JurisdictionEnum,
+    inmate_id: int,
+    pronouns_data: schemas.PronounsSet,
+    session: AsyncSession = Depends(get_session),
+):
+    """Record the pronouns an inmate stated in a letter.
+
+    Only for pronouns the person wrote; never inferred. ``set_by`` (the
+    volunteer's initials) and the time are recorded with them. They are shown
+    in the inmate view and at the packing station, never on a label, in the
+    shipping address or in search results.
+    """
+    set_at = datetime.datetime.now(datetime.timezone.utc)
+
+    async with session.begin():
+        inmate = await load_inmate_for_update(session, jurisdiction, inmate_id)
+        inmate.pronouns = pronouns_data.pronouns
+        inmate.pronouns_set_by = pronouns_data.set_by
+        inmate.pronouns_set_at = set_at
+
+    # Never log the pronouns or the initials.
+    logger.debug("recorded pronouns for %s inmate %s", jurisdiction.value, inmate_id)
+
+    return schemas.InmatePronouns(
+        pronouns=pronouns_data.pronouns, set_by=pronouns_data.set_by, set_at=set_at
+    )
+
+
+# A POST with a body rather than a DELETE: initials are required to clear,
+# and DELETE bodies are unreliable through proxies.
+@app.post(
+    "/inmates/{jurisdiction}/{inmate_id}/pronouns/clear",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def clear_pronouns(
+    jurisdiction: schemas.JurisdictionEnum,
+    inmate_id: int,
+    clear_data: schemas.PronounsClear,  # pylint: disable=unused-argument
+    session: AsyncSession = Depends(get_session),
+):
+    """Clear an inmate's recorded pronouns; clearing none is not an error.
+
+    ``set_by`` (the volunteer's initials) is required, but, as there is no
+    history, not stored.
+    """
+    async with session.begin():
+        inmate = await load_inmate_for_update(session, jurisdiction, inmate_id)
+        inmate.pronouns = None
+        inmate.pronouns_set_by = None
+        inmate.pronouns_set_at = None
+
+    logger.debug("cleared pronouns for %s inmate %s", jurisdiction.value, inmate_id)
 
 
 @app.get("/units", response_model=list[schemas.Unit])
