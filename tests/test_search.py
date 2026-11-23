@@ -480,6 +480,39 @@ def test_name_search_reads_titles_as_names(client, seeded, by_name, query):
     assert sorted(by_name.calls) == [("doe", "king"), ("king", "doe")]
 
 
+@pytest.mark.parametrize(
+    "query, first_orderings",
+    [
+        ("juan de la cruz", [("juan", "de la cruz"), ("de la cruz", "juan")]),
+        ("de la cruz, juan", [("juan", "de la cruz"), ("de la cruz", "juan")]),
+        ("john van horn", [("john", "van horn"), ("van horn", "john")]),
+        # Last name first, no comma: also read as "van horn, john".
+        ("van horn john", [("john", "van horn"), ("van horn", "john")]),
+        ("de la cruz juan", [("juan", "de la cruz"), ("de la cruz", "juan")]),
+        ("mary st. john", [("mary", "st john"), ("st john", "mary")]),
+    ],
+)
+def test_name_search_multi_word_last_names(
+    client, seeded, by_name, query, first_orderings
+):
+    """A last name of several words is kept whole, whichever end it is at."""
+    _search(client, query)
+    assert by_name.calls[:2] == first_orderings
+
+
+def test_name_search_particle_first_keeps_plain_reading(client, seeded, by_name):
+    """A query that starts with a particle may still be first name first."""
+    _search(client, "al james smith")
+    assert ("al", "smith") in by_name.calls
+
+
+def test_name_search_ignores_periods(client, seeded, by_name):
+    """An initial typed with a period searches as the initial."""
+    data = _search(client, "j. smith")
+    assert by_name.calls == [("j", "smith"), ("smith", "j")]
+    assert _ids(data["inmates"]) == [44444]
+
+
 @pytest.mark.parametrize("query", ["garcia", "   "])
 def test_name_search_needs_two_parts(client, seeded, by_name, query):
     """A lone name is rejected without querying providers."""

@@ -68,6 +68,10 @@ MAX_SEARCH_RESULTS = 250
 # salutations, and some first names (King, Prince) are titles to nameparser.
 QUERY_NAME_RULES = Constants(titles=[])
 
+# Words that start a surname ("van", "de"), so begin a query written last name
+# first.
+PARTICLES = QUERY_NAME_RULES.prefixes
+
 
 def parse_name_query(query: str) -> list[tuple[str, str]]:
     """Parse a free-form name query into candidate (first, last) pairs.
@@ -79,25 +83,36 @@ def parse_name_query(query: str) -> list[tuple[str, str]]:
 
     - "maria garcia" / "garcia maria" / "garcia, maria"
         -> [(first, last), (last, first)] for the two parsed words
+    - "van horn john": a surname that starts with a particle, written first
+      with no comma, is also read as "van horn, john"
 
-    Words nameparser knows as titles ("king", "prince") are read as names.
+    Words nameparser knows as titles ("king", "prince") are read as names,
+    and periods ("j. smith", "st. john") are ignored.
 
     Both components are required (a first initial is enough): the external
     providers cannot search on a lone name, so a single-word query would
     silently search only the local cache.  An empty list is returned when the
     query does not contain two name parts.
     """
-    name = HumanName(query, constants=QUERY_NAME_RULES)
-    first: str = name.first
-    last: str = name.last
+    query = query.replace(".", " ")
+    readings = [query]
+    words = query.split()
+    if "," not in query and len(words) > 2 and words[0].lower() in PARTICLES:
+        readings.insert(0, f"{' '.join(words[:-1])}, {words[-1]}")
 
-    if first and last:
-        candidates = [(first, last)]
+    candidates: list[tuple[str, str]] = []
+    for reading in readings:
+        name = HumanName(reading, constants=QUERY_NAME_RULES)
+        first: str = name.first
+        last: str = name.last
+        if not (first and last):
+            continue
+        pairs = [(first, last)]
         if first.lower() != last.lower():
-            candidates.append((last, first))
-        return candidates
+            pairs.append((last, first))
+        candidates.extend(pair for pair in pairs if pair not in candidates)
 
-    return []
+    return candidates
 
 
 def old_data_clause():
