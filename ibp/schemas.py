@@ -430,6 +430,25 @@ class Book(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class BookSuggestion(BaseModel):
+    """A better spelling of a typed title and author (see ``ibp.book_search``).
+
+    Offered only when Claude is sure (``confidence`` is ``high``) and the
+    guard agrees; ``notes`` says why, briefly.
+    """
+
+    title: str
+    author: str
+    confidence: str
+    notes: str
+
+
+class BookSuggestions(BaseModel):
+    """The answer to a suggestion request: ``suggestion`` is null for none."""
+
+    suggestion: Optional[BookSuggestion] = None
+
+
 class UpcBook(Book):
     """A book found by its UPC: ``isbn`` is the ISBN-13 the UPC maps to.
 

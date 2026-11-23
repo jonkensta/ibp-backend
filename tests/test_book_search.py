@@ -838,3 +838,85 @@ def test_cache_size():
     assert list(cache.entries) == [("b", ""), ("c", "")]
     assert cache.get(("a", "")) == (False, None)
     assert cache.get(("b", "")) == (True, None)
+
+
+# --- Endpoint ------------------------------------------------------------------
+
+
+def stub_endpoint(monkeypatch, outcome):
+    """Make book_search.suggest return (or raise) ``outcome``; record its calls."""
+    calls = []
+
+    async def fake(title, author):
+        calls.append((title, author))
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(book_search, "suggest", fake)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"title": "ab", "author": "Tolkien"},
+        {"title": "The Hobbit", "author": " J  "},
+        {"title": "x" * 101, "author": "Tolkien"},
+        {"title": "The Hobbit"},
+        {},
+    ],
+)
+def test_endpoint_validation(client, monkeypatch, params):
+    """Title and author must be 3 to 100 characters after cleaning: else 422."""
+    calls = stub_endpoint(monkeypatch, None)
+    assert client.get("/book-suggestions", params=params).status_code == 422
+    assert not calls
+
+
+def test_endpoint_suggestion(client, monkeypatch):
+    """A suggestion comes back as title, author, confidence and notes."""
+    suggestion = book_search.Suggestion(
+        title="The Hobbit", author="J.R.R. Tolkien", confidence="high", notes="Typo."
+    )
+    calls = stub_endpoint(monkeypatch, suggestion)
+    response = client.get(
+        "/book-suggestions", params={"title": " The\tHobit ", "author": "Tolkien"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "suggestion": {
+            "title": "The Hobbit",
+            "author": "J.R.R. Tolkien",
+            "confidence": "high",
+            "notes": "Typo.",
+        }
+    }
+    assert calls == [("The Hobit", "Tolkien")]
+
+
+@pytest.mark.parametrize("outcome", [None, RuntimeError("bug")])
+def test_endpoint_no_suggestion(client, monkeypatch, outcome):
+    """No suggestion, or a failure, is a 200 with a null suggestion."""
+    stub_endpoint(monkeypatch, outcome)
+    response = client.get(
+        "/book-suggestions", params={"title": "The Hobit", "author": "Tolkien"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"suggestion": None}
+
+
+def test_endpoint_end_to_end(client, monkeypatch):
+    """Through the real suggest(), with the providers and Claude stubbed."""
+    stub_suggest(monkeypatch)
+    response = client.get(
+        "/book-suggestions", params={"title": "The Hobit", "author": "J.R.R. Tolkien"}
+    )
+    assert response.json()["suggestion"]["title"] == "The Hobbit"
+
+
+def test_isbn_route_unaffected(client):
+    """/book-suggestions is not taken for an ISBN; /books/{isbn} still is."""
+    assert client.get("/books/book-suggestions").json() == {
+        "detail": "Not a valid ISBN."
+    }
