@@ -1,5 +1,6 @@
 """TDCJ inmate query implementation."""
 
+import asyncio
 import datetime
 import logging
 import re
@@ -25,6 +26,11 @@ REQUIRED_FIELDS = {"TDCJ Number", "Name", "Unit of Assignment"}
 # neither this nor a results table (an error or maintenance page) is an error,
 # not "no such inmate": shipping treats an inmate TDCJ doesn't list as gone.
 NO_RESULTS_TEXT = "No Inmates were found matching the search criteria"
+
+# TDCJ lists 50 results a page, sorted by name. A search reads at most
+# MAX_PAGES of them; an answer with more pages is reported as incomplete.
+PAGE_SIZE = 50
+MAX_PAGES = 10
 
 
 def format_inmate_id(inmate_id: typing.Union[int, str]) -> str:
@@ -65,24 +71,109 @@ async def _curl_search_url(
     return await run_curl_exec(args, timeout=timeout)
 
 
+async def _curl_results_page(
+    last_search: str,
+    page: int,
+    page_count: int,
+    timeout: float | None = None,
+):
+    """Fetch a later page of a search's results.
+
+    ``last_search`` is the search as the first page's pagination form echoes
+    it back; TDCJ serves any page from it, with no session needed.
+    """
+    args = [
+        "--ipv4",
+        "--fail",
+        "--data-urlencode",
+        f"lastSearch={last_search}",
+        "-d",
+        f"currentPage={page}",
+        "-d",
+        f"totalPageCount={page_count}",
+        SEARCH_URL,
+    ]
+
+    return await run_curl_exec(args, timeout=timeout)
+
+
+def _hidden_value(soup: BeautifulSoup, name: str) -> str | None:
+    """Return the value of the results page's hidden input ``name``, if any."""
+    tag = soup.find("input", attrs={"name": name})
+    value = tag.get("value") if isinstance(tag, Tag) else None
+    return value if isinstance(value, str) else None
+
+
+def _page_count(soup: BeautifulSoup) -> int | None:
+    """Return how many pages TDCJ split the results into (0 means one page)."""
+    try:
+        return int(_hidden_value(soup, "totalPageCount") or "")
+    except ValueError:
+        return None
+
+
+async def _later_page(
+    last_search: str, page: int, page_count: int, timeout: float | None
+) -> list[QueryResult]:
+    """Fetch and parse results page ``page``, which must hold results."""
+    html = await _curl_results_page(last_search, page, page_count, timeout)
+    soup = BeautifulSoup(html, "html.parser")
+    inmates = _parse_results(soup)
+    if not inmates or _hidden_value(soup, "currentPage") != str(page):
+        raise ProviderError(f"TDCJ did not return results page {page}")
+    return inmates
+
+
 async def query(
     last_name: str = "",
     first_name: str = "",
     inmate_id: str = "",
     timeout: float | None = None,
 ) -> Answer:
-    """Private helper for querying TDCJ."""
+    """Private helper for querying TDCJ.
+
+    Results split into pages are read up to :data:`MAX_PAGES`, the later
+    pages concurrently; a page that fails fails the whole query. Past that
+    limit, or if a full page comes with no page count, the answer is
+    incomplete.
+    """
 
     if not inmate_id and not (first_name and last_name):
         return Answer([])
 
     html = await _curl_search_url(last_name, first_name, inmate_id, timeout)
     soup = BeautifulSoup(html, "html.parser")
+    inmates = _parse_results(soup)
+
+    page_count = _page_count(soup)
+    if page_count is None:
+        return Answer(inmates, complete=len(inmates) < PAGE_SIZE)
+    if page_count <= 1:
+        return Answer(inmates)
+
+    last_search = _hidden_value(soup, "lastSearch")
+    if not last_search:
+        raise ProviderError("TDCJ split its results into pages but gave no search")
+
+    later_pages = await asyncio.gather(
+        *(
+            _later_page(last_search, page, page_count, timeout)
+            for page in range(2, min(page_count, MAX_PAGES) + 1)
+        )
+    )
+    for page_inmates in later_pages:
+        inmates.extend(page_inmates)
+
+    return Answer(inmates, complete=page_count <= MAX_PAGES)
+
+
+def _parse_results(soup: BeautifulSoup) -> list[QueryResult]:
+    """Parse a results page's table; raise on a page that is neither."""
     table = soup.find("table", class_="tdcj_table")
 
     if table is None or not isinstance(table, Tag):
         if NO_RESULTS_TEXT.lower() in soup.get_text(" ", strip=True).lower():
-            return Answer([])
+            return []
         raise ProviderError("TDCJ returned a page with no results table")
 
     for linebreak in table.find_all("br"):
@@ -97,11 +188,11 @@ async def query(
         or not isinstance(header_tag, Tag)
         or not isinstance(body_tag, Tag)
     ):
-        return Answer([])
+        return []
 
     header = header_tag.find("tr")
     if header is None or not isinstance(header, Tag):
-        return Answer([])
+        return []
 
     keys = [th.get_text(" ", strip=True) for th in header.find_all("th")]
     if not set(keys).issuperset(REQUIRED_FIELDS):
@@ -155,6 +246,4 @@ async def query(
             datetime_fetched=datetime.datetime.now(datetime.timezone.utc),
         )
 
-    return Answer(
-        [inmate for row in rows if (inmate := row_to_inmate(row)) is not None]
-    )
+    return [inmate for row in rows if (inmate := row_to_inmate(row)) is not None]
