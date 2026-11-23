@@ -46,9 +46,29 @@ def test_unrecognized_page_is_an_error(monkeypatch):
 
 
 def test_results_page_is_parsed(monkeypatch):
-    """Each results row becomes an inmate."""
+    """Each results row becomes an inmate, with race and sex as words."""
     [inmate] = run_query(monkeypatch, RESULTS_PAGE)
     assert (inmate.id, inmate.unit) == (12345, "Gamma")
+    assert (inmate.race, inmate.sex) == ("White", "Female")
+
+
+@pytest.mark.parametrize(
+    "race, gender, expected",
+    [
+        ("H", "M", ("Hispanic", "Male")),
+        ("B", "U", ("Black", "Unknown")),
+        ("I", "F", ("American Indian", "Female")),
+        ("", "", (None, None)),
+        ("Z", "M", ("Z", "Male")),
+    ],
+)
+def test_race_and_sex_codes_become_words(monkeypatch, race, gender, expected):
+    """TDCJ's codes are stored as words; blank is none, unseen is kept."""
+    page = RESULTS_PAGE.replace(
+        "<td>W</td><td>F</td>", f"<td>{race}</td><td>{gender}</td>"
+    )
+    [inmate] = run_query(monkeypatch, page)
+    assert (inmate.race, inmate.sex) == expected
 
 
 LAST_SEARCH = '{"tdcj":"","lastName":"Doe","firstName":"Jane","race":"ALL"}'

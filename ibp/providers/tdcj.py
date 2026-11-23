@@ -12,6 +12,7 @@ from nameparser import HumanName  # type: ignore[import]
 
 from .errors import ProviderError
 from .misc import run_curl_exec
+from .normalize import normalize_race, normalize_sex
 from .types import Answer, QueryResult
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -239,8 +240,8 @@ def _parse_results(soup: BeautifulSoup) -> list[QueryResult]:
             first_name=first,
             last_name=last,
             unit=entry["Unit of Assignment"],
-            race=entry.get("Race", None),
-            sex=entry.get("Gender", None),
+            race=normalize_race("Texas", entry.get("Race")),
+            sex=normalize_sex("Texas", entry.get("Gender")),
             url=url,
             release=release,
             datetime_fetched=datetime.datetime.now(datetime.timezone.utc),

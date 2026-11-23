@@ -7,6 +7,7 @@ import re
 import typing
 
 from .misc import run_curl_exec
+from .normalize import normalize_race, normalize_sex
 from .types import Answer, QueryResult
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -152,8 +153,8 @@ async def query(
             first_name=entry["nameFirst"],
             last_name=entry["nameLast"],
             unit=entry["faclCode"],
-            race=entry.get("race", None),
-            sex=entry.get("gender", None),
+            race=normalize_race("Federal", entry.get("race")),
+            sex=normalize_sex("Federal", entry.get("sex")),
             url=None,
             release=release,
             datetime_fetched=datetime.datetime.now(datetime.timezone.utc),
