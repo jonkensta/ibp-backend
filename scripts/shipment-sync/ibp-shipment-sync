@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Run the IBP shipment sync in a one-off backend container on ibp-server.
+
+Runs ``python -m ibp.shipment_sync`` (GET-only against EasyPost) with
+``docker compose run --rm`` in the stack at /srv/ibp, so it uses the
+deployed backend image and database. The EasyPost key stays on the host and
+is mounted read-only into that one-off container only, never into the
+running web server or its config. Arguments are passed through, e.g.
+``--since 2025-11-01`` for the one-time backfill or ``--rebuild-links``.
+
+Pings a Healthchecks check (start, then the exit status with the output) if
+the ping-url file exists. The output has counts and EasyPost ids only, no
+names or addresses.
+
+Config (mode 0600, outside the repo):
+    ~/.config/ibp-shipment-sync/easypost-api-key   production key (EZAK...)
+    ~/.config/ibp-shipment-sync/ping-url           Healthchecks URL (optional)
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import urllib.request
+from pathlib import Path
+
+CONFIG = Path.home() / ".config" / "ibp-shipment-sync"
+COMPOSE = os.environ.get("IBP_COMPOSE_FILE", "/srv/ibp/compose.yaml")
+KEY_IN_CONTAINER = "/run/secrets/easypost-api-key"
+
+
+def read_secret(name: str) -> str | None:
+    try:
+        return (CONFIG / name).read_text().strip() or None
+    except FileNotFoundError:
+        return None
+
+
+def ping(url: str | None, suffix: str, body: str = "") -> None:
+    if not url:
+        return
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(url + suffix, data=body.encode()[-10000:]),
+            timeout=15,
+        )
+    except OSError as err:
+        print(f"healthchecks ping failed: {err}", file=sys.stderr)
+
+
+def build_command(key_file: Path, args: list[str]) -> list[str]:
+    """The docker compose command; the key file is mounted, never passed.
+
+    ``--rebuild-links`` needs no key, so nothing is mounted for it.
+    """
+    mount: list[str] = []
+    key: list[str] = []
+    if "--rebuild-links" not in args:
+        mount = ["-v", f"{key_file}:{KEY_IN_CONTAINER}:ro"]
+        key = ["--key-file", KEY_IN_CONTAINER]
+    return [
+        "docker",
+        "compose",
+        "-f",
+        COMPOSE,
+        "run",
+        "--rm",
+        "--no-deps",
+        "-T",
+        *mount,
+        "ibp-backend",
+        "python",
+        "-m",
+        "ibp.shipment_sync",
+        *key,
+        *args,
+    ]
+
+
+def run(args: list[str], log: list[str]) -> int:
+    key_file = CONFIG / "easypost-api-key"
+    if not read_secret("easypost-api-key") and "--rebuild-links" not in args:
+        msg = f"no EasyPost key: create {key_file} (mode 0600, production key EZAK...)"
+        print(msg, file=sys.stderr)
+        log.append(msg)
+        return 2
+    with subprocess.Popen(
+        build_command(key_file, args),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ) as proc:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            log.append(line.rstrip("\n"))
+    return proc.returncode
+
+
+def main() -> int:
+    ping_url = read_secret("ping-url")
+    ping(ping_url, "/start")
+    log: list[str] = []
+    try:
+        code = run(sys.argv[1:], log)
+    except Exception as err:  # report any failure to Healthchecks
+        msg = f"FAILED: {type(err).__name__}: {err}"
+        print(msg, file=sys.stderr)
+        log.append(msg)
+        code = 1
+    ping(ping_url, f"/{code}", "\n".join(log))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
