@@ -90,7 +90,7 @@ def run_name_query(monkeypatch, first_page: str, later_page):
     async def fake_search(*_args, **_kwargs):
         return first_page.encode()
 
-    async def fake_page(last_search, page, page_count, timeout=None):
+    async def fake_page(last_search, page, page_count, _timeout=None):
         assert last_search == LAST_SEARCH
         calls.append((page, page_count))
         return later_page(page, page_count).encode()
