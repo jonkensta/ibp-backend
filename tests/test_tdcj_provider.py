@@ -51,6 +51,29 @@ def test_results_page_is_parsed(monkeypatch):
     assert (inmate.id, inmate.unit) == (12345, "Gamma")
 
 
+@pytest.mark.parametrize(
+    "display, first_last",
+    [
+        ("DOE, JANE", ("JANE", "DOE")),
+        ("DOE, JOHN ALLEN JR", ("JOHN", "DOE")),
+        ("DOE, JOHN JR", ("JOHN", "DOE")),
+        # First names a general name parser reads as titles.
+        ("DOE, KING JAMES", ("KING", "DOE")),
+        ("DOE, PRINCE", ("PRINCE", "DOE")),
+        ("DELACRUZ, JUAN III", ("JUAN", "DELACRUZ")),
+        ("O'NEAL, PAT", ("PAT", "O'NEAL")),
+        ("DOE-ROE, JANE ANN", ("JANE", "DOE-ROE")),
+        # No comma: parsed as a free-form name.
+        ("JANE DOE", ("JANE", "DOE")),
+    ],
+)
+def test_results_name_is_split_at_the_comma(monkeypatch, display, first_last):
+    """The last name is all before the comma; the first, the next word."""
+    page = RESULTS_PAGE.replace("DOE, JANE", display)
+    [inmate] = run_query(monkeypatch, page)
+    assert (inmate.first_name, inmate.last_name) == first_last
+
+
 LAST_SEARCH = '{"tdcj":"","lastName":"Doe","firstName":"Jane","race":"ALL"}'
 
 

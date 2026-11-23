@@ -167,6 +167,23 @@ async def query(
     return Answer(inmates, complete=page_count <= MAX_PAGES)
 
 
+def _split_display_name(display: str) -> tuple[str, str]:
+    """Return the (first, last) name of a results row's "Name" cell.
+
+    TDCJ shows names as ``LAST, FIRST [MIDDLE] [SUFFIX]``, with the whole last
+    name before the comma and any suffix (JR, III) after the first or middle
+    name. The first name is the first word after the comma. A general name
+    parser would read some first names (KING, PRINCE) as titles; it is only
+    used for a name with no comma.
+    """
+    last, comma, rest = display.partition(",")
+    if not comma:
+        name = HumanName(display)
+        return name.first, name.last
+    words = rest.split()
+    return (words[0] if words else ""), last.strip()
+
+
 def _parse_results(soup: BeautifulSoup) -> list[QueryResult]:
     """Parse a results page's table; raise on a page that is neither."""
     table = soup.find("table", class_="tdcj_table")
@@ -217,9 +234,7 @@ def _parse_results(soup: BeautifulSoup) -> list[QueryResult]:
 
         inmate_id = parse_inmate_id(entry["TDCJ Number"])
 
-        name = HumanName(entry.get("Name", ""))
-        first: str = name.first
-        last: str = name.last
+        first, last = _split_display_name(entry.get("Name", ""))
 
         url = urljoin(BASE_URL, str(href)) if href else None
 

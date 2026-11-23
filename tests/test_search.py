@@ -312,6 +312,59 @@ def test_name_search_orders_same_name_by_freshness(client, seeded, by_name):
     assert _ids(data["inmates"])[:2] == [11111, 5555555]
 
 
+TDCJ_PAGE = """<html><body><table class="tdcj_table">
+<thead><tr><th>Name</th><th>TDCJ Number</th><th>Race</th><th>Gender</th>
+<th>Projected Release Date</th><th>Unit of Assignment</th></tr></thead>
+<tbody><tr><td><a href="/InmateSearch/viewDetail.action?sid=1">{name}</a></td>
+<td>00066666</td><td>W</td><td>M</td><td>2030-01-01</td><td>Alpha</td></tr></tbody>
+</table></body></html>"""
+
+
+@pytest.fixture
+def tdcj_lists(api_db, monkeypatch):
+    """Fake TDCJ's results page for any name search; FBOP finds nobody.
+
+    The real provider wrapper and TDCJ page parser run. Returns a setter for
+    the one row's displayed name.
+    """
+    shown = {}
+
+    async def fake_curl(*_args, **_kwargs):
+        return TDCJ_PAGE.format(name=shown["name"]).encode()
+
+    async def nobody(**_kwargs):
+        return providers.Answer([])
+
+    monkeypatch.setattr(providers.base.tdcj, "_curl_search_url", fake_curl)
+    monkeypatch.setattr(providers.base.fbop, "query", nobody)
+    monkeypatch.setattr(providers, "query_by_name", providers.base.query_by_name)
+    return lambda name: shown.update(name=name)
+
+
+@pytest.mark.parametrize(
+    "query, display",
+    [
+        ("john doe", "DOE, JOHN ALLEN JR"),
+    ],
+)
+def test_name_search_tdcj_row_it_returns_is_not_stale(
+    client, seeded, tdcj_lists, query, display
+):
+    """An old row TDCJ returns again, however its name is shown, is fresh."""
+    first = query.split()[0].upper()
+    _add_inmate(seeded, ("Texas", 66666, first, "DOE"), OLD)
+    tdcj_lists(display)
+
+    data = _search(client, query)
+
+    assert data["errors"] == []
+    assert _ids(data["inmates"]) == [66666]
+    assert data["stale_inmates"] == []
+    with seeded() as session:
+        inmate = session.get(models.Inmate, ("Texas", 66666))
+        assert (inmate.first_name, inmate.last_name) == (first, "DOE")
+
+
 def test_id_search_returns_old_match(client, aged, by_id):
     """An ID search returns its inmate however old the data is."""
     data = _search(client, "22222")
