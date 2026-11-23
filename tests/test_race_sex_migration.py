@@ -88,9 +88,9 @@ def bootstrap(monkeypatch, url: str) -> None:
     db_bootstrap.bootstrap()
 
 
-def test_migration_follows_pronouns_as_the_only_head():
-    """The revision is the single head, right after the pronouns one."""
-    assert head_revision() == "d2a6f8c3e1b7"
+def test_migration_follows_pronouns():
+    """The revision comes right after the pronouns one."""
+    assert db_bootstrap.PRE_SHIPMENTS_REVISION == "d2a6f8c3e1b7"
     source = MIGRATION.read_text(encoding="utf-8")
     assert "down_revision: Union[str, None] = 'c4e7a2f9d1b3'" in source
     assert db_bootstrap.PRE_RACE_SEX_WORDS_REVISION == "c4e7a2f9d1b3"

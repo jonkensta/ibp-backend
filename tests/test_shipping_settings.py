@@ -11,6 +11,8 @@ from alembic import command
 
 from ibp import db_bootstrap, models
 
+from .conftest import SHIPMENT_TABLES
+
 DEFAULTS = {
     "return_address": {
         "name": "INSIDE BOOKS PROJECT",
@@ -206,7 +208,14 @@ def test_bootstrap_adopts_pre_settings_create_all_schema(tmp_path, monkeypatch):
         table
         for name, table in models.Base.metadata.tables.items()
         if name
-        not in ("shipping_settings", "books", "package_items", "registrations", "upcs")
+        not in (
+            "shipping_settings",
+            "books",
+            "package_items",
+            "registrations",
+            "upcs",
+            *SHIPMENT_TABLES,
+        )
     ]
     models.Base.metadata.create_all(engine, tables=tables)
     with engine.begin() as connection:

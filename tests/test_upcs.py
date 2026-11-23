@@ -11,6 +11,8 @@ from alembic import command
 
 from ibp import books, db_bootstrap, models, upcs
 
+from .conftest import SHIPMENT_TABLES
+
 HOBBIT = "9780547928227"
 CRIME = "9780140449136"
 
@@ -310,7 +312,8 @@ def test_bootstrap_adopts_pre_upcs_create_all_schema(tmp_path, monkeypatch):
     """A create_all schema from before upcs gets the upcs migration."""
     url = f"sqlite:///{tmp_path / 'preupcs.db'}"
     engine = sqlalchemy.create_engine(url)
-    tables = [t for name, t in models.Base.metadata.tables.items() if name != "upcs"]
+    later = ("upcs", *SHIPMENT_TABLES)
+    tables = [t for name, t in models.Base.metadata.tables.items() if name not in later]
     models.Base.metadata.create_all(engine, tables=tables)
     with engine.begin() as connection:
         # Added after this schema's era.

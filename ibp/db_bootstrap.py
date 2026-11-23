@@ -53,6 +53,9 @@ PRE_PRONOUNS_REVISION = "b8e1f4a2c9d7"
 # models is adopted here and upgraded, rewriting any codes it holds (e.g.
 # legacy ones from scripts/migrate.py); stamping it head would skip that.
 PRE_RACE_SEX_WORDS_REVISION = "c4e7a2f9d1b3"
+# Last revision before the shipments, tracking_events and package_shipments
+# tables were added; it is the race and sex data migration.
+PRE_SHIPMENTS_REVISION = "d2a6f8c3e1b7"
 
 _SYNC_SCHEME_MAPPING = {
     "postgresql+asyncpg": "postgresql",
@@ -119,6 +122,123 @@ def seed_shipping_settings(url: str) -> None:
         engine.dispose()
 
 
+def adopt_create_all_schema(
+    config: Config, tables: set[str], columns: set[str]
+) -> None:
+    """Stamp a schema built by ``create_all`` (no ``alembic_version``) and
+    upgrade it to head.
+
+    The schema is stamped at the newest revision whose tables and columns it
+    has, then upgraded, which also runs every later data migration.
+    """
+    if "shipments" in tables:
+        # Schema was created by Base.metadata.create_all from the current
+        # models. Adopt it before the race and sex data migration and run
+        # that, then stamp the schema migrations after it, whose tables
+        # create_all already built.
+        logger.info(
+            "Existing schema without alembic_version detected; stamping %s, "
+            "upgrading to %s, then stamping and upgrading to head.",
+            PRE_RACE_SEX_WORDS_REVISION,
+            PRE_SHIPMENTS_REVISION,
+        )
+        command.stamp(config, PRE_RACE_SEX_WORDS_REVISION)
+        command.upgrade(config, PRE_SHIPMENTS_REVISION)
+        command.stamp(config, "head")
+        command.upgrade(config, "head")
+    elif "inmates.pronouns" in columns:
+        # Schema was created by create_all from pre-shipments models;
+        # adopt it at the last schema revision before the data migration
+        # and replay the later migrations.
+        logger.info(
+            "Existing pre-shipments schema without alembic_version detected; "
+            "stamping %s and upgrading to head.",
+            PRE_RACE_SEX_WORDS_REVISION,
+        )
+        command.stamp(config, PRE_RACE_SEX_WORDS_REVISION)
+        command.upgrade(config, "head")
+    elif "registrations.confirmation_number" in columns:
+        # Schema was created by create_all from pre-pronouns models; adopt
+        # it there and replay the later migrations.
+        logger.info(
+            "Existing pre-pronouns schema without alembic_version detected; "
+            "stamping %s and upgrading to head.",
+            PRE_PRONOUNS_REVISION,
+        )
+        command.stamp(config, PRE_PRONOUNS_REVISION)
+        command.upgrade(config, "head")
+    elif "upcs" in tables:
+        # Schema was created by create_all from pre-confirmation_number
+        # models; adopt it there and replay the later migrations.
+        logger.info(
+            "Existing pre-confirmation_number schema without alembic_version "
+            "detected; stamping %s and upgrading to head.",
+            PRE_CONFIRMATION_NUMBER_REVISION,
+        )
+        command.stamp(config, PRE_CONFIRMATION_NUMBER_REVISION)
+        command.upgrade(config, "head")
+    elif "package_items" in tables:
+        # Schema was created by create_all from pre-upcs models; adopt it
+        # there and replay the later migrations.
+        logger.info(
+            "Existing pre-upcs schema without alembic_version detected; "
+            "stamping %s and upgrading to head.",
+            PRE_UPCS_REVISION,
+        )
+        command.stamp(config, PRE_UPCS_REVISION)
+        command.upgrade(config, "head")
+    elif "inmates.next_request_index" in columns:
+        # Schema was created by create_all from pre-package_items models;
+        # adopt it there and replay the later migrations.
+        logger.info(
+            "Existing pre-package_items schema without alembic_version "
+            "detected; stamping %s and upgrading to head.",
+            PRE_PACKAGE_ITEMS_REVISION,
+        )
+        command.stamp(config, PRE_PACKAGE_ITEMS_REVISION)
+        command.upgrade(config, "head")
+    elif "books" in tables:
+        # Schema was created by create_all from pre-next_request_index
+        # models; adopt it there and replay the later migrations.
+        logger.info(
+            "Existing pre-next_request_index schema without alembic_version "
+            "detected; stamping %s and upgrading to head.",
+            PRE_NEXT_REQUEST_INDEX_REVISION,
+        )
+        command.stamp(config, PRE_NEXT_REQUEST_INDEX_REVISION)
+        command.upgrade(config, "head")
+    elif "shipping_settings" in tables:
+        # Schema was created by create_all from pre-books models; adopt it
+        # there and replay the later migrations.
+        logger.info(
+            "Existing pre-books schema without alembic_version detected; "
+            "stamping %s and upgrading to head.",
+            PRE_BOOKS_REVISION,
+        )
+        command.stamp(config, PRE_BOOKS_REVISION)
+        command.upgrade(config, "head")
+    elif "requests.request_id" in columns:
+        # Schema was created by create_all from pre-shipping_settings
+        # models; adopt it there and replay the later migrations.
+        logger.info(
+            "Existing pre-shipping_settings schema without alembic_version "
+            "detected; stamping %s and upgrading to head.",
+            PRE_SHIPPING_SETTINGS_REVISION,
+        )
+        command.stamp(config, PRE_SHIPPING_SETTINGS_REVISION)
+        command.upgrade(config, "head")
+    else:
+        # Schema was created by create_all from pre-request_id models;
+        # adopt it at the baseline and replay the later migrations.
+        logger.info(
+            "Existing pre-request_id schema without alembic_version detected; "
+            "stamping baseline %s and upgrading to head.",
+            BASELINE_REVISION,
+        )
+        command.stamp(config, BASELINE_REVISION)
+        command.upgrade(config, "head")
+
+
 def bootstrap() -> None:
     """Bring the database schema up to date."""
     url = get_sync_database_url()
@@ -129,97 +249,7 @@ def bootstrap() -> None:
         logger.info("Empty database detected; running alembic upgrade to head.")
         command.upgrade(config, "head")
     elif "alembic_version" not in tables:
-        if "inmates.pronouns" in columns:
-            # Schema was created by Base.metadata.create_all from the current
-            # models; adopt it at the last schema revision and run the data
-            # migrations after it.
-            logger.info(
-                "Existing schema without alembic_version detected; stamping %s "
-                "and upgrading to head.",
-                PRE_RACE_SEX_WORDS_REVISION,
-            )
-            command.stamp(config, PRE_RACE_SEX_WORDS_REVISION)
-            command.upgrade(config, "head")
-        elif "registrations.confirmation_number" in columns:
-            # Schema was created by create_all from pre-pronouns models; adopt
-            # it there and replay the later migrations.
-            logger.info(
-                "Existing pre-pronouns schema without alembic_version detected; "
-                "stamping %s and upgrading to head.",
-                PRE_PRONOUNS_REVISION,
-            )
-            command.stamp(config, PRE_PRONOUNS_REVISION)
-            command.upgrade(config, "head")
-        elif "upcs" in tables:
-            # Schema was created by create_all from pre-confirmation_number
-            # models; adopt it there and replay the later migrations.
-            logger.info(
-                "Existing pre-confirmation_number schema without alembic_version "
-                "detected; stamping %s and upgrading to head.",
-                PRE_CONFIRMATION_NUMBER_REVISION,
-            )
-            command.stamp(config, PRE_CONFIRMATION_NUMBER_REVISION)
-            command.upgrade(config, "head")
-        elif "package_items" in tables:
-            # Schema was created by create_all from pre-upcs models; adopt it
-            # there and replay the later migrations.
-            logger.info(
-                "Existing pre-upcs schema without alembic_version detected; "
-                "stamping %s and upgrading to head.",
-                PRE_UPCS_REVISION,
-            )
-            command.stamp(config, PRE_UPCS_REVISION)
-            command.upgrade(config, "head")
-        elif "inmates.next_request_index" in columns:
-            # Schema was created by create_all from pre-package_items models;
-            # adopt it there and replay the later migrations.
-            logger.info(
-                "Existing pre-package_items schema without alembic_version "
-                "detected; stamping %s and upgrading to head.",
-                PRE_PACKAGE_ITEMS_REVISION,
-            )
-            command.stamp(config, PRE_PACKAGE_ITEMS_REVISION)
-            command.upgrade(config, "head")
-        elif "books" in tables:
-            # Schema was created by create_all from pre-next_request_index
-            # models; adopt it there and replay the later migrations.
-            logger.info(
-                "Existing pre-next_request_index schema without alembic_version "
-                "detected; stamping %s and upgrading to head.",
-                PRE_NEXT_REQUEST_INDEX_REVISION,
-            )
-            command.stamp(config, PRE_NEXT_REQUEST_INDEX_REVISION)
-            command.upgrade(config, "head")
-        elif "shipping_settings" in tables:
-            # Schema was created by create_all from pre-books models; adopt it
-            # there and replay the later migrations.
-            logger.info(
-                "Existing pre-books schema without alembic_version detected; "
-                "stamping %s and upgrading to head.",
-                PRE_BOOKS_REVISION,
-            )
-            command.stamp(config, PRE_BOOKS_REVISION)
-            command.upgrade(config, "head")
-        elif "requests.request_id" in columns:
-            # Schema was created by create_all from pre-shipping_settings
-            # models; adopt it there and replay the later migrations.
-            logger.info(
-                "Existing pre-shipping_settings schema without alembic_version "
-                "detected; stamping %s and upgrading to head.",
-                PRE_SHIPPING_SETTINGS_REVISION,
-            )
-            command.stamp(config, PRE_SHIPPING_SETTINGS_REVISION)
-            command.upgrade(config, "head")
-        else:
-            # Schema was created by create_all from pre-request_id models;
-            # adopt it at the baseline and replay the later migrations.
-            logger.info(
-                "Existing pre-request_id schema without alembic_version detected; "
-                "stamping baseline %s and upgrading to head.",
-                BASELINE_REVISION,
-            )
-            command.stamp(config, BASELINE_REVISION)
-            command.upgrade(config, "head")
+        adopt_create_all_schema(config, tables, columns)
     else:
         logger.info("alembic_version table present; running alembic upgrade to head.")
         command.upgrade(config, "head")
