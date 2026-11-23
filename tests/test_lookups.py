@@ -5,7 +5,7 @@
 import datetime
 
 import pytest
-from ibp import api, models
+from ibp import api, models, providers
 
 FRESH = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
 STALE = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc)
@@ -155,6 +155,38 @@ def test_record_lookup_refreshes_stale_entry(client, seeded, lookup_count, monke
 
     assert client.post(LOOKUPS_URL).status_code == 201
     assert calls == [12345]
+    assert lookup_count() == 1
+
+
+def test_record_lookup_returns_inmate_refreshed_by_provider(
+    client, seeded, lookup_count, monkeypatch
+):
+    """A stale inmate the provider answers for is returned with its view."""
+    with seeded.begin() as session:
+        session.get(models.Inmate, ("Texas", 12345)).datetime_fetched = STALE
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    async def query(id_, **_kwargs):
+        result = providers.QueryResult(
+            id=id_,
+            jurisdiction="Texas",
+            first_name="JANE",
+            last_name="DOE",
+            unit="Alpha",
+            datetime_fetched=now,
+        )
+        return providers.Results([result], [], [])
+
+    monkeypatch.setattr(providers, "query_by_inmate_id", query)
+
+    response = client.post(LOOKUPS_URL)
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["datetime_fetched"] == now.isoformat()
+    assert body["unit"]["name"] == "Alpha"
+    assert len(body["lookups"]) == 1
+    assert body["requests"] and body["comments"]
     assert lookup_count() == 1
 
 

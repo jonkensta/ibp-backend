@@ -499,7 +499,7 @@ async def record_lookup(
     # winner's refresh, if any, is committed too).
     for attempt in itertools.count(1):
         try:
-            inmate = await _record_lookup_once(session, jurisdiction, inmate_id)
+            await _record_lookup_once(session, jurisdiction, inmate_id)
         except sqlalchemy.exc.IntegrityError:
             if attempt >= LOOKUP_ATTEMPTS:
                 raise
@@ -507,8 +507,17 @@ async def record_lookup(
             continue
         break
 
-    await session.refresh(inmate)
-    return inmate
+    # Reload what the commit expired. Not session.refresh(inmate): an inmate
+    # just refreshed from its provider (merged in ibp/upsert.py) has lost the
+    # view's loader options, so a refresh would leave its relationships to
+    # lazy-load, which fails under asyncio.
+    return (
+        await session.execute(
+            inmate_view_statement(jurisdiction, inmate_id).execution_options(
+                populate_existing=True
+            )
+        )
+    ).scalar_one()
 
 
 # Attempts to record a lookup before giving up on concurrent index collisions.
