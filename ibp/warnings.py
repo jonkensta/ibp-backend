@@ -45,7 +45,7 @@ def _inmate_release_warning(
     id_ = inmate_.id
 
     key = "release"
-    to_release = inmate_.release - datetime.date.today()
+    to_release = inmate_.release - clock.today()
     if to_release <= datetime.timedelta(0):
         msg = f"{jurisdiction} inmate #{id_:08d} is marked as released"
         yield key, msg
