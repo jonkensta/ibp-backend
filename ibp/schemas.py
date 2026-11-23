@@ -802,3 +802,73 @@ class InmateView(Inmate):
         if dt.tzinfo is None:
             return dt.replace(tzinfo=datetime.timezone.utc).isoformat()
         return dt.isoformat()
+
+
+def _utc_isoformat(dt: Optional[datetime.datetime]) -> Optional[str]:
+    """Serialize a datetime as ISO 8601, taking a naive one as UTC."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.isoformat()
+
+
+class ShipmentKindEnum(str, Enum):
+    """What a postage label was for, as the shipment sync read it."""
+
+    INDIVIDUAL = "individual"
+    BULK = "bulk"
+    OTHER = "other"
+
+
+class LinkBasisEnum(str, Enum):
+    """Which rule linked a request to a label (see ibp/shipment_links.py)."""
+
+    REFERENCE = "reference"
+    INMATE_NUMBER = "inmate_number"
+    UNIT_SESSION = "unit_session"
+
+
+class TrackingEvent(BaseModel):
+    """One USPS tracking event of a label, as EasyPost reported it.
+
+    ``occurred_at`` is UTC; ``local_time`` is the carrier's local time
+    string, when given.
+    """
+
+    occurred_at: datetime.datetime
+    local_time: Optional[str] = None
+    status: Optional[str] = None
+    status_detail: Optional[str] = None
+    message: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    zip: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_serializer("occurred_at")
+    def serialize_dt(self, dt: datetime.datetime, _info):
+        """Serialize datetime to ISO format with UTC timezone if naive."""
+        return _utc_isoformat(dt)
+
+
+class RequestShipment(BaseModel):
+    """A label a request is linked to, with its tracking events (oldest first).
+
+    ``basis`` says why it is linked: ``reference`` (the label was tagged
+    with the request), ``inmate_number`` (an untagged label to the inmate)
+    or ``unit_session`` (a bulk box to the inmate's unit).
+    """
+
+    tracking_code: str
+    purchased_at: datetime.datetime
+    kind: ShipmentKindEnum
+    basis: LinkBasisEnum
+    tracker_status: Optional[str] = None
+    events: list[TrackingEvent]
+
+    @field_serializer("purchased_at")
+    def serialize_dt(self, dt: datetime.datetime, _info):
+        """Serialize datetime to ISO format with UTC timezone if naive."""
+        return _utc_isoformat(dt)
