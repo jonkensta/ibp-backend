@@ -121,6 +121,24 @@ def prefix_match(column, term: str):
     return column.ilike(escaped + "%", escape="\\")
 
 
+def spaceless(name: str) -> str:
+    """``name`` without whitespace, as last names are compared.
+
+    TDCJ stores a surname written with spaces run together (DE LA CRUZ as
+    DELACRUZ), while FBOP may keep the spaces.
+    """
+    return "".join(name.split())
+
+
+def spaceless_last_name():
+    """SQL: the inmate's last name without spaces (see :func:`spaceless`).
+
+    A function of the column, so an index on it could not be used; the name
+    columns have none, and the case-insensitive match scans the table anyway.
+    """
+    return sqlalchemy.func.replace(models.Inmate.last_name, " ", "")
+
+
 def is_initial(name: str) -> bool:
     """Whether a name part is only an initial, like "J" or "J."."""
     return len(name.strip(" .")) <= 1
@@ -130,10 +148,11 @@ def provider_would_return_clause(jurisdiction: str, candidates: list[tuple[str, 
     """SQL clause for ``jurisdiction``'s rows its provider's search returns.
 
     The providers match names more narrowly than the local search: TDCJ
-    needs the last name exactly and the first name as a prefix; FBOP needs
-    both names exactly and finds nobody by an initial. Both ignore case. A
-    row matches if the provider would have returned it for any of the
-    ``candidates`` (first, last) assignments.
+    needs the last name exactly, spaces aside (see :func:`spaceless`), and
+    the first name as a prefix; FBOP needs both names exactly and finds
+    nobody by an initial. Both ignore case. A row matches if the provider
+    would have returned it for any of the ``candidates`` (first, last)
+    assignments.
     """
     lower = sqlalchemy.func.lower
     first_name, last_name = models.Inmate.first_name, models.Inmate.last_name
@@ -141,7 +160,8 @@ def provider_would_return_clause(jurisdiction: str, candidates: list[tuple[str, 
     if jurisdiction == "Texas":
         matches = [
             sqlalchemy.and_(
-                lower(last_name) == last.lower(), prefix_match(first_name, first)
+                lower(spaceless_last_name()) == spaceless(last).lower(),
+                prefix_match(first_name, first),
             )
             for first, last in candidates
         ]
@@ -205,7 +225,8 @@ async def query_inmates_by_name(
     ``candidates`` holds the plausible (first, last) assignments of the
     user's query (see :func:`parse_name_query`).  A row matches if any
     assignment matches, where each non-empty component is a case-insensitive
-    prefix match, and ``where`` (an extra SQL clause, if given) holds.
+    prefix match, last names compared without spaces (see :func:`spaceless`),
+    and ``where`` (an extra SQL clause, if given) holds.
     Results are ordered with exact last-name matches first, then by name, and
     capped at ``MAX_SEARCH_RESULTS`` rows. Among inmates with the same name,
     recently fetched ones come first (see :func:`old_data_clause`), so old
@@ -217,15 +238,17 @@ async def query_inmates_by_name(
     for first, last in candidates:
         clauses = []
         if last:
-            clauses.append(prefix_match(models.Inmate.last_name, last))
+            clauses.append(prefix_match(spaceless_last_name(), spaceless(last)))
         if first:
             clauses.append(prefix_match(models.Inmate.first_name, first))
         if clauses:
             matches.append(sqlalchemy.and_(*clauses))
 
-    tokens = sorted({part.lower() for pair in candidates for part in pair if part})
+    tokens = sorted(
+        {spaceless(part).lower() for pair in candidates for part in pair if part}
+    )
     exact_last_rank = sqlalchemy.case(
-        (lower(models.Inmate.last_name).in_(tokens), 0), else_=1
+        (lower(spaceless_last_name()).in_(tokens), 0), else_=1
     )
 
     statement = (

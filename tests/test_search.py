@@ -325,11 +325,13 @@ def tdcj_lists(api_db, monkeypatch):
     """Fake TDCJ's results page for any name search; FBOP finds nobody.
 
     The real provider wrapper and TDCJ page parser run. Returns a setter for
-    the one row's displayed name.
+    the one row's displayed name, whose ``.sent`` lists the (last, first)
+    names sent to TDCJ.
     """
     shown = {}
 
-    async def fake_curl(*_args, **_kwargs):
+    async def fake_curl(last_name, first_name, *_args, **_kwargs):
+        show.sent.append((last_name, first_name))
         return TDCJ_PAGE.format(name=shown["name"]).encode()
 
     async def nobody(**_kwargs):
@@ -338,7 +340,12 @@ def tdcj_lists(api_db, monkeypatch):
     monkeypatch.setattr(providers.base.tdcj, "_curl_search_url", fake_curl)
     monkeypatch.setattr(providers.base.fbop, "query", nobody)
     monkeypatch.setattr(providers, "query_by_name", providers.base.query_by_name)
-    return lambda name: shown.update(name=name)
+
+    def show(name):
+        shown.update(name=name)
+
+    show.sent = []
+    return show
 
 
 @pytest.mark.parametrize(
@@ -364,6 +371,57 @@ def test_name_search_tdcj_row_it_returns_is_not_stale(
     with seeded() as session:
         inmate = session.get(models.Inmate, ("Texas", 66666))
         assert (inmate.first_name, inmate.last_name) == (first, "DOE")
+
+
+@pytest.fixture
+def spaced(seeded):
+    """Cached inmates whose last names are written with and without spaces."""
+    for row in [
+        ("Texas", 81111, "JUAN", "DELACRUZ"),
+        ("Federal", 8222222, "JUAN", "DE LA CRUZ"),
+        ("Texas", 83333, "JUAN", "DELACRUZADO"),
+    ]:
+        _add_inmate(seeded, row, NOW)
+    return seeded
+
+
+@pytest.mark.parametrize(
+    "query", ["juan de la cruz", "de la cruz, juan", "juan delacruz"]
+)
+def test_name_search_ignores_spaces_in_last_names(client, spaced, by_name, query):
+    """A last name matches with or without its spaces, exact matches first."""
+    data = _search(client, query)
+    assert _ids(data["inmates"]) == [8222222, 81111, 83333]
+
+
+def test_name_search_last_name_wildcards_are_literal(client, spaced, by_name):
+    """LIKE wildcards in a last name match only themselves."""
+    assert _search(client, "juan dela_ruz")["inmates"] == []
+    assert _search(client, "juan de%")["inmates"] == []
+
+
+def test_name_search_spaced_last_name_stale(client, spaced, by_name):
+    """TDCJ would return its DELACRUZ row for "de la cruz", so an old one is
+    stale; FBOP is sent the spaces, so only its "DE LA CRUZ" row would be."""
+    _add_inmate(spaced, ("Federal", 8444444, "JUAN", "DELACRUZ"), OLD)
+    with spaced.begin() as session:
+        session.get(models.Inmate, ("Texas", 81111)).datetime_fetched = OLD
+        session.get(models.Inmate, ("Federal", 8222222)).datetime_fetched = OLD
+        session.get(models.Inmate, ("Texas", 83333)).datetime_fetched = OLD
+
+    data = _search(client, "juan de la cruz")
+
+    assert _ids(data["inmates"]) == [8444444, 83333]
+    assert _ids(data["stale_inmates"]) == [8222222, 81111]
+
+
+def test_name_search_spaced_last_name_reaches_tdcj(client, seeded, tdcj_lists):
+    """A last name with spaces is searched on TDCJ, not refused as an error."""
+    tdcj_lists("DELACRUZ, JUAN III")
+    data = _search(client, "juan de la cruz")
+    assert tdcj_lists.sent == [("delacruz", "juan"), ("juan", "de")]
+    assert data["errors"] == []
+    assert _ids(data["inmates"]) == [66666]
 
 
 def test_id_search_returns_old_match(client, aged, by_id):
