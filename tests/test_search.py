@@ -345,6 +345,7 @@ def tdcj_lists(api_db, monkeypatch):
     "query, display",
     [
         ("john doe", "DOE, JOHN ALLEN JR"),
+        ("king doe", "DOE, KING JAMES"),
     ],
 )
 def test_name_search_tdcj_row_it_returns_is_not_stale(
@@ -409,6 +410,16 @@ def test_capped_answers_are_reported_apart_from_errors(monkeypatch):
     assert [inmate.jurisdiction for inmate in results.inmates] == ["Federal"]
     assert results.errors == []
     assert results.incomplete == ["Federal"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["king doe", "doe king", "doe, king", "king james doe", "doe, king james jr"],
+)
+def test_name_search_reads_titles_as_names(client, seeded, by_name, query):
+    """A first name nameparser knows as a title is still a first name."""
+    _search(client, query)
+    assert sorted(by_name.calls) == [("doe", "king"), ("king", "doe")]
 
 
 @pytest.mark.parametrize("query", ["garcia", "   "])

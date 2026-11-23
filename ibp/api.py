@@ -8,6 +8,7 @@ from typing import Iterable, Optional
 import sqlalchemy
 from fastapi import Depends, HTTPException, Query, status
 from nameparser import HumanName  # type: ignore[import]
+from nameparser.config import Constants  # type: ignore[import]
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -63,6 +64,10 @@ async def query_inmates_by_inmate_id(session: AsyncSession, inmate_id: int):
 # (first, last) assignments cannot produce absurdly large responses.
 MAX_SEARCH_RESULTS = 250
 
+# Name parsing rules for search queries. Volunteers type names, not
+# salutations, and some first names (King, Prince) are titles to nameparser.
+QUERY_NAME_RULES = Constants(titles=[])
+
 
 def parse_name_query(query: str) -> list[tuple[str, str]]:
     """Parse a free-form name query into candidate (first, last) pairs.
@@ -75,12 +80,14 @@ def parse_name_query(query: str) -> list[tuple[str, str]]:
     - "maria garcia" / "garcia maria" / "garcia, maria"
         -> [(first, last), (last, first)] for the two parsed words
 
+    Words nameparser knows as titles ("king", "prince") are read as names.
+
     Both components are required (a first initial is enough): the external
     providers cannot search on a lone name, so a single-word query would
     silently search only the local cache.  An empty list is returned when the
     query does not contain two name parts.
     """
-    name = HumanName(query)
+    name = HumanName(query, constants=QUERY_NAME_RULES)
     first: str = name.first
     last: str = name.last
 
