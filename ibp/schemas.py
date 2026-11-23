@@ -607,9 +607,14 @@ class PackageItemCreated(PackageItem):
 
 
 class PackageInmate(InmateBase):
-    """The inmate a package goes to, with their unit."""
+    """The inmate a package goes to, with their unit.
+
+    ``pronouns`` are the ones the person stated in a letter, if any, shown at
+    the packing station (without who recorded them or when).
+    """
 
     unit: Optional[Unit] = None
+    pronouns: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 

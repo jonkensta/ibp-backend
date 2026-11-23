@@ -343,6 +343,21 @@ def test_survives_address_refresh(client, stale, by_id):
     assert stored(stale) == expected
 
 
+# --- Shown at the packing station ---------------------------------------------
+
+
+def test_shown_at_packing_station(client, seeded):
+    """The package's inmate carries the value, without who or when."""
+    assert client.get(f"/requests/{CODE}").json()["inmate"]["pronouns"] is None
+    set_pronouns(client)
+    response = client.get(f"/requests/{CODE}")
+    assert response.status_code == 200, response.text
+    inmate = response.json()["inmate"]
+    assert inmate["pronouns"] == PRONOUNS
+    assert not {"pronouns_set_by", "pronouns_set_at"} & set(inmate)
+    assert INITIALS not in response.text
+
+
 # --- Kept off everything else ------------------------------------------------
 
 
