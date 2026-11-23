@@ -4,7 +4,7 @@ import datetime
 import itertools
 import typing
 
-from . import models
+from . import clock, models
 from .base import config
 
 
@@ -74,9 +74,9 @@ def _request_postmarkdate_warning(
     key = "postmarkdate"
 
     # A date in the future is a mistake whatever the earlier requests are, and
-    # it says more than the spacing checks below, which share this key. The
-    # date is local: production sets TZ=America/Chicago (deploy/pi/compose.yaml).
-    if postmarkdate > datetime.date.today():
+    # it says more than the spacing checks below, which share this key. Today
+    # is the date in the configured time zone ([server] timezone).
+    if postmarkdate > clock.today():
         yield key, "The postmark date is in the future."
         return
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ibp import warnings
+from ibp import clock, warnings
 
 
 def _inmate(release):
@@ -41,7 +41,7 @@ FUTURE_POSTMARK = "The postmark date is in the future."
 
 
 def _days_ago(days):
-    return datetime.date.today() - datetime.timedelta(days=days)
+    return clock.today() - datetime.timedelta(days=days)
 
 
 def _inmate_with_requests(*requests):
@@ -65,6 +65,18 @@ def test_future_postmark_wins_over_spacing_warning():
     # Without the future check this would warn "Only 1 days since last postmark."
     inmate_ = _inmate_with_requests(("Filled", _days_ago(0)))
     result = warnings.request(inmate_, _days_ago(-1))
+    assert result == {"postmarkdate": FUTURE_POSTMARK}
+
+
+def test_future_postmark_uses_the_configured_zones_today(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Today comes from clock.today, not the process's local date."""
+    pinned = datetime.date(2040, 6, 1)
+    monkeypatch.setattr(clock, "today", lambda: pinned)
+    inmate_ = _inmate_with_requests()
+    assert not warnings.request(inmate_, pinned)
+    result = warnings.request(inmate_, pinned + datetime.timedelta(days=1))
     assert result == {"postmarkdate": FUTURE_POSTMARK}
 
 
