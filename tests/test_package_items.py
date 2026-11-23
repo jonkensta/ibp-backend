@@ -1,11 +1,15 @@
 """Package items: CRUD, revisions, registration and the registration queue."""
 
-# pylint: disable=redefined-outer-name,unused-argument
+# pylint: disable=redefined-outer-name,unused-argument,too-many-arguments,too-many-positional-arguments
 
 import datetime
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from ibp import api, models
+
+from .test_upcs import with_check_digit
 
 # Fresh, so the inmate has no entry-age warning.
 FETCHED = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
@@ -700,6 +704,132 @@ def test_refused_edit_leaves_cache_alone(client, cached_book, seeded):
     edit(client, item, title="First")
     assert edit(client, item, title="Second", update_cache=True).status_code == 409
     assert cached(seeded).source == "claude"
+
+
+# --- Remembering a book for the next copy -------------------------------------
+
+TYPED = {"isbn": OTHER_ISBN, "title": "The Hobbit", "author": "Tolkien"}
+TYPED_BOOK = {**TYPED, "source": "manual"}
+UPC = with_check_digit("07099900123")
+UPC_ADD_ON = UPC + "00799"
+
+
+def upc_row(seeded, code=UPC_ADD_ON):
+    """The ``upcs`` row for ``code`` as (isbn, source), or None."""
+    with seeded() as session:
+        row = session.get(models.Upc, code)
+        return None if row is None else (row.isbn, row.source)
+
+
+def add_upc_row(seeded, isbn, code=UPC_ADD_ON):
+    """Seed a ``upcs`` row mapping ``code`` to ``isbn``."""
+    with seeded.begin() as session:
+        session.add(
+            models.Upc(
+                upc=code,
+                isbn=isbn,
+                source="volunteer",
+                looked_up_at=datetime.datetime(
+                    2026, 1, 1, tzinfo=datetime.timezone.utc
+                ),
+            )
+        )
+
+
+def test_add_remembers_a_typed_book(client, seeded):
+    """remember_book caches the typed title for the ISBN's next scan."""
+    item = add(client, **TYPED_BOOK, remember_book=True)
+    assert item["remembered"] == ["isbn"]
+    book = cached(seeded, OTHER_ISBN)
+    assert (book.title, book.author, book.source, book.confidence) == (
+        "The Hobbit",
+        "Tolkien",
+        "manual",
+        None,
+    )
+    assert client.get(f"/books/{OTHER_ISBN}").json()["title"] == "The Hobbit"
+
+
+def test_add_never_overwrites_the_cache(client, cached_book, seeded):
+    """A title already cached for the ISBN is kept; the item saves as typed."""
+    item = add(client, **TYPED_BOOK | {"isbn": ISBN}, remember_book=True)
+    assert (item["title"], item["remembered"]) == ("The Hobbit", [])
+    book = cached(seeded)
+    assert (book.title, book.source) == ("War and Peace (Vintage Classics)", "claude")
+
+
+def test_add_remembers_nothing_by_default(client, seeded):
+    """Without remember_book or a UPC, the caches are untouched."""
+    assert add(client, **TYPED_BOOK)["remembered"] == []
+    assert cached(seeded, OTHER_ISBN) is None
+
+
+def test_remember_needs_an_isbn(client, seeded):
+    """Without an ISBN there is nothing to remember the book by."""
+    item = add(client, **MANUAL_BOOK, isbn=None, remember_book=True, upc=UPC_ADD_ON)
+    assert item["remembered"] == []
+    assert upc_row(seeded) is None
+    with seeded() as session:
+        assert session.query(models.Book).count() == 0
+
+
+@pytest.mark.parametrize("upc", [UPC_ADD_ON, "0" + UPC_ADD_ON])
+def test_add_maps_the_upc(client, seeded, upc):
+    """A UPC with its add-on is saved as the ISBN's UPC (leading 0 dropped)."""
+    item = add(client, **TYPED_BOOK, upc=upc)
+    assert item["remembered"] == ["upc"]
+    assert upc_row(seeded) == (OTHER_ISBN, "volunteer")
+
+
+def test_add_remembers_both(client, seeded):
+    """The title under the ISBN and the UPC's ISBN, in one add."""
+    item = add(client, **TYPED_BOOK, remember_book=True, upc=UPC_ADD_ON)
+    assert item["remembered"] == ["isbn", "upc"]
+
+
+def test_add_keeps_a_upc_mapped_elsewhere(client, seeded):
+    """A UPC already mapped to another ISBN keeps it, and the item saves."""
+    add_upc_row(seeded, ISBN)
+    item = add(client, **TYPED_BOOK, upc=UPC_ADD_ON)
+    assert item["remembered"] == []
+    assert upc_row(seeded) == (ISBN, "volunteer")
+
+
+def test_add_never_maps_a_bare_upc(client, seeded):
+    """A bare 12-digit UPC is shared by many titles: not saved."""
+    item = add(client, **TYPED_BOOK, upc=UPC)
+    assert item["remembered"] == []
+    assert upc_row(seeded, UPC) is None
+
+
+def test_add_refuses_a_bad_upc(client, seeded):
+    """A UPC with a wrong check digit is a 422 on the upc field."""
+    bad = UPC[:11] + str((int(UPC[11]) + 1) % 10)
+    response = client.post(ITEMS_URL, json={**TYPED_BOOK, "upc": bad})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "upc"]
+
+
+def test_failed_cache_writes_never_fail_the_add(
+    client, cached_book, seeded, monkeypatch
+):
+    """Rows inserted by another request first (a race) are kept; the item saves."""
+    add_upc_row(seeded, OTHER_ISBN)
+    real_get = AsyncSession.get
+
+    async def blind_get(self, entity, ident, **kwargs):
+        if entity in (models.Book, models.Upc):
+            return None
+        return await real_get(self, entity, ident, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "get", blind_get)
+    item = add(
+        client, **TYPED_BOOK | {"isbn": ISBN}, remember_book=True, upc=UPC_ADD_ON
+    )
+    assert item["remembered"] == []
+    assert [row["id"] for row in client.get(ITEMS_URL).json()] == [item["id"]]
+    assert cached(seeded).source == "claude"
+    assert upc_row(seeded) == (OTHER_ISBN, "volunteer")
 
 
 # --- Previously sent ------------------------------------------------------------

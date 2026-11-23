@@ -63,7 +63,9 @@ Some mass-market paperbacks carry a retail UPC-A barcode instead of the ISBN
 one; `GET /books/upc/{code}` handles those from the `upcs` table, a local
 UPC -> ISBN map that volunteers fill (`ibp/upcs.py`; no outside service is
 asked). `code` is the 12-digit UPC plus any 2- or 5-digit add-on (12, 14 or
-17 digits, UPC-A check digit on the first 12; anything else is a 422). The
+17 digits, UPC-A check digit on the first 12; anything else is a 422), with
+or without the leading 0 some scanners send (the UPC as an EAN-13), which is
+dropped (`upcs.normalize_code`). The
 12 digits identify only the publisher and price point, shared by many
 titles, and the add-on tells them apart, so a code is answered only by an
 exact match on the full code. The answer is the ISBN lookup above plus `isbn`
@@ -78,6 +80,18 @@ Portal extension sends it when an unknown UPC with an add-on is followed by
 an ISBN scan. Rows keyed by a bare 12-digit UPC with a NULL `isbn` are misses
 cached by UPCitemdb and Barcode Lookup, which v1.0.10 to v1.0.12 asked; they
 answer nothing.
+
+The packing station fills both tables as books are typed in. Adding a
+package item (`POST /requests/{code}/items`) with `"remember_book": true`
+and an ISBN saves its title and author in `books` (source `manual`) when no
+row has that ISBN yet; it never overwrites one (correcting a cached title is
+the edit's `update_cache`, "Fix this title for all future scans"). An
+optional `upc` with its add-on, together with an ISBN, is saved in `upcs`
+when the code has no row yet; one already mapped elsewhere is kept, without
+an error, and a bare 12-digit UPC is never saved. Both writes share the
+item's transaction, and the item saves even if they can't happen. The
+response's `remembered` lists what was saved: `"isbn"`, `"upc"`, both or
+neither.
 
 ## Inmate search
 

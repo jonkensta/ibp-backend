@@ -19,6 +19,7 @@ from pydantic_core import PydanticCustomError
 
 from .books import PORTAL_MAX_LENGTH, normalize_isbn
 from .labels import label_package_id
+from .upcs import normalize_code, valid_code
 
 
 class JurisdictionEnum(str, Enum):
@@ -562,14 +563,31 @@ class PackageItemBase(BaseModel):
     author: PortalText
 
 
+def upc_or_none(value: Optional[str]) -> Optional[str]:
+    """Normalize a UPC code (blank is None), or reject it."""
+    if value is None or not value.strip():
+        return None
+    code = normalize_code(value.strip())
+    if not valid_code(code):
+        raise PydanticCustomError("upc", "Not a valid UPC.")
+    return code
+
+
 class PackageItemCreate(PackageItemBase):
     """Schema for recording a book in a package.
 
     ``source`` is ``isbn`` when the title and author came from an ISBN
     lookup (which needs an ISBN) or ``manual`` when typed in.
+    ``remember_book`` saves the title and author for the ISBN's next scan,
+    unless the lookup cache already has that ISBN. ``upc`` is the UPC code
+    (with its add-on) scanned for the book: with an ISBN it's saved as that
+    UPC's ISBN, unless the UPC is already mapped. A bare 12-digit UPC is
+    never saved (many titles share it).
     """
 
     source: ItemSourceEnum
+    remember_book: bool = False
+    upc: Annotated[Optional[str], AfterValidator(upc_or_none)] = None
 
     @model_validator(mode="after")
     def check_source(self) -> "PackageItemCreate":
@@ -620,15 +638,21 @@ class PackageItem(PackageItemBase):
         return dt.isoformat()
 
 
+Remembered = Literal["isbn", "upc"]
+
+
 class PackageItemCreated(PackageItem):
     """A newly recorded package item.
 
     ``previously_sent`` lists the codes of this inmate's other requests that
     already contain the same ISBN (empty without an ISBN), so the station
-    can warn about a repeat.
+    can warn about a repeat. ``remembered`` says what this add saved for
+    the next copy: ``isbn`` (title and author for the ISBN) and ``upc`` (the
+    UPC's ISBN).
     """
 
     previously_sent: list[str] = []
+    remembered: list[Remembered] = []
 
 
 class PackageInmate(InmateBase):

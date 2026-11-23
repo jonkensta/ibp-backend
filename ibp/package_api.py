@@ -27,15 +27,18 @@ from typing import Annotated
 
 import sqlalchemy
 from fastapi import Depends, HTTPException, Path, Query, Response, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from . import models, schemas, warnings
+from . import models, schemas, upcs, warnings
 from .api import get_session
 from .base import app
+from .book_api import VOLUNTEER
 from .labels import RequestKey, label_package_id
 from .request_api import load_request, request_key
+from .titles import title_key
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +180,67 @@ async def save_to_book_cache(session: AsyncSession, item: models.PackageItem) ->
     book.fetched_at = now()
 
 
+async def insert_if_absent(session: AsyncSession, row: models.Base) -> bool:
+    """Insert ``row`` in a savepoint; False (nothing changed) if that fails.
+
+    For cache writes that must never fail the item they come with, such as
+    a row another request inserted first.
+    """
+    try:
+        async with session.begin_nested():
+            session.add(row)
+    except SQLAlchemyError as error:
+        logger.warning("couldn't save %s: %s", type(row).__name__, error)
+        return False
+    return True
+
+
+async def remember_for_next_copy(
+    session: AsyncSession,
+    item: models.PackageItem,
+    item_data: schemas.PackageItemCreate,
+) -> list[schemas.Remembered]:
+    """Save what lets the next copy of an added book fill in by itself.
+
+    Only inserts: a title already cached for the ISBN, or an ISBN already
+    mapped for the UPC, is kept (fixing a cached title is the edit's
+    ``update_cache``). Returns what was saved: ``isbn`` and/or ``upc``.
+    """
+    if item.isbn is None:
+        return []
+    remembered: list[schemas.Remembered] = []
+    timestamp = now()
+    if (
+        item_data.remember_book
+        and await session.get(models.Book, item.isbn) is None
+        and await insert_if_absent(
+            session,
+            models.Book(
+                isbn=item.isbn,
+                title=item.title,
+                author=item.author,
+                source=schemas.ItemSourceEnum.MANUAL.value,
+                fetched_at=timestamp,
+            ),
+        )
+    ):
+        remembered.append("isbn")
+    upc = item_data.upc
+    if (
+        upc is not None
+        and upcs.has_add_on(upc)
+        and await session.get(models.Upc, upc) is None
+        and await insert_if_absent(
+            session,
+            models.Upc(
+                upc=upc, isbn=item.isbn, source=VOLUNTEER, looked_up_at=timestamp
+            ),
+        )
+    ):
+        remembered.append("upc")
+    return remembered
+
+
 @app.get("/requests/{code}", response_model=schemas.Package)
 async def get_package(code: str, session: AsyncSession = Depends(get_session)):
     """Get a filled request with its inmate, books and the inmate's warnings.
@@ -225,7 +289,9 @@ async def add_package_item(
     """Record a book in a filled request's package.
 
     The new item is not registered yet. The response's ``previously_sent``
-    lists this inmate's other requests that already have the same ISBN.
+    lists this inmate's other requests that already have the same ISBN, and
+    ``remembered`` what was saved for the next copy (``remember_book`` and
+    ``upc``; see ``remember_for_next_copy``).
     """
     async with session.begin():
         key = await bump_contents_revision(session, code)
@@ -248,11 +314,13 @@ async def add_package_item(
         )
         session.add(item)
         await session.flush()
+        remembered = await remember_for_next_copy(session, item, item_data)
 
         logger.debug("added package item %d", item.id)
         return schemas.PackageItemCreated(
             **schemas.PackageItem.model_validate(item).model_dump(),
             previously_sent=await previously_sent(session, key, item.isbn),
+            remembered=remembered,
         )
 
 
@@ -387,7 +455,8 @@ async def matching_item(
     """The unregistered item of a package that a portal report is about.
 
     First the oldest with the reported ISBN, else the oldest with the same
-    title (ignoring case) and no other ISBN, else none.
+    title (compared by ``titles.title_key``: case, accents, punctuation and
+    the article ignored) and no other ISBN, else none.
     """
     items = (
         await session.execute(
@@ -401,9 +470,9 @@ async def matching_item(
         for item in candidates:
             if item.isbn == report.isbn:
                 return item
-    title = report.title.casefold()
+    title = title_key(report.title)
     for item in candidates:
-        if item.isbn in (None, report.isbn) and item.title.casefold() == title:
+        if item.isbn in (None, report.isbn) and title_key(item.title) == title:
             return item
     return None
 
