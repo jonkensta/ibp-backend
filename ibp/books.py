@@ -156,7 +156,11 @@ async def isbndb(client: httpx.AsyncClient, isbn: str) -> Optional[Candidate]:
     if response.status_code == 404:
         return None
     response.raise_for_status()
-    book = response.json().get("book") or {}
+    return isbndb_candidate(response.json().get("book") or {})
+
+
+def isbndb_candidate(book: dict) -> Optional[Candidate]:
+    """A Candidate from one ISBNdb book record (None without a title)."""
     if not book.get("title"):
         return None
     return Candidate(
@@ -195,7 +199,11 @@ async def google_books(client: httpx.AsyncClient, isbn: str) -> Optional[Candida
     )
     response.raise_for_status()
     items = response.json().get("items") or []
-    info = items[0].get("volumeInfo") or {} if items else {}
+    return google_candidate(items[0].get("volumeInfo") or {} if items else {})
+
+
+def google_candidate(info: dict) -> Optional[Candidate]:
+    """A Candidate from one Google Books ``volumeInfo`` (None without a title)."""
     if not info.get("title"):
         return None
     return Candidate(
