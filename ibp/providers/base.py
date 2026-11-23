@@ -5,6 +5,7 @@ import logging
 import typing
 
 from . import fbop, tdcj
+from .types import Answer, QueryResult
 
 Jurisdiction = typing.Literal["Texas", "Federal"]
 
@@ -19,8 +20,26 @@ LOGGERS: dict[Jurisdiction, logging.Logger] = {
 }
 
 
+class Results(typing.NamedTuple):
+    """Every asked provider's answers to one query.
+
+    ``errors`` holds the providers that failed, each error tagged with its
+    ``jurisdiction``. ``incomplete`` lists the jurisdictions whose provider
+    answered but capped its answer (see :class:`Answer`); those are not
+    errors.
+    """
+
+    inmates: list[QueryResult]
+    errors: list[Exception]
+    incomplete: list[Jurisdiction]
+
+
 def wrap_query(wrapped):
-    """query function."""
+    """Ask each jurisdiction's provider in turn and gather their answers.
+
+    ``wrapped`` returns one provider's :class:`Answer`; the wrapper returns
+    :class:`Results`.
+    """
 
     @functools.wraps(wrapped)
     async def wrapper(
@@ -36,21 +55,29 @@ def wrap_query(wrapped):
             if jurisdiction not in PROVIDERS:
                 raise ValueError(f"Invalid jurisdiction '{jurisdiction}' given.")
 
-        inmates = []
-        errors = []
+        inmates: list[QueryResult] = []
+        errors: list[Exception] = []
+        incomplete: list[Jurisdiction] = []
 
         for jurisdiction in jurisdictions:
             logger = LOGGERS[jurisdiction]
             try:
-                result = await wrapped(*args, jurisdiction, timeout=timeout)
-                inmates.extend(result)
+                answer: Answer = await wrapped(*args, jurisdiction, timeout=timeout)
             except Exception as error:  # pylint: disable=broad-exception-caught
                 error_name = error.__class__.__name__
                 message = f"Query returned '{error_name}: {error}'."
                 logger.error(message)
+                # Lets a caller tell which provider failed (see api.search_inmates).
+                error.jurisdiction = jurisdiction  # type: ignore[attr-defined]
                 errors.append(error)
+                continue
 
-        return inmates, errors
+            inmates.extend(answer.inmates)
+            if not answer.complete:
+                logger.warning("Query answer was capped; it may not list everyone")
+                incomplete.append(jurisdiction)
+
+        return Results(inmates, errors, incomplete)
 
     return wrapper
 
@@ -60,7 +87,7 @@ async def query_by_inmate_id(
     inmate_id: str | int,
     jurisdiction: Jurisdiction,
     timeout: typing.Optional[float] = 10.0,
-):
+) -> Answer:
     """Query jurisdiction with an inmate ID."""
     provider = PROVIDERS[jurisdiction]
     logger = LOGGERS[jurisdiction]
@@ -72,7 +99,8 @@ async def query_by_inmate_id(
         raise ValueError(msg) from exc
 
     logger.debug("Querying by inmate ID")
-    matches = await provider.query(inmate_id=inmate_id, timeout=timeout)
+    answer = await provider.query(inmate_id=inmate_id, timeout=timeout)
+    matches = answer.inmates
 
     if not matches:
         logger.debug("No results returned")
@@ -83,7 +111,7 @@ async def query_by_inmate_id(
     if len(matches) > 1:
         logger.error("Multiple results were returned for an ID query")
 
-    return matches
+    return answer
 
 
 @wrap_query
@@ -92,17 +120,17 @@ async def query_by_name(
     last: str,
     jurisdiction: Jurisdiction,
     timeout: typing.Optional[float] = 10.0,
-):
+) -> Answer:
     """Query jurisdiction with an inmate name."""
     provider = PROVIDERS[jurisdiction]
     logger = LOGGERS[jurisdiction]
 
     logger.debug("Querying by name")
-    matches = await provider.query(first_name=first, last_name=last, timeout=timeout)
+    answer = await provider.query(first_name=first, last_name=last, timeout=timeout)
 
-    if not matches:
+    if not answer.inmates:
         logger.debug("No results were returned")
-        return matches
+        return answer
 
-    logger.debug("%d result(s) returned", len(matches))
-    return matches
+    logger.debug("%d result(s) returned", len(answer.inmates))
+    return answer

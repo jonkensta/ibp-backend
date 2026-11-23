@@ -2,6 +2,7 @@
 
 # pylint: disable=redefined-outer-name,unused-argument
 
+import asyncio
 import datetime
 
 import pytest
@@ -61,7 +62,7 @@ def by_id(monkeypatch):
 
     async def query(id_, timeout):
         query.calls.append(id_)
-        return query.responses, query.errors
+        return providers.Results(query.responses, query.errors, [])
 
     query.calls, query.responses, query.errors = [], [], []
     monkeypatch.setattr(providers, "query_by_inmate_id", query)
@@ -70,13 +71,16 @@ def by_id(monkeypatch):
 
 @pytest.fixture
 def by_name(monkeypatch):
-    """Fake provider name query; set ``.responses`` / ``.errors``, see ``.calls``."""
+    """Fake provider name query.
+
+    Set ``.responses`` / ``.errors`` / ``.incomplete``, see ``.calls``.
+    """
 
     async def query(first, last, timeout):
         query.calls.append((first, last))
-        return query.responses, query.errors
+        return providers.Results(query.responses, query.errors, query.incomplete)
 
-    query.calls, query.responses, query.errors = [], [], []
+    query.calls, query.responses, query.errors, query.incomplete = [], [], [], []
     monkeypatch.setattr(providers, "query_by_name", query)
     return query
 
@@ -126,7 +130,11 @@ def test_id_search_provider_error_returns_cache(client, seeded, by_id):
 
 def test_id_search_no_match(client, seeded, by_id):
     """An unknown ID yields an empty result, not an error."""
-    assert _search(client, "99999") == {"inmates": [], "errors": []}
+    assert _search(client, "99999") == {
+        "inmates": [],
+        "stale_inmates": [],
+        "errors": [],
+    }
 
 
 def test_name_search_tries_both_orderings(client, seeded, by_name):
@@ -159,6 +167,195 @@ def test_name_search_upserts_and_dedupes_errors(client, seeded, by_name):
     assert [inmate["id"] for inmate in data["inmates"]] == [55555]
     with seeded() as session:
         assert session.get(models.Inmate, ("Texas", 55555)) is not None
+
+
+OLD = NOW - datetime.timedelta(days=31)
+
+
+def _add_inmate(db, row, fetched):
+    jurisdiction, id_, first, last = row
+    with db.begin() as session:
+        session.add(
+            models.Inmate(
+                jurisdiction=jurisdiction,
+                id=id_,
+                first_name=first,
+                last_name=last,
+                datetime_fetched=fetched,
+            )
+        )
+
+
+@pytest.fixture
+def aged(seeded):
+    """Old cached matches for "maria garcia", past the cutoff or never fetched.
+
+    66666 and 7777777 are named so that TDCJ and FBOP would return them;
+    22222 and 3333333 match locally by prefix only.
+    """
+    _add_inmate(seeded, ("Texas", 66666, "MARIA", "GARCIA"), OLD)
+    _add_inmate(seeded, ("Federal", 7777777, "MARIA", "GARCIA"), None)
+    with seeded.begin() as session:
+        session.get(models.Inmate, ("Texas", 22222)).datetime_fetched = OLD
+        session.get(models.Inmate, ("Federal", 3333333)).datetime_fetched = None
+    return seeded
+
+
+def _provider_error(jurisdiction):
+    error = providers.errors.ProviderError(f"{jurisdiction} unavailable")
+    error.jurisdiction = jurisdiction
+    return error
+
+
+def _ids(inmates):
+    return [inmate["id"] for inmate in inmates]
+
+
+def test_name_search_sets_stale_matches_aside(client, aged, by_name):
+    """Old matches the providers would have returned, and did not, are stale."""
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"]) == [11111, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [7777777, 66666]
+
+
+def test_name_search_prefix_last_name_is_not_stale(client, aged, by_name):
+    """TDCJ wants the exact last name, so it never returns GARCIA-LOPEZ here."""
+    _add_inmate(aged, ("Texas", 88888, "MARIA", "GARCIA-LOPEZ"), OLD)
+    data = _search(client, "maria garcia")
+    assert 88888 in _ids(data["inmates"])
+    assert 88888 not in _ids(data["stale_inmates"])
+
+
+def test_name_search_prefix_first_name(client, aged, by_name):
+    """TDCJ matches a first-name prefix, so its old row is stale; FBOP doesn't."""
+    data = _search(client, "mar garcia")
+    assert _ids(data["inmates"]) == [11111, 7777777, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [66666]
+
+
+def test_name_search_initial_never_makes_federal_stale(client, aged, by_name):
+    """FBOP finds nobody by an initial; TDCJ does, as a first-name prefix."""
+    data = _search(client, "m garcia")
+    assert 7777777 in _ids(data["inmates"])
+    assert _ids(data["stale_inmates"]) == [66666]
+
+
+def test_name_search_recent_match_is_not_stale(client, seeded, by_name):
+    """A match fetched within the grace period stays in the results."""
+    recent = NOW - datetime.timedelta(days=29)
+    _add_inmate(seeded, ("Texas", 66666, "MARIA", "GARCIA"), recent)
+
+    data = _search(client, "maria garcia")
+    assert 66666 in _ids(data["inmates"])
+    assert data["stale_inmates"] == []
+
+
+def test_name_search_provider_result_refreshes_old_match(client, aged, by_name):
+    """A match the provider returns is fresh again, so it is not stale."""
+    by_name.responses = [
+        _result(id=66666, first_name="MARIA", last_name="GARCIA", unit="Alpha")
+    ]
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"]) == [11111, 66666, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [7777777]
+
+
+def test_name_search_failed_provider_keeps_its_old_matches(client, aged, by_name):
+    """With TDCJ down its old matches show (cache); FBOP's are still stale."""
+    by_name.errors = [_provider_error("Texas")]
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"]) == [11111, 66666, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [7777777]
+
+
+def test_name_search_capped_provider_keeps_its_old_matches(client, aged, by_name):
+    """A capped TDCJ answer may have left its old matches out: none is stale."""
+    by_name.incomplete = ["Texas"]
+    data = _search(client, "maria garcia")
+    assert data["errors"] == []
+    assert _ids(data["inmates"]) == [11111, 66666, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [7777777]
+
+
+def test_name_search_capped_fbop_keeps_its_old_matches(client, aged, by_name):
+    """A capped FBOP answer keeps FBOP's old rows; TDCJ's are still stale."""
+    by_name.incomplete = ["Federal"]
+    data = _search(client, "maria garcia")
+    assert data["errors"] == []
+    assert _ids(data["inmates"]) == [11111, 7777777, 3333333, 22222]
+    assert _ids(data["stale_inmates"]) == [66666]
+
+
+def test_name_search_unattributed_error_keeps_all_matches(client, aged, by_name):
+    """An error that names no provider could be anyone's: nothing is stale."""
+    by_name.errors = ["something broke"]
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"]) == [11111, 7777777, 66666, 3333333, 22222]
+    assert data["stale_inmates"] == []
+
+
+def test_name_search_orders_same_name_by_freshness(client, seeded, by_name):
+    """With FBOP down, its old same-name match shows but below the fresh one."""
+    with seeded.begin() as session:
+        session.add(
+            models.Inmate(
+                jurisdiction="Federal",
+                id=5555555,
+                first_name="MARIA",
+                last_name="GARCIA",
+                datetime_fetched=OLD,
+            )
+        )
+    by_name.errors = [_provider_error("Federal")]
+
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"])[:2] == [11111, 5555555]
+
+
+def test_id_search_returns_old_match(client, aged, by_id):
+    """An ID search returns its inmate however old the data is."""
+    data = _search(client, "22222")
+    assert _ids(data["inmates"]) == [22222]
+    assert data["stale_inmates"] == []
+
+
+def test_provider_errors_carry_their_jurisdiction(monkeypatch):
+    """The query wrapper tags each error with the provider that raised it."""
+
+    async def fail(**kwargs):
+        raise providers.errors.ProviderError("down")
+
+    async def empty(**kwargs):
+        return providers.Answer([])
+
+    monkeypatch.setattr(providers.base.tdcj, "query", fail)
+    monkeypatch.setattr(providers.base.fbop, "query", empty)
+
+    # pylint: disable-next=no-value-for-parameter
+    query = providers.query_by_name("maria", "garcia", timeout=1)
+    results = asyncio.run(query)
+    assert [error.jurisdiction for error in results.errors] == ["Texas"]
+    assert results.incomplete == []
+
+
+def test_capped_answers_are_reported_apart_from_errors(monkeypatch):
+    """A capped answer is kept and its jurisdiction listed, not made an error."""
+
+    async def capped(**kwargs):
+        return providers.Answer([_result(jurisdiction="Federal")], complete=False)
+
+    async def empty(**kwargs):
+        return providers.Answer([])
+
+    monkeypatch.setattr(providers.base.tdcj, "query", empty)
+    monkeypatch.setattr(providers.base.fbop, "query", capped)
+
+    # pylint: disable-next=no-value-for-parameter
+    query = providers.query_by_name("maria", "garcia", timeout=1)
+    results = asyncio.run(query)
+    assert [inmate.jurisdiction for inmate in results.inmates] == ["Federal"]
+    assert results.errors == []
+    assert results.incomplete == ["Federal"]
 
 
 @pytest.mark.parametrize("query", ["garcia", "   "])

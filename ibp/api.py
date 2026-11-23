@@ -3,7 +3,7 @@
 import datetime
 import itertools
 import logging
-from typing import Optional
+from typing import Iterable, Optional
 
 import sqlalchemy
 from fastapi import Depends, HTTPException, Query, status
@@ -18,7 +18,7 @@ from .addresses import (
     load_shipping_settings,
     shipping_settings_to_schema,
 )
-from .base import app
+from .base import app, config
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
 from .upsert import inmates_by_name as upsert_inmates_by_name
 
@@ -93,22 +93,118 @@ def parse_name_query(query: str) -> list[tuple[str, str]]:
     return []
 
 
+def old_data_clause():
+    """SQL clause for inmates never fetched or not fetched in the grace period.
+
+    The grace period is ``[search] stale_after_days``.
+    """
+    days = config.getint("search", "stale_after_days")
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        days=days
+    )
+    return sqlalchemy.or_(
+        models.Inmate.datetime_fetched.is_(None),
+        models.Inmate.datetime_fetched < cutoff,
+    )
+
+
+def prefix_match(column, term: str):
+    """SQL clause: ``column`` starts with ``term``, ignoring case."""
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return column.ilike(escaped + "%", escape="\\")
+
+
+def is_initial(name: str) -> bool:
+    """Whether a name part is only an initial, like "J" or "J."."""
+    return len(name.strip(" .")) <= 1
+
+
+def provider_would_return_clause(jurisdiction: str, candidates: list[tuple[str, str]]):
+    """SQL clause for ``jurisdiction``'s rows its provider's search returns.
+
+    The providers match names more narrowly than the local search: TDCJ
+    needs the last name exactly and the first name as a prefix; FBOP needs
+    both names exactly and finds nobody by an initial. Both ignore case. A
+    row matches if the provider would have returned it for any of the
+    ``candidates`` (first, last) assignments.
+    """
+    lower = sqlalchemy.func.lower
+    first_name, last_name = models.Inmate.first_name, models.Inmate.last_name
+
+    if jurisdiction == "Texas":
+        matches = [
+            sqlalchemy.and_(
+                lower(last_name) == last.lower(), prefix_match(first_name, first)
+            )
+            for first, last in candidates
+        ]
+    elif jurisdiction == "Federal":
+        matches = [
+            sqlalchemy.and_(
+                lower(first_name) == first.lower(), lower(last_name) == last.lower()
+            )
+            for first, last in candidates
+            if not is_initial(first)
+        ]
+    else:
+        matches = []
+
+    return sqlalchemy.and_(
+        models.Inmate.jurisdiction == jurisdiction,
+        sqlalchemy.or_(sqlalchemy.false(), *matches),
+    )
+
+
+def stale_inmate_clause(
+    candidates: list[tuple[str, str]], errors: list, incomplete: Iterable[str] = ()
+):
+    """SQL clause for the inmates a name search should set aside as stale.
+
+    A name search upserts everything the providers return before it reads the
+    table, so a row its provider would have returned (see
+    :func:`provider_would_return_clause`) that is still old afterwards is one
+    the provider no longer lists, most likely a released inmate. Such a row
+    is stale once its data is older than ``[search] stale_after_days`` (or was
+    never fetched); the grace period covers a provider that briefly omits
+    someone. A local match the provider's own search would not have returned
+    says nothing about that person, so it is never stale.
+
+    A provider that failed, or capped its answer (``incomplete`` lists those
+    jurisdictions), may have left out people it still lists, so none of that
+    jurisdiction's rows are stale: the table then serves as a cache. Each
+    error carries its provider's ``jurisdiction`` (see ``providers.base``);
+    one that does not could be any provider's, so nothing is stale.
+    """
+    failed = {getattr(error, "jurisdiction", None) for error in errors}
+    if None in failed:
+        return sqlalchemy.false()
+
+    unsure = failed | set(incomplete)
+    answered = [
+        provider_would_return_clause(jurisdiction, candidates)
+        for jurisdiction in ("Texas", "Federal")
+        if jurisdiction not in unsure
+    ]
+    return sqlalchemy.and_(
+        old_data_clause(), sqlalchemy.or_(sqlalchemy.false(), *answered)
+    )
+
+
 async def query_inmates_by_name(
-    session: AsyncSession, candidates: list[tuple[str, str]]
+    session: AsyncSession, candidates: list[tuple[str, str]], where=None
 ):
     """Query inmates table by name.
 
     ``candidates`` holds the plausible (first, last) assignments of the
     user's query (see :func:`parse_name_query`).  A row matches if any
     assignment matches, where each non-empty component is a case-insensitive
-    prefix match.  Results are ordered with exact last-name matches first,
-    then by name, and capped at ``MAX_SEARCH_RESULTS`` rows.
+    prefix match, and ``where`` (an extra SQL clause, if given) holds.
+    Results are ordered with exact last-name matches first, then by name, and
+    capped at ``MAX_SEARCH_RESULTS`` rows. Among inmates with the same name,
+    recently fetched ones come first (see :func:`old_data_clause`), so old
+    records never sit above the people a provider just returned.
     """
     lower = sqlalchemy.func.lower
-
-    def prefix_match(column, term: str):
-        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        return column.ilike(escaped + "%", escape="\\")
 
     matches = []
     for first, last in candidates:
@@ -128,10 +224,12 @@ async def query_inmates_by_name(
     statement = (
         select(models.Inmate)
         .where(sqlalchemy.or_(*matches))
+        .where(sqlalchemy.true() if where is None else where)
         .order_by(
             exact_last_rank,
             lower(models.Inmate.last_name),
             lower(models.Inmate.first_name),
+            sqlalchemy.case((old_data_clause(), 1), else_=0),
             models.Inmate.jurisdiction,
             models.Inmate.id,
         )
@@ -146,10 +244,16 @@ async def search_inmates(
     session: AsyncSession = Depends(get_session),
     query: str = Query(..., description="Inmate name or ID."),
 ):
-    """Perform an inmate search by name or inmate ID."""
+    """Perform an inmate search by name or inmate ID.
 
-    errors = []
+    A name search returns matches whose data is stale (see
+    :func:`stale_inmate_clause`) separately, as ``stale_inmates``. An ID
+    search never sets its match aside.
+    """
+
+    errors: list = []
     inmates = []
+    stale_inmates = []
 
     try:
         inmate_id = int(query.replace("-", ""))
@@ -168,11 +272,20 @@ async def search_inmates(
             raise HTTPException(status_code=status_code, detail=detail)
 
         logger.debug("searching by name (%d candidate orderings)", len(candidates))
+        incomplete: set[str] = set()
         for first, last in candidates:
-            errors.extend(await upsert_inmates_by_name(session, first, last))
+            results = await upsert_inmates_by_name(session, first, last)
+            errors.extend(results.errors)
+            incomplete.update(results.incomplete)
 
-        inmates = await query_inmates_by_name(session, candidates)
-        logger.debug("name search matched %d inmate(s)", len(inmates))
+        stale = stale_inmate_clause(candidates, errors, incomplete)
+        inmates = await query_inmates_by_name(session, candidates, ~stale)
+        stale_inmates = await query_inmates_by_name(session, candidates, stale)
+        logger.debug(
+            "name search matched %d inmate(s), %d more stale",
+            len(inmates),
+            len(stale_inmates),
+        )
 
     else:
         logger.debug("searching by inmate ID")
@@ -182,7 +295,9 @@ async def search_inmates(
 
     # Multiple provider passes can repeat the same error; dedupe for display.
     errors_as_strings = list(dict.fromkeys(map(str, errors)))
-    return schemas.InmateSearchResults(inmates=inmates, errors=errors_as_strings)
+    return schemas.InmateSearchResults(
+        inmates=inmates, stale_inmates=stale_inmates, errors=errors_as_strings
+    )
 
 
 async def load_request_by_legacy_id(

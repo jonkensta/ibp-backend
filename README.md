@@ -74,6 +74,31 @@ an ISBN scan. Rows keyed by a bare 12-digit UPC with a NULL `isbn` are misses
 cached by UPCitemdb and Barcode Lookup, which v1.0.10 to v1.0.12 asked; they
 answer nothing.
 
+## Inmate search
+
+`GET /inmates?query=` searches by name or inmate ID. It first asks the
+providers (TDCJ, FBOP) and saves what they return, then answers from the
+`inmates` table, so the table serves as a cache when a provider is down.
+
+A name search sets aside matches that are stale: an inmate the provider was
+just asked for and did not return, most likely because they were released.
+Those come back as `stale_inmates`, not in `inmates`. A match is stale only if
+all of these hold:
+
+- its data is older than `[search] stale_after_days` (30 days), or was never
+  fetched;
+- its provider neither failed nor capped its answer for this search. TDCJ
+  lists 50 results a page and is read up to 10 pages; FBOP sends at most 100
+  records, with no paging. An error that names no provider means nothing is
+  stale;
+- the provider's own search would have returned it for one of the query's
+  (first, last) orderings. The local search matches both names by prefix, but
+  TDCJ needs the exact last name (the first name may be a prefix), and FBOP
+  needs both names exactly and finds nobody by an initial.
+
+Other old matches stay in `inmates`, below fresh ones with the same name. An
+ID search never sets its match aside.
+
 ## Request addresses
 
 `GET /requests/{code}/address` (and `GET /requests/legacy/{legacy_id}/address`,

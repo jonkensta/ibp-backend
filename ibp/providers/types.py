@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime
-from typing import Literal, Optional
+from typing import Literal, NamedTuple, Optional
 
 from pydantic import BaseModel
 
@@ -26,3 +26,14 @@ class QueryResult(BaseModel):
     release: Optional[str | datetime.date] = None
 
     datetime_fetched: datetime.datetime
+
+
+class Answer(NamedTuple):
+    """One provider's answer to one query.
+
+    ``complete`` is false when the provider capped its answer, so people who
+    match the query may be missing from ``inmates``.
+    """
+
+    inmates: list[QueryResult]
+    complete: bool = True
