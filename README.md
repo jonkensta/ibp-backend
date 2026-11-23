@@ -76,6 +76,18 @@ an ISBN scan. Rows keyed by a bare 12-digit UPC with a NULL `isbn` are misses
 cached by UPCitemdb and Barcode Lookup, which v1.0.10 to v1.0.12 asked; they
 answer nothing.
 
+The packing station fills both tables as books are typed in. Adding a
+package item (`POST /requests/{code}/items`) with `"remember_book": true`
+and an ISBN saves its title and author in `books` (source `manual`) when no
+row has that ISBN yet; it never overwrites one (correcting a cached title is
+the edit's `update_cache`, "Fix this title for all future scans"). An
+optional `upc` with its add-on, together with an ISBN, is saved in `upcs`
+when the code has no row yet; one already mapped elsewhere is kept, without
+an error, and a bare 12-digit UPC is never saved. Both writes share the
+item's transaction, and the item saves even if they can't happen. The
+response's `remembered` lists what was saved: `"isbn"`, `"upc"`, both or
+neither.
+
 ## Inmate search
 
 `GET /inmates?query=` searches by name or inmate ID. It first asks the
