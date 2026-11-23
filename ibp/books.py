@@ -223,6 +223,11 @@ def parse_loc_mods(xml: str) -> Optional[Candidate]:
     mods = ET.fromstring(xml).find(f".//{MODS}mods")
     if mods is None:
         return None
+    return mods_candidate(mods)
+
+
+def mods_candidate(mods: ET.Element) -> Optional[Candidate]:
+    """Title, primary author, publisher and date from one MODS record."""
     title_info = next(
         (t for t in mods.findall(f"{MODS}titleInfo") if not t.get("type")), None
     )
@@ -319,18 +324,26 @@ async def fetch_candidates(isbn: str) -> dict[str, Candidate]:
 
 # --- Claude merge -----------------------------------------------------------
 
+# How a title and an author are written for the portal; shared with the
+# title/author suggestions in ``ibp.book_search``.
+TITLE_RULE = f"""\
+- Title: the book's real title as printed on the cover, with a subtitle only \
+if it is part of how the book is known. Drop edition notes, series numbering \
+in brackets, format words (paperback, large print) and trailing junk. Use \
+normal title case. At most {PORTAL_MAX_LENGTH} characters."""
+
+AUTHOR_RULE = f"""\
+- Author: the primary author(s) as "First Last", comma-separated, at most \
+{PORTAL_MAX_LENGTH} characters. Leave out editors, translators and \
+illustrators unless there is no author. Empty if no source names one."""
+
 SYSTEM_PROMPT = f"""\
 You merge book metadata from several ISBN lookup services into the single \
 best title and author for a packing slip and a prison book-portal form.
 
 Rules:
-- Title: the book's real title as printed on the cover, with a subtitle only \
-if it is part of how the book is known. Drop edition notes, series numbering \
-in brackets, format words (paperback, large print) and trailing junk. Use \
-normal title case. At most {PORTAL_MAX_LENGTH} characters.
-- Author: the primary author(s) as "First Last", comma-separated, at most \
-{PORTAL_MAX_LENGTH} characters. Leave out editors, translators and \
-illustrators unless there is no author. Empty if no source names one.
+{TITLE_RULE}
+{AUTHOR_RULE}
 - Prefer what most sources agree on. If one source is clearly a different \
 book (wrong ISBN mapping), ignore it and say so in notes.
 - confidence: high if the sources agree once formatting is set aside, medium \
