@@ -10,6 +10,8 @@ from alembic import command
 import ibp.models
 from ibp import db_bootstrap
 
+from .conftest import DROP_SHIPMENT_TABLES
+
 # (jurisdiction, inmate id, request indexes): one with a gap left by a
 # deletion, one Federal inmate sharing the Texas inmate's id, one with none.
 INMATES = [
@@ -88,6 +90,7 @@ def test_bootstrap_adopts_pre_next_request_index_schema(tmp_path, monkeypatch):
         ibp.models.Base.metadata.create_all(engine)
         with engine.begin() as connection:
             for statement in [
+                *DROP_SHIPMENT_TABLES,
                 "DROP TABLE upcs",
                 "DROP TABLE registrations",
                 "DROP TABLE package_items",

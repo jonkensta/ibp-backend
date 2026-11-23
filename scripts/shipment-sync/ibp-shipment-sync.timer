@@ -1,0 +1,9 @@
+[Unit]
+Description=IBP shipment sync (daily 7:30am)
+
+[Timer]
+OnCalendar=*-*-* 07:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

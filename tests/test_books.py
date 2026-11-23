@@ -13,6 +13,8 @@ from alembic import command
 
 from ibp import books, db_bootstrap, models
 
+from .conftest import SHIPMENT_TABLES
+
 HOBBIT = "9780547928227"
 
 
@@ -303,7 +305,7 @@ def test_bootstrap_adopts_pre_books_create_all_schema(tmp_path, monkeypatch):
     """A create_all schema from before books gets the books migration."""
     url = f"sqlite:///{tmp_path / 'prebooks.db'}"
     engine = sqlalchemy.create_engine(url)
-    later = ("books", "package_items", "registrations", "upcs")
+    later = ("books", "package_items", "registrations", "upcs", *SHIPMENT_TABLES)
     tables = [t for name, t in models.Base.metadata.tables.items() if name not in later]
     models.Base.metadata.create_all(engine, tables=tables)
     with engine.begin() as connection:

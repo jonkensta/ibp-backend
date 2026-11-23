@@ -203,6 +203,55 @@ and a `difflib` ratio of at least 0.80; the surname is within 2 edits; the
 typed text is not itself a listed book; and no other book scores within 0.05
 of the chosen one.
 
+## Shipment tracking
+
+The database records every EasyPost postage label and its USPS tracking
+events, so how long packages take to arrive can be worked out later.
+`python -m ibp.shipment_sync` fills it from EasyPost (GET requests only), daily
+on ibp-server; installing it and the one-time backfill (`--since YYYY-MM-DD`)
+are in [`scripts/shipment-sync/`](scripts/shipment-sync/README.md).
+
+- `shipments`: one row per label, keyed by its EasyPost shipment id: tracking
+  code, tracker id, purchase time (UTC), weight (oz), postage (cents),
+  service, the raw `reference`, `kind` (`individual`, `bulk` or `other`), the
+  unit it went to when that can be told (from the tag, or the label's street
+  and ZIP against `units`), the request its tag names, the 8-digit inmate
+  number from the addressee line, refund status, current tracker status and
+  when a sync last changed it. No recipient name or street address is stored.
+- `tracking_events`: every event as EasyPost lists it (time in UTC, the
+  carrier's local time, status, detail, message, city, state, ZIP), returns,
+  refusals and repeated deliveries included. A re-sync adds only events not
+  stored yet; an exact repeat within a tracker is kept as the next
+  `occurrence`.
+- `package_shipments`: links a request to each label it could have shipped
+  under, with a `basis`. Derived and rebuilt from scratch after every sync, or
+  alone with `--rebuild-links`.
+
+A label's EasyPost `reference` carries a tag from the shipping apps:
+`ibp1:req:<request code>` (an individual package, e.g.
+`ibp1:req:TEX-00012345-2`), `ibp1:unit:<jurisdiction>:<unit name>` (a bulk
+box, e.g. `ibp1:unit:Texas:BETO`) or `ibp1:manual` (a manually addressed
+label). Anything else, including the empty reference on older labels, is no
+tag. A label without a tag is `individual` if its addressee line ends in an
+inmate number, `bulk` if it is addressed to the unit mailroom line (Settings),
+and `other` otherwise.
+
+Links (`ibp/shipment_links.py`), none for a label refunded (or with a refund
+requested) that USPS never scanned, since it was never mailed:
+
+- `reference`: a tagged label links to the request its tag names.
+- `inmate_number`: an untagged individual label links to that inmate's latest
+  Filled request processed on or up to 60 days before its purchase date
+  (local). The destination unit's jurisdiction tells Texas and Federal
+  numbers apart; with no destination, a number both have links to neither.
+- `unit_session`: all mailed bulk boxes to one unit on one local date are a
+  session. A Filled request whose inmate's unit (as it is now) ships by Box or
+  Federal Tub links to every box of the first session to that unit on or
+  after its processed date, if within 60 days.
+
+`GET /requests/{code}/shipments` lists a request's linked labels with their
+tracking code, purchase time, kind, basis, tracker status and events.
+
 ## Deployment
 
 Production runs on `ibp-server`, a Raspberry Pi 4B, as a Docker Compose

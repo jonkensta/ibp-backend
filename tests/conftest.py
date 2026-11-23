@@ -12,6 +12,11 @@ import pytest
 TOPLEVEL = Path(__file__).resolve().parent.parent
 MIGRATE_SCRIPT = TOPLEVEL / "scripts" / "migrate.py"
 
+# Tables added by the shipment tracking migration, in an order they can be
+# dropped in; tests that build an older schema with create_all leave them out.
+SHIPMENT_TABLES = ("package_shipments", "tracking_events", "shipments")
+DROP_SHIPMENT_TABLES = [f"DROP TABLE {table}" for table in SHIPMENT_TABLES]
+
 if str(TOPLEVEL) not in sys.path:
     sys.path.insert(0, str(TOPLEVEL))
 

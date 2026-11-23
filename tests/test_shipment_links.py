@@ -1,0 +1,284 @@
+"""Linking requests to the labels they could have shipped under."""
+
+# pylint: disable=redefined-outer-name
+
+import pytest
+
+from ibp import models
+from ibp.shipment_links import local_date, never_mailed, rebuild_links
+
+from .shipment_helpers import (
+    add_inmate,
+    add_request,
+    add_shipment,
+    add_unit,
+    links,
+    utc,
+)
+
+NUMBER = 12345678
+DELIVERED = (("2026-03-12T16:00", "in_transit"), ("2026-03-14T16:00", "delivered"))
+
+
+@pytest.fixture
+def session(api_db):
+    """A session on a fresh database."""
+    with api_db() as session:
+        yield session
+
+
+def rebuild(session) -> set[tuple]:
+    """Rebuild the links and return them."""
+    rebuild_links(session)
+    session.commit()
+    return links(session)
+
+
+def individual(session, purchased="2026-03-10T15:00", **columns):
+    """An untagged individual label to inmate NUMBER, delivered."""
+    columns.setdefault("inmate_number", f"{NUMBER:08d}")
+    columns.setdefault("events", DELIVERED)
+    return add_shipment(session, purchased, kind="individual", **columns)
+
+
+def box(session, purchased, unit="ALPHA", jurisdiction="Texas", **columns):
+    """A bulk box to a unit, delivered."""
+    columns.setdefault("events", DELIVERED)
+    return add_shipment(
+        session,
+        purchased,
+        kind="bulk",
+        unit_jurisdiction=jurisdiction,
+        unit_name=unit,
+        **columns,
+    )
+
+
+def test_local_date_uses_the_server_time_zone():
+    """A label bought late in the evening (Central) is dated that evening."""
+    assert str(local_date(utc("2026-03-11T03:00"))) == "2026-03-10"
+
+
+def test_tagged_label_links_to_its_request(session):
+    """A reference tag naming a request links it; one naming a request IBP
+    lacks links nothing."""
+    add_inmate(session, NUMBER)
+    add_request(session, NUMBER, 0, "2026-03-01")
+    tagged = individual(
+        session,
+        request_jurisdiction="Texas",
+        request_inmate_id=NUMBER,
+        request_index=0,
+        reference=f"ibp1:req:TEX-{NUMBER:08d}-0",
+    )
+    individual(
+        session,
+        request_jurisdiction="Texas",
+        request_inmate_id=NUMBER,
+        request_index=9,
+        reference=f"ibp1:req:TEX-{NUMBER:08d}-9",
+    )
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", NUMBER, 0, tagged.easypost_id, "reference"),
+    }
+
+
+def test_untagged_label_links_to_latest_qualifying_request(session):
+    """The latest Filled request on or before the purchase date wins; a
+    tossed one, a later one and one in another jurisdiction don't count."""
+    add_inmate(session, NUMBER)
+    add_inmate(session, NUMBER, jurisdiction="Federal")
+    add_request(session, NUMBER, 0, "2026-01-20")
+    add_request(session, NUMBER, 1, "2026-02-20")
+    add_request(session, NUMBER, 2, "2026-03-09", action="Tossed")
+    add_request(session, NUMBER, 3, "2026-03-11")
+    add_unit(session, "ALPHA")
+    label = individual(session, unit_jurisdiction="Texas", unit_name="ALPHA")
+    add_request(session, NUMBER, 0, "2026-03-05", jurisdiction="Federal")
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", NUMBER, 1, label.easypost_id, "inmate_number"),
+    }
+
+
+def test_untagged_label_links_request_processed_that_day(session):
+    """A request processed on the purchase date (local) qualifies."""
+    add_inmate(session, NUMBER)
+    add_request(session, NUMBER, 0, "2026-03-10")
+    # 03:00 UTC on the 11th is the evening of the 10th in Texas.
+    label = individual(session, purchased="2026-03-11T03:00")
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", NUMBER, 0, label.easypost_id, "inmate_number"),
+    }
+
+
+@pytest.mark.parametrize(
+    "processed, linked", [("2026-01-09", True), ("2026-01-08", False)]
+)
+def test_untagged_label_respects_60_days(session, processed, linked):
+    """A request processed more than 60 days before the label isn't linked."""
+    add_inmate(session, NUMBER)
+    add_request(session, NUMBER, 0, processed)
+    label = individual(session)  # 2026-03-10, 60 days after 2026-01-09
+    session.commit()
+    expected = {("Texas", NUMBER, 0, label.easypost_id, "inmate_number")}
+    assert rebuild(session) == (expected if linked else set())
+
+
+def test_destination_tells_texas_from_federal(session):
+    """The same number in both jurisdictions: the destination unit decides,
+    and with no destination neither is linked."""
+    add_unit(
+        session, "FCI EXAMPLE", jurisdiction="Federal", shipping_method="Federal Tub"
+    )
+    add_inmate(session, NUMBER)
+    add_inmate(session, NUMBER, jurisdiction="Federal")
+    add_request(session, NUMBER, 0, "2026-03-01")
+    add_request(session, NUMBER, 0, "2026-03-01", jurisdiction="Federal")
+    federal = individual(session, unit_jurisdiction="Federal", unit_name="FCI EXAMPLE")
+    individual(session)  # destination unknown: ambiguous
+    session.commit()
+    assert rebuild(session) == {
+        ("Federal", NUMBER, 0, federal.easypost_id, "inmate_number"),
+    }
+
+
+def test_unknown_destination_links_when_only_one_jurisdiction_matches(session):
+    """With no destination, a number only one jurisdiction has is linked."""
+    add_inmate(session, NUMBER)
+    add_request(session, NUMBER, 0, "2026-03-01")
+    label = individual(session)
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", NUMBER, 0, label.easypost_id, "inmate_number"),
+    }
+
+
+def test_refunded_never_scanned_label_gets_no_links(session):
+    """A refunded label USPS never scanned was never mailed; a refunded one
+    that was scanned did travel and is linked."""
+    add_inmate(session, NUMBER)
+    add_request(session, NUMBER, 0, "2026-03-01")
+    unmailed = individual(
+        session,
+        refund_status="refunded",
+        tracker_status="pre_transit",
+        events=(("2026-03-10T15:01", "pre_transit"),),
+    )
+    mailed = individual(session, refund_status="refunded")
+    session.commit()
+    assert never_mailed(unmailed) and not never_mailed(mailed)
+    assert rebuild(session) == {
+        ("Texas", NUMBER, 0, mailed.easypost_id, "inmate_number"),
+    }
+
+
+def seed_box_unit(session, method="Box"):
+    """Unit ALPHA with two inmates there."""
+    add_unit(session, "ALPHA", shipping_method=method)
+    add_inmate(session, 11111111, "ALPHA")
+    add_inmate(session, 22222222, "ALPHA")
+
+
+def test_bulk_session_with_one_box(session):
+    """A request links to the one box of the first session after it."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-03-01")
+    first = box(session, "2026-03-05T15:00")
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", 11111111, 0, first.easypost_id, "unit_session"),
+    }
+
+
+def test_bulk_session_with_three_boxes_and_the_next_session(session):
+    """Every box of a day's session is linked; a request processed after a
+    session links to the next one, not the earlier one."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-03-01")
+    add_request(session, 22222222, 0, "2026-03-06")
+    add_request(session, 22222222, 1, "2026-03-13")  # after every session
+    boxes = [
+        box(session, "2026-03-05T15:00"),
+        box(session, "2026-03-05T18:00"),
+        box(session, "2026-03-06T03:00"),  # still the 5th in Texas
+    ]
+    later = box(session, "2026-03-12T15:00")
+    box(session, "2026-03-05T16:00", unit="BETA")  # another unit
+    session.commit()
+    assert rebuild(session) == {
+        *(("Texas", 11111111, 0, b.easypost_id, "unit_session") for b in boxes),
+        ("Texas", 22222222, 0, later.easypost_id, "unit_session"),
+    }
+
+
+def test_bulk_session_on_the_processed_date_counts(session):
+    """A session on the request's processed date is on or after it."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-03-05")
+    same_day = box(session, "2026-03-05T20:00")
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", 11111111, 0, same_day.easypost_id, "unit_session"),
+    }
+
+
+def test_bulk_session_more_than_60_days_later_is_not_linked(session):
+    """A request long before the first stored session isn't linked to it."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2025-12-01")
+    box(session, "2026-03-05T15:00")
+    session.commit()
+    assert not rebuild(session)
+
+
+def test_unit_that_ships_individually_gets_no_bulk_links(session):
+    """Boxes to a unit whose shipping method is Individual link nothing."""
+    seed_box_unit(session, method="Individual")
+    add_request(session, 11111111, 0, "2026-03-01")
+    box(session, "2026-03-05T15:00")
+    session.commit()
+    assert not rebuild(session)
+
+
+def test_unmailed_box_is_not_a_session(session):
+    """A refunded, never scanned box doesn't make a session."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-03-01")
+    box(session, "2026-03-05T15:00", refund_status="refunded", events=())
+    mailed = box(session, "2026-03-07T15:00")
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", 11111111, 0, mailed.easypost_id, "unit_session"),
+    }
+
+
+def test_rebuild_is_deterministic_and_idempotent(session):
+    """Rebuilding gives the same rows every time and replaces stray ones."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-03-01")
+    add_inmate(session, NUMBER)
+    add_request(session, NUMBER, 0, "2026-03-01")
+    boxes = [box(session, "2026-03-05T15:00"), box(session, "2026-03-05T16:00")]
+    individual(session)
+    session.commit()
+
+    first = rebuild(session)
+    assert len(first) == 3
+    assert rebuild(session) == first
+
+    session.query(models.PackageShipment).delete()
+    session.add(
+        models.PackageShipment(
+            inmate_jurisdiction="Texas",
+            inmate_id=NUMBER,
+            request_index=0,
+            shipment_id=boxes[0].id,
+            basis="reference",
+        )
+    )
+    session.commit()
+    assert rebuild(session) == first
+    assert rebuild_links(session) == 3

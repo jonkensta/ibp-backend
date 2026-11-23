@@ -10,12 +10,12 @@ from alembic.script import ScriptDirectory
 import ibp.models
 from ibp import db_bootstrap
 
-from .conftest import TOPLEVEL
+from .conftest import SHIPMENT_TABLES, TOPLEVEL
 from .test_migrate_end_to_end import run_migrate
 
 PACKAGE_TABLES = {"package_items", "registrations"}
 # Tables added after the package tables, absent from a phase 1 schema too.
-LATER_TABLES = {"upcs"}
+LATER_TABLES = {"upcs", *SHIPMENT_TABLES}
 
 
 def head_revision() -> str:

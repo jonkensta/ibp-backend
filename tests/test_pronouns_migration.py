@@ -8,6 +8,7 @@ from alembic import command
 import ibp.models
 from ibp import db_bootstrap
 
+from .conftest import DROP_SHIPMENT_TABLES
 from .test_package_items_migration import head_revision, scalar
 
 PRONOUNS_COLUMNS = {
@@ -70,6 +71,8 @@ def test_bootstrap_adopts_pre_pronouns_schema(tmp_path: Path, monkeypatch):
     try:
         ibp.models.Base.metadata.create_all(engine)
         with engine.begin() as connection:
+            for statement in DROP_SHIPMENT_TABLES:
+                connection.execute(sqlalchemy.text(statement))
             for column in sorted(PRONOUNS_COLUMNS):
                 table, name = column.split(".")
                 connection.execute(

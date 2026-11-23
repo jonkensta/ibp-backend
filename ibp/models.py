@@ -6,7 +6,16 @@ from typing import Optional
 import sqlalchemy
 import sqlalchemy.orm
 import sqlalchemy.types
-from sqlalchemy import Date, DateTime, Enum, Integer, String, Text, TypeDecorator
+from sqlalchemy import (
+    Date,
+    DateTime,
+    Enum,
+    Float,
+    Integer,
+    String,
+    Text,
+    TypeDecorator,
+)
 from sqlalchemy.ext.declarative import declared_attr
 from sqlalchemy.orm import mapped_column  # pylint: disable=no-name-in-module
 from sqlalchemy.orm import Mapped, relationship
@@ -436,6 +445,142 @@ class Book(Base):
     confidence: Mapped[Optional[str]] = mapped_column(String(10))
     candidates: Mapped[Optional[str]] = mapped_column(Text)
     fetched_at: Mapped[datetime.datetime] = mapped_column(TZDateTime, nullable=False)
+
+
+SHIPMENT_KINDS = ("individual", "bulk", "other")
+LINK_BASES = ("reference", "inmate_number", "unit_session")
+
+
+class Shipment(Base):
+    """Sqlalchemy model for one EasyPost postage label, filled by the sync job.
+
+    ``ibp/shipment_sync.py`` writes these from EasyPost; nothing else does.
+    No recipient name or street address is stored: only the inmate number
+    parsed from an individual label's addressee line and the unit the label
+    went to, when either can be told. ``reference`` is the label's raw
+    EasyPost reference (see ``shipment_sync.parse_reference``); the
+    ``request_*`` columns are the request it names, without a foreign key
+    since the tag may name one IBP no longer has.
+    """
+
+    __tablename__ = "shipments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    easypost_id: Mapped[str] = mapped_column(String(40), nullable=False, unique=True)
+    tracking_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    tracker_id: Mapped[Optional[str]] = mapped_column(String(40))
+    purchased_at: Mapped[datetime.datetime] = mapped_column(
+        TZDateTime(), nullable=False
+    )
+    weight_oz: Mapped[Optional[float]] = mapped_column(Float)
+    cost_cents: Mapped[Optional[int]] = mapped_column(Integer)
+    service: Mapped[Optional[str]] = mapped_column(String(40))
+    reference: Mapped[Optional[str]] = mapped_column(String(255))
+    kind: Mapped[str] = mapped_column(
+        Enum(*SHIPMENT_KINDS, name="shipment_kind_enum", native_enum=False),
+        nullable=False,
+    )
+
+    unit_jurisdiction: Mapped[Optional[str]] = mapped_column(Jurisdiction)
+    unit_name: Mapped[Optional[str]] = mapped_column(String)
+
+    request_jurisdiction: Mapped[Optional[str]] = mapped_column(Jurisdiction)
+    request_inmate_id: Mapped[Optional[int]] = mapped_column(Integer)
+    request_index: Mapped[Optional[int]] = mapped_column(Integer)
+
+    inmate_number: Mapped[Optional[str]] = mapped_column(String(8))
+
+    refund_status: Mapped[Optional[str]] = mapped_column(String(20))
+    tracker_status: Mapped[Optional[str]] = mapped_column(String(30))
+    synced_at: Mapped[datetime.datetime] = mapped_column(TZDateTime(), nullable=False)
+
+    events: Mapped[list["TrackingEvent"]] = relationship(
+        "TrackingEvent",
+        order_by="[TrackingEvent.occurred_at, TrackingEvent.id]",
+        cascade="all, delete-orphan",
+        collection_class=list,
+    )
+
+
+class TrackingEvent(Base):
+    """Sqlalchemy model for one tracking event of a shipment, as received.
+
+    Every event is kept, returns, refusals and repeated ``delivered`` events
+    included, and none is ever deleted by the sync. An event is identified
+    by its values (time, status, detail, message, place) plus
+    ``occurrence``: 0 for the first event with those values in the tracker's
+    list, 1 for an identical repeat, and so on. A re-sync inserts only keys
+    not already stored. ``local_time`` is the carrier's local time string,
+    when EasyPost gives one.
+    """
+
+    __tablename__ = "tracking_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shipment_id: Mapped[int] = mapped_column(
+        Integer,
+        sqlalchemy.ForeignKey("shipments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    occurred_at: Mapped[datetime.datetime] = mapped_column(TZDateTime(), nullable=False)
+    local_time: Mapped[Optional[str]] = mapped_column(String(40))
+    status: Mapped[Optional[str]] = mapped_column(String(30))
+    status_detail: Mapped[Optional[str]] = mapped_column(String(40))
+    message: Mapped[Optional[str]] = mapped_column(Text)
+    city: Mapped[Optional[str]] = mapped_column(String(100))
+    state: Mapped[Optional[str]] = mapped_column(String(20))
+    zip: Mapped[Optional[str]] = mapped_column(String(12))
+    occurrence: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=sqlalchemy.text("0")
+    )
+
+
+# NULLs are distinct in a unique index, so the optional values are compared
+# as empty strings.
+Index(
+    "uq_tracking_events_event",
+    TrackingEvent.shipment_id,
+    TrackingEvent.occurred_at,
+    sqlalchemy.func.coalesce(TrackingEvent.status, ""),
+    sqlalchemy.func.coalesce(TrackingEvent.status_detail, ""),
+    sqlalchemy.func.coalesce(TrackingEvent.message, ""),
+    sqlalchemy.func.coalesce(TrackingEvent.city, ""),
+    sqlalchemy.func.coalesce(TrackingEvent.state, ""),
+    sqlalchemy.func.coalesce(TrackingEvent.zip, ""),
+    TrackingEvent.occurrence,
+    unique=True,
+)
+
+
+class PackageShipment(Base):
+    """Sqlalchemy model linking a request to a label it could have shipped under.
+
+    Derived: ``shipment_sync.rebuild_links`` deletes and rebuilds every row
+    from ``shipments``, ``tracking_events`` and the request data. ``basis``
+    says which rule made the link.
+    """
+
+    __tablename__ = "package_shipments"
+
+    __table_args__ = (
+        PrimaryKeyConstraint(*REQUEST_KEY_COLUMNS, "shipment_id"),
+        ForeignKeyConstraint(
+            REQUEST_KEY_COLUMNS, REQUEST_KEY_TARGETS, ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(["shipment_id"], ["shipments.id"], ondelete="CASCADE"),
+        Index("ix_package_shipments_shipment", "shipment_id"),
+    )
+
+    inmate_jurisdiction: Mapped[str] = mapped_column(Jurisdiction, nullable=False)
+    inmate_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    shipment_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    basis: Mapped[str] = mapped_column(
+        Enum(*LINK_BASES, name="link_basis_enum", native_enum=False), nullable=False
+    )
+
+    shipment: Mapped["Shipment"] = relationship("Shipment", uselist=False)
 
 
 class Upc(Base):
