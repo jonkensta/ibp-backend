@@ -99,6 +99,17 @@ all of these hold:
 Other old matches stay in `inmates`, below fresh ones with the same name. An
 ID search never sets its match aside.
 
+### Race and sex
+
+An inmate's `race` and `sex` are stored as the same words for either
+provider: race `White`, `Black`, `Hispanic`, `Asian`, `American Indian`,
+`Other` or `Unknown`; sex `Male`, `Female` or `Unknown`. TDCJ reports one-letter
+codes and FBOP reports words (it has no Hispanic category), so each provider
+normalizes its values when it builds a result (`ibp/providers/normalize.py`),
+and alembic revision `d2a6f8c3e1b7` rewrote the codes already stored for Texas
+inmates. `Unknown` means the provider said so; no value at all is null. A value
+not in the tables is stored unchanged and logged as a warning.
+
 ## Request addresses
 
 `GET /requests/{code}/address` (and `GET /requests/legacy/{legacy_id}/address`,
