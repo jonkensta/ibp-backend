@@ -3,7 +3,7 @@
 import datetime
 import itertools
 import logging
-from typing import Optional
+from typing import Iterable, Optional
 
 import sqlalchemy
 from fastapi import Depends, HTTPException, Query, status
@@ -108,7 +108,7 @@ def old_data_clause():
     )
 
 
-def stale_inmate_clause(errors: list):
+def stale_inmate_clause(errors: list, incomplete: Iterable[str] = ()):
     """SQL clause for the inmates a name search should set aside as stale.
 
     A name search upserts everything the providers return before it reads the
@@ -118,7 +118,8 @@ def stale_inmate_clause(errors: list):
     never fetched); the grace period covers a provider that briefly omits
     someone.
 
-    A provider that failed says nothing about its inmates, so none of that
+    A provider that failed, or capped its answer (``incomplete`` lists those
+    jurisdictions), may have left out people it still lists, so none of that
     jurisdiction's rows are stale: the table then serves as a cache. Each
     error carries its provider's ``jurisdiction`` (see ``providers.base``);
     one that does not could be any provider's, so nothing is stale.
@@ -127,9 +128,10 @@ def stale_inmate_clause(errors: list):
     if None in failed:
         return sqlalchemy.false()
 
+    unsure = failed | set(incomplete)
     clause = old_data_clause()
-    if failed:
-        clause = sqlalchemy.and_(clause, models.Inmate.jurisdiction.not_in(failed))
+    if unsure:
+        clause = sqlalchemy.and_(clause, models.Inmate.jurisdiction.not_in(unsure))
     return clause
 
 
@@ -198,7 +200,7 @@ async def search_inmates(
     search never sets its match aside.
     """
 
-    errors = []
+    errors: list = []
     inmates = []
     stale_inmates = []
 
@@ -219,10 +221,13 @@ async def search_inmates(
             raise HTTPException(status_code=status_code, detail=detail)
 
         logger.debug("searching by name (%d candidate orderings)", len(candidates))
+        incomplete: set[str] = set()
         for first, last in candidates:
-            errors.extend(await upsert_inmates_by_name(session, first, last))
+            results = await upsert_inmates_by_name(session, first, last)
+            errors.extend(results.errors)
+            incomplete.update(results.incomplete)
 
-        stale = stale_inmate_clause(errors)
+        stale = stale_inmate_clause(errors, incomplete)
         inmates = await query_inmates_by_name(session, candidates, ~stale)
         stale_inmates = await query_inmates_by_name(session, candidates, stale)
         logger.debug(

@@ -11,7 +11,7 @@ from nameparser import HumanName  # type: ignore[import]
 
 from .errors import ProviderError
 from .misc import run_curl_exec
-from .types import QueryResult
+from .types import Answer, QueryResult
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -70,11 +70,11 @@ async def query(
     first_name: str = "",
     inmate_id: str = "",
     timeout: float | None = None,
-) -> list[QueryResult]:
+) -> Answer:
     """Private helper for querying TDCJ."""
 
     if not inmate_id and not (first_name and last_name):
-        return []
+        return Answer([])
 
     html = await _curl_search_url(last_name, first_name, inmate_id, timeout)
     soup = BeautifulSoup(html, "html.parser")
@@ -82,7 +82,7 @@ async def query(
 
     if table is None or not isinstance(table, Tag):
         if NO_RESULTS_TEXT.lower() in soup.get_text(" ", strip=True).lower():
-            return []
+            return Answer([])
         raise ProviderError("TDCJ returned a page with no results table")
 
     for linebreak in table.find_all("br"):
@@ -97,11 +97,11 @@ async def query(
         or not isinstance(header_tag, Tag)
         or not isinstance(body_tag, Tag)
     ):
-        return []
+        return Answer([])
 
     header = header_tag.find("tr")
     if header is None or not isinstance(header, Tag):
-        return []
+        return Answer([])
 
     keys = [th.get_text(" ", strip=True) for th in header.find_all("th")]
     if not set(keys).issuperset(REQUIRED_FIELDS):
@@ -155,4 +155,6 @@ async def query(
             datetime_fetched=datetime.datetime.now(datetime.timezone.utc),
         )
 
-    return [inmate for row in rows if (inmate := row_to_inmate(row)) is not None]
+    return Answer(
+        [inmate for row in rows if (inmate := row_to_inmate(row)) is not None]
+    )

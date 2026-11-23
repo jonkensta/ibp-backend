@@ -62,7 +62,7 @@ def by_id(monkeypatch):
 
     async def query(id_, timeout):
         query.calls.append(id_)
-        return query.responses, query.errors
+        return providers.Results(query.responses, query.errors, [])
 
     query.calls, query.responses, query.errors = [], [], []
     monkeypatch.setattr(providers, "query_by_inmate_id", query)
@@ -71,13 +71,16 @@ def by_id(monkeypatch):
 
 @pytest.fixture
 def by_name(monkeypatch):
-    """Fake provider name query; set ``.responses`` / ``.errors``, see ``.calls``."""
+    """Fake provider name query.
+
+    Set ``.responses`` / ``.errors`` / ``.incomplete``, see ``.calls``.
+    """
 
     async def query(first, last, timeout):
         query.calls.append((first, last))
-        return query.responses, query.errors
+        return providers.Results(query.responses, query.errors, query.incomplete)
 
-    query.calls, query.responses, query.errors = [], [], []
+    query.calls, query.responses, query.errors, query.incomplete = [], [], [], []
     monkeypatch.setattr(providers, "query_by_name", query)
     return query
 
@@ -224,6 +227,15 @@ def test_name_search_failed_provider_keeps_its_old_matches(client, aged, by_name
     assert _ids(data["stale_inmates"]) == [3333333]
 
 
+def test_name_search_capped_provider_keeps_its_old_matches(client, aged, by_name):
+    """A capped TDCJ answer may have left its old matches out: none is stale."""
+    by_name.incomplete = ["Texas"]
+    data = _search(client, "maria garcia")
+    assert data["errors"] == []
+    assert _ids(data["inmates"]) == [11111, 22222]
+    assert _ids(data["stale_inmates"]) == [3333333]
+
+
 def test_name_search_unattributed_error_keeps_all_matches(client, aged, by_name):
     """An error that names no provider could be anyone's: nothing is stale."""
     by_name.errors = ["something broke"]
@@ -264,15 +276,36 @@ def test_provider_errors_carry_their_jurisdiction(monkeypatch):
         raise providers.errors.ProviderError("down")
 
     async def empty(**kwargs):
-        return []
+        return providers.Answer([])
 
     monkeypatch.setattr(providers.base.tdcj, "query", fail)
     monkeypatch.setattr(providers.base.fbop, "query", empty)
 
     # pylint: disable-next=no-value-for-parameter
     query = providers.query_by_name("maria", "garcia", timeout=1)
-    _, errors = asyncio.run(query)
-    assert [error.jurisdiction for error in errors] == ["Texas"]
+    results = asyncio.run(query)
+    assert [error.jurisdiction for error in results.errors] == ["Texas"]
+    assert results.incomplete == []
+
+
+def test_capped_answers_are_reported_apart_from_errors(monkeypatch):
+    """A capped answer is kept and its jurisdiction listed, not made an error."""
+
+    async def capped(**kwargs):
+        return providers.Answer([_result(jurisdiction="Federal")], complete=False)
+
+    async def empty(**kwargs):
+        return providers.Answer([])
+
+    monkeypatch.setattr(providers.base.tdcj, "query", empty)
+    monkeypatch.setattr(providers.base.fbop, "query", capped)
+
+    # pylint: disable-next=no-value-for-parameter
+    query = providers.query_by_name("maria", "garcia", timeout=1)
+    results = asyncio.run(query)
+    assert [inmate.jurisdiction for inmate in results.inmates] == ["Federal"]
+    assert results.errors == []
+    assert results.incomplete == ["Federal"]
 
 
 @pytest.mark.parametrize("query", ["garcia", "   "])

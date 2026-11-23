@@ -350,7 +350,7 @@ def by_id(monkeypatch):
 
     async def query(id_, jurisdictions=None, timeout=None):
         query.calls.append((id_, list(jurisdictions or [])))
-        return query.responses, query.errors
+        return providers.Results(query.responses, query.errors, [])
 
     query.calls, query.responses, query.errors = [], [], []
     monkeypatch.setattr(providers, "query_by_inmate_id", query)

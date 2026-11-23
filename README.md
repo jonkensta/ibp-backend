@@ -84,8 +84,9 @@ A name search sets aside matches that are stale: data older than
 `[search] stale_after_days` (30 days), or never fetched, for an inmate whose
 provider answered just now without returning them, most likely because they
 were released. Those come back as `stale_inmates`, not in `inmates`. If a
-provider failed, none of its jurisdiction's matches are stale. An ID search
-never sets its match aside.
+provider failed, or capped its answer (FBOP sends at most 100 records), none
+of its jurisdiction's matches are stale. An ID search never sets its match
+aside.
 
 ## Request addresses
 

@@ -7,11 +7,15 @@ import re
 import typing
 
 from .misc import run_curl_exec
-from .types import QueryResult
+from .types import Answer, QueryResult
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
 URL = "https://www.bop.gov/PublicInfo/execute/inmateloc"
+
+# FBOP answers a search with at most this many records (released and current,
+# unsorted, with no total and no way to page), so a full answer may be cut off.
+MAX_RECORDS = 100
 
 TEXAS_UNITS = {
     "BAS",
@@ -86,18 +90,24 @@ async def query(
     first_name: str = "",
     inmate_id: str = "",
     timeout: typing.Optional[float] = None,
-) -> list[QueryResult]:
-    """Private helper for querying FBOP."""
+) -> Answer:
+    """Private helper for querying FBOP.
+
+    The answer is incomplete when FBOP sent :data:`MAX_RECORDS` records or
+    more, counted before the Texas and release filters below.
+    """
 
     if not inmate_id and not (first_name and last_name):
-        return []
+        return Answer([])
 
     data = await _curl_search_url(last_name, first_name, inmate_id, timeout)
 
     try:
         data = data["InmateLocator"]
     except KeyError:
-        return []
+        return Answer([])
+
+    complete = len(data) < MAX_RECORDS
 
     def data_to_inmate(entry):
 
@@ -166,4 +176,4 @@ async def query(
 
     inmates = filter(has_not_been_released, inmates)
 
-    return list(inmates)
+    return Answer(list(inmates), complete=complete)

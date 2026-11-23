@@ -43,14 +43,14 @@ async def inmates_by_inmate_id(session, id_: int) -> list[str]:
     timeout = config.getfloat("providers", "timeout")
 
     # pylint: disable=no-value-for-parameter
-    responses, errors = await providers.query_by_inmate_id(id_, timeout=timeout)
+    results = await providers.query_by_inmate_id(id_, timeout=timeout)
 
     async with session.begin_nested():
-        for response in responses:
+        for response in results.inmates:
             inmate = await _build_inmate_from_response(session, response)
             await session.merge(inmate)
 
-    return errors
+    return results.errors
 
 
 async def refresh_inmate(
@@ -66,7 +66,7 @@ async def refresh_inmate(
     timeout = config.getfloat("providers", "timeout")
 
     # pylint: disable=no-value-for-parameter
-    responses, errors = await providers.query_by_inmate_id(
+    responses, errors, _ = await providers.query_by_inmate_id(
         id_, jurisdictions=[jurisdiction], timeout=timeout
     )
 
@@ -85,18 +85,22 @@ async def refresh_inmate(
     return match, errors
 
 
-async def inmates_by_name(session, first_name: str, last_name: str):
-    """Upsert from inmate providers by name."""
+async def inmates_by_name(
+    session, first_name: str, last_name: str
+) -> providers.Results:
+    """Upsert from inmate providers by name.
+
+    Returns the providers' results, whose ``errors`` and ``incomplete`` say
+    which jurisdictions failed or capped their answer.
+    """
     timeout = config.getfloat("providers", "timeout")
 
     # pylint: disable=no-value-for-parameter
-    responses, errors = await providers.query_by_name(
-        first_name, last_name, timeout=timeout
-    )
+    results = await providers.query_by_name(first_name, last_name, timeout=timeout)
 
     async with session.begin_nested():
-        for response in responses:
+        for response in results.inmates:
             inmate = await _build_inmate_from_response(session, response)
             await session.merge(inmate)
 
-    return errors
+    return results

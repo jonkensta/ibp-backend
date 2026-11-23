@@ -23,22 +23,29 @@ RESULTS_PAGE = """<html><body><table class="tdcj_table">
 
 
 def run_query(monkeypatch, page: str):
+    """Run an ID query against a faked TDCJ results ``page``."""
+
     async def fake_curl(*_args, **_kwargs):
         return page.encode()
 
     monkeypatch.setattr(tdcj, "_curl_search_url", fake_curl)
-    return asyncio.run(tdcj.query(inmate_id="00012345"))
+    answer = asyncio.run(tdcj.query(inmate_id="00012345"))
+    assert answer.complete
+    return answer.inmates
 
 
 def test_no_results_page_is_an_empty_result(monkeypatch):
+    """TDCJ's "no inmates found" page means nobody matched."""
     assert run_query(monkeypatch, NO_RESULTS_PAGE) == []
 
 
 def test_unrecognized_page_is_an_error(monkeypatch):
+    """A page with neither results nor "no inmates found" is an error."""
     with pytest.raises(ProviderError):
         run_query(monkeypatch, MAINTENANCE_PAGE)
 
 
 def test_results_page_is_parsed(monkeypatch):
+    """Each results row becomes an inmate."""
     [inmate] = run_query(monkeypatch, RESULTS_PAGE)
     assert (inmate.id, inmate.unit) == (12345, "Gamma")
