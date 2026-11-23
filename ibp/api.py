@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from . import db, metrics, models, schemas, warnings
+from . import clock, db, metrics, models, schemas, warnings
 from .addresses import (
     address_request,
     load_shipping_settings,
@@ -428,6 +428,12 @@ async def update_shipping_settings(
 
     await session.refresh(row)
     return shipping_settings_to_schema(row)
+
+
+@app.get("/server-config", response_model=schemas.ServerConfig)
+async def get_server_config():
+    """Get the read-only settings from the server's config file."""
+    return schemas.ServerConfig(timezone=clock.TIMEZONE.key)
 
 
 def inmate_view_statement(jurisdiction: schemas.JurisdictionEnum, inmate_id: int):

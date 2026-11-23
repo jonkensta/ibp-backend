@@ -44,6 +44,11 @@ Values may use `${VAR}` (required environment variable) or
 `${VAR:-default}`; for example the database URI is
 `${DATABASE_URL:-sqlite+aiosqlite:///data.db}`.
 
+`[server] timezone` (an IANA name, default `America/Chicago`) decides what
+"today" is, e.g. for the future-postmark warning; startup fails on an unknown
+name. It does not depend on the container's `TZ`. `GET /server-config` reports
+it read-only (`{"timezone": "America/Chicago"}`) for the frontend's calendar.
+
 The `[books]` section configures the ISBN lookup (`GET /books/{isbn}`): it
 queries ISBNdb, Open Library, Google Books and the Library of Congress at
 once, has Claude merge their answers into one title and author, and caches

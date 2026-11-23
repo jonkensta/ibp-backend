@@ -412,6 +412,12 @@ class ShippingSettings(BaseModel):
     unit_recipient_name: RequiredText
 
 
+class ServerConfig(BaseModel):
+    """Read-only settings from the config file: ``timezone`` is an IANA name."""
+
+    timezone: str
+
+
 class Book(BaseModel):
     """Title and author for an ISBN, from the lookup cache or the providers.
 
