@@ -211,7 +211,13 @@ def test_bootstrap_adopts_pre_settings_create_all_schema(tmp_path, monkeypatch):
     models.Base.metadata.create_all(engine, tables=tables)
     with engine.begin() as connection:
         # Added after this schema's era.
-        for column in ["inmates.next_request_index", "requests.contents_revision"]:
+        for column in [
+            "inmates.next_request_index",
+            "requests.contents_revision",
+            "inmates.pronouns",
+            "inmates.pronouns_set_by",
+            "inmates.pronouns_set_at",
+        ]:
             table, name = column.split(".")
             connection.execute(
                 sqlalchemy.text(f"ALTER TABLE {table} DROP COLUMN {name}")  # nosec

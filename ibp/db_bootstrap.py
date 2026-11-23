@@ -46,6 +46,8 @@ PRE_PACKAGE_ITEMS_REVISION = "e5d2b8f4c7a1"
 PRE_UPCS_REVISION = "f7a3c9d1b2e6"
 # Last revision before the confirmation_number columns were added.
 PRE_CONFIRMATION_NUMBER_REVISION = "a9d4e2c6b8f1"
+# Last revision before the inmates.pronouns columns were added.
+PRE_PRONOUNS_REVISION = "b8e1f4a2c9d7"
 
 _SYNC_SCHEME_MAPPING = {
     "postgresql+asyncpg": "postgresql",
@@ -122,13 +124,23 @@ def bootstrap() -> None:
         logger.info("Empty database detected; running alembic upgrade to head.")
         command.upgrade(config, "head")
     elif "alembic_version" not in tables:
-        if "registrations.confirmation_number" in columns:
+        if "inmates.pronouns" in columns:
             # Schema was created by Base.metadata.create_all from the current
             # models; adopt it as-is.
             logger.info(
                 "Existing schema without alembic_version detected; stamping head."
             )
             command.stamp(config, "head")
+        elif "registrations.confirmation_number" in columns:
+            # Schema was created by create_all from pre-pronouns models; adopt
+            # it there and replay the later migrations.
+            logger.info(
+                "Existing pre-pronouns schema without alembic_version detected; "
+                "stamping %s and upgrading to head.",
+                PRE_PRONOUNS_REVISION,
+            )
+            command.stamp(config, PRE_PRONOUNS_REVISION)
+            command.upgrade(config, "head")
         elif "upcs" in tables:
             # Schema was created by create_all from pre-confirmation_number
             # models; adopt it there and replay the later migrations.

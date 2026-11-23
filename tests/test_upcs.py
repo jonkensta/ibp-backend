@@ -292,6 +292,10 @@ def test_bootstrap_adopts_pre_upcs_create_all_schema(tmp_path, monkeypatch):
                     f"ALTER TABLE {table} DROP COLUMN confirmation_number"
                 )  # nosec
             )
+        for column in ["pronouns", "pronouns_set_by", "pronouns_set_at"]:
+            connection.execute(
+                sqlalchemy.text(f"ALTER TABLE inmates DROP COLUMN {column}")  # nosec
+            )
     engine.dispose()
 
     monkeypatch.setattr(db_bootstrap, "get_sync_database_url", lambda: url)
