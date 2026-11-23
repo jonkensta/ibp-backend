@@ -77,14 +77,19 @@ async def get_book(isbn: str, session: AsyncSession = Depends(get_session)):
     return await book_for_isbn(session, normalized)
 
 
-def check_upc_code(code: str) -> None:
-    """422 unless ``code`` is a UPC-A with an optional 2- or 5-digit add-on."""
+def check_upc_code(code: str) -> str:
+    """``code`` normalized by ``upcs.normalize_code``, or a 422.
+
+    A valid code is a UPC-A with an optional 2- or 5-digit add-on.
+    """
+    code = upcs.normalize_code(code)
     if not upcs.valid_code(code):
         raise HTTPException(
             status_code=422,
             detail="Not a valid UPC (12 digits, plus an optional 2- or 5-digit "
             "add-on).",
         )
+    return code
 
 
 def no_isbn() -> JSONResponse:
@@ -157,7 +162,7 @@ async def get_book_by_upc(code: str, session: AsyncSession = Depends(get_session
     ISBN are misses left by the removed lookup services) or ``no_book`` (the
     code maps to ``isbn``, which no book provider knows).
     """
-    check_upc_code(code)
+    code = check_upc_code(code)
     row = await read_upc(session, code)
     if row is None or row.isbn is None:
         return no_isbn()
@@ -183,7 +188,7 @@ async def put_book_upc(
     would give them all one ISBN. A code already mapped to a different ISBN
     is a 409 and keeps its mapping.
     """
-    check_upc_code(code)
+    code = check_upc_code(code)
     if not upcs.has_add_on(code):
         raise HTTPException(
             status_code=422,

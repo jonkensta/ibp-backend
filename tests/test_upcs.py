@@ -44,7 +44,7 @@ def test_upc_check_digit():
         (UPC + "1", False),  # 13 digits: not a UPC length
         (UPC + "123", False),
         (UPC[:11], False),
-        ("0" + UPC, False),  # leading EAN 0 is stripped by the extension
+        ("0" + UPC, False),  # leading EAN 0: see normalize_code
         (UPC[:6] + "a" + UPC[7:], False),
         ("", False),
     ],
@@ -99,7 +99,24 @@ def get_row(api_db, code):
         return None if row is None else (row.isbn, row.source)
 
 
-@pytest.mark.parametrize("code", [BAD_CHECK, "0" + UPC, UPC + "1", "abc"])
+@pytest.mark.parametrize(
+    ("code", "normalized"),
+    [
+        ("0" + UPC, UPC),  # the UPC-A as EAN-13
+        ("0" + UPC + "12", UPC + "12"),
+        ("0" + UPC_ADD_ON, UPC_ADD_ON),
+        (UPC, UPC),
+        (UPC_ADD_ON, UPC_ADD_ON),
+        ("0" + BAD_CHECK, "0" + BAD_CHECK),  # not a valid code without it either
+        ("00" + UPC, "00" + UPC),  # only one 0 is dropped
+    ],
+)
+def test_normalize_code(code, normalized):
+    """A leading 0 is dropped only when that leaves a valid code."""
+    assert upcs.normalize_code(code) == normalized
+
+
+@pytest.mark.parametrize("code", [BAD_CHECK, "00" + UPC, UPC + "1", "abc"])
 def test_get_rejects_invalid_code(client, code):
     """A bad code is a 422."""
     assert client.get(f"/books/upc/{code}").status_code == 422
@@ -141,6 +158,17 @@ def test_get_answers_from_map(client, api_db, monkeypatch):
     }
     assert client.get(f"/books/upc/{UPC_ADD_ON}").json()["isbn"] == CRIME
     assert book_calls == [CRIME]
+
+
+def test_leading_zero_is_dropped(client, api_db, monkeypatch):
+    """A scanner's EAN-13 form (a leading 0) reads as the UPC, in GET and PUT."""
+    stub_books(monkeypatch)
+    response = client.put(f"/books/upc/0{UPC_ADD_ON}", json={"isbn": CRIME})
+    assert response.status_code == 204
+    assert get_row(api_db, UPC_ADD_ON) == (CRIME, "volunteer")
+    assert get_row(api_db, "0" + UPC_ADD_ON) is None
+    assert client.get(f"/books/upc/0{UPC_ADD_ON}").json()["isbn"] == CRIME
+    assert client.put(f"/books/upc/0{UPC}", json={"isbn": CRIME}).status_code == 422
 
 
 def test_get_needs_exact_code(client, api_db, monkeypatch):

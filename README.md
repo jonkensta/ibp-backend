@@ -58,7 +58,9 @@ Some mass-market paperbacks carry a retail UPC-A barcode instead of the ISBN
 one; `GET /books/upc/{code}` handles those from the `upcs` table, a local
 UPC -> ISBN map that volunteers fill (`ibp/upcs.py`; no outside service is
 asked). `code` is the 12-digit UPC plus any 2- or 5-digit add-on (12, 14 or
-17 digits, UPC-A check digit on the first 12; anything else is a 422). The
+17 digits, UPC-A check digit on the first 12; anything else is a 422), with
+or without the leading 0 some scanners send (the UPC as an EAN-13), which is
+dropped (`upcs.normalize_code`). The
 12 digits identify only the publisher and price point, shared by many
 titles, and the add-on tells them apart, so a code is answered only by an
 exact match on the full code. The answer is the ISBN lookup above plus `isbn`

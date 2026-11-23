@@ -30,6 +30,17 @@ def valid_code(code: str) -> bool:
     )
 
 
+def normalize_code(code: str) -> str:
+    """``code`` without the leading 0 some scanners send (the UPC-A as EAN-13).
+
+    The 0 is dropped only when what's left is a valid code; the lengths
+    never overlap (13, 15 or 18 digits with it, 12, 14 or 17 without).
+    """
+    if code.startswith("0") and valid_code(code[1:]):
+        return code[1:]
+    return code
+
+
 def has_add_on(code: str) -> bool:
     """Whether a valid code carries an add-on after the 12-digit UPC."""
     return len(code) > 12
