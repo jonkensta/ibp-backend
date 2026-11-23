@@ -1,6 +1,6 @@
 """Package items: CRUD, revisions, registration and the registration queue."""
 
-# pylint: disable=redefined-outer-name,unused-argument,too-many-positional-arguments
+# pylint: disable=redefined-outer-name,unused-argument,too-many-arguments,too-many-positional-arguments
 
 import datetime
 
