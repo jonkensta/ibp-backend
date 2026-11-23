@@ -48,6 +48,8 @@ def wrap_query(wrapped):
                 error_name = error.__class__.__name__
                 message = f"Query returned '{error_name}: {error}'."
                 logger.error(message)
+                # Lets a caller tell which provider failed (see api.search_inmates).
+                error.jurisdiction = jurisdiction  # type: ignore[attr-defined]
                 errors.append(error)
 
         return inmates, errors

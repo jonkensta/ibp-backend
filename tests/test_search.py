@@ -2,6 +2,7 @@
 
 # pylint: disable=redefined-outer-name,unused-argument
 
+import asyncio
 import datetime
 
 import pytest
@@ -126,7 +127,11 @@ def test_id_search_provider_error_returns_cache(client, seeded, by_id):
 
 def test_id_search_no_match(client, seeded, by_id):
     """An unknown ID yields an empty result, not an error."""
-    assert _search(client, "99999") == {"inmates": [], "errors": []}
+    assert _search(client, "99999") == {
+        "inmates": [],
+        "stale_inmates": [],
+        "errors": [],
+    }
 
 
 def test_name_search_tries_both_orderings(client, seeded, by_name):
@@ -159,6 +164,97 @@ def test_name_search_upserts_and_dedupes_errors(client, seeded, by_name):
     assert [inmate["id"] for inmate in data["inmates"]] == [55555]
     with seeded() as session:
         assert session.get(models.Inmate, ("Texas", 55555)) is not None
+
+
+OLD = NOW - datetime.timedelta(days=31)
+
+
+@pytest.fixture
+def aged(seeded):
+    """Age two cached GARCIA matches: one past the stale cutoff, one never fetched."""
+    with seeded.begin() as session:
+        session.get(models.Inmate, ("Texas", 22222)).datetime_fetched = OLD
+        session.get(models.Inmate, ("Federal", 3333333)).datetime_fetched = None
+    return seeded
+
+
+def _provider_error(jurisdiction):
+    error = providers.errors.ProviderError(f"{jurisdiction} unavailable")
+    error.jurisdiction = jurisdiction
+    return error
+
+
+def _ids(inmates):
+    return [inmate["id"] for inmate in inmates]
+
+
+def test_name_search_sets_stale_matches_aside(client, aged, by_name):
+    """Old or never-fetched matches the providers did not return are stale."""
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"]) == [11111]
+    assert _ids(data["stale_inmates"]) == [3333333, 22222]
+
+
+def test_name_search_recent_match_is_not_stale(client, seeded, by_name):
+    """A match fetched within the grace period stays in the results."""
+    with seeded.begin() as session:
+        recent = NOW - datetime.timedelta(days=29)
+        session.get(models.Inmate, ("Texas", 22222)).datetime_fetched = recent
+
+    data = _search(client, "maria garcia")
+    assert 22222 in _ids(data["inmates"])
+    assert data["stale_inmates"] == []
+
+
+def test_name_search_provider_result_refreshes_old_match(client, aged, by_name):
+    """A match the provider returns is fresh again, so it is not stale."""
+    by_name.responses = [
+        _result(id=22222, first_name="GARCIA", last_name="MARIANO", unit="Alpha")
+    ]
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"]) == [11111, 22222]
+    assert _ids(data["stale_inmates"]) == [3333333]
+
+
+def test_name_search_failed_provider_keeps_its_old_matches(client, aged, by_name):
+    """With TDCJ down its old matches show (cache); FBOP's are still stale."""
+    by_name.errors = [_provider_error("Texas")]
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"]) == [11111, 22222]
+    assert _ids(data["stale_inmates"]) == [3333333]
+
+
+def test_name_search_unattributed_error_keeps_all_matches(client, aged, by_name):
+    """An error that names no provider could be anyone's: nothing is stale."""
+    by_name.errors = ["something broke"]
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"]) == [11111, 3333333, 22222]
+    assert data["stale_inmates"] == []
+
+
+def test_id_search_returns_old_match(client, aged, by_id):
+    """An ID search returns its inmate however old the data is."""
+    data = _search(client, "22222")
+    assert _ids(data["inmates"]) == [22222]
+    assert data["stale_inmates"] == []
+
+
+def test_provider_errors_carry_their_jurisdiction(monkeypatch):
+    """The query wrapper tags each error with the provider that raised it."""
+
+    async def fail(**kwargs):
+        raise providers.errors.ProviderError("down")
+
+    async def empty(**kwargs):
+        return []
+
+    monkeypatch.setattr(providers.base.tdcj, "query", fail)
+    monkeypatch.setattr(providers.base.fbop, "query", empty)
+
+    # pylint: disable-next=no-value-for-parameter
+    query = providers.query_by_name("maria", "garcia", timeout=1)
+    _, errors = asyncio.run(query)
+    assert [error.jurisdiction for error in errors] == ["Texas"]
 
 
 @pytest.mark.parametrize("query", ["garcia", "   "])

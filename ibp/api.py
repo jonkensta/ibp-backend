@@ -18,7 +18,7 @@ from .addresses import (
     load_shipping_settings,
     shipping_settings_to_schema,
 )
-from .base import app
+from .base import app, config
 from .upsert import inmates_by_inmate_id as upsert_inmates_by_inmate_id
 from .upsert import inmates_by_name as upsert_inmates_by_name
 
@@ -93,16 +93,49 @@ def parse_name_query(query: str) -> list[tuple[str, str]]:
     return []
 
 
+def stale_inmate_clause(errors: list):
+    """SQL clause for the inmates a name search should set aside as stale.
+
+    A name search upserts everything the providers return before it reads the
+    table, so a matching row that is still old afterwards is one its provider
+    no longer lists under that name, most likely a released inmate. Such a row
+    is stale once its data is older than ``[search] stale_after_days`` (or was
+    never fetched); the grace period covers a provider that briefly omits
+    someone.
+
+    A provider that failed says nothing about its inmates, so none of that
+    jurisdiction's rows are stale: the table then serves as a cache. Each
+    error carries its provider's ``jurisdiction`` (see ``providers.base``);
+    one that does not could be any provider's, so nothing is stale.
+    """
+    failed = {getattr(error, "jurisdiction", None) for error in errors}
+    if None in failed:
+        return sqlalchemy.false()
+
+    days = config.getint("search", "stale_after_days")
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        days=days
+    )
+    clause = sqlalchemy.or_(
+        models.Inmate.datetime_fetched.is_(None),
+        models.Inmate.datetime_fetched < cutoff,
+    )
+    if failed:
+        clause = sqlalchemy.and_(clause, models.Inmate.jurisdiction.not_in(failed))
+    return clause
+
+
 async def query_inmates_by_name(
-    session: AsyncSession, candidates: list[tuple[str, str]]
+    session: AsyncSession, candidates: list[tuple[str, str]], where=None
 ):
     """Query inmates table by name.
 
     ``candidates`` holds the plausible (first, last) assignments of the
     user's query (see :func:`parse_name_query`).  A row matches if any
     assignment matches, where each non-empty component is a case-insensitive
-    prefix match.  Results are ordered with exact last-name matches first,
-    then by name, and capped at ``MAX_SEARCH_RESULTS`` rows.
+    prefix match, and ``where`` (an extra SQL clause, if given) holds.
+    Results are ordered with exact last-name matches first, then by name, and
+    capped at ``MAX_SEARCH_RESULTS`` rows.
     """
     lower = sqlalchemy.func.lower
 
@@ -128,6 +161,7 @@ async def query_inmates_by_name(
     statement = (
         select(models.Inmate)
         .where(sqlalchemy.or_(*matches))
+        .where(sqlalchemy.true() if where is None else where)
         .order_by(
             exact_last_rank,
             lower(models.Inmate.last_name),
@@ -146,10 +180,16 @@ async def search_inmates(
     session: AsyncSession = Depends(get_session),
     query: str = Query(..., description="Inmate name or ID."),
 ):
-    """Perform an inmate search by name or inmate ID."""
+    """Perform an inmate search by name or inmate ID.
+
+    A name search returns matches whose data is stale (see
+    :func:`stale_inmate_clause`) separately, as ``stale_inmates``. An ID
+    search never sets its match aside.
+    """
 
     errors = []
     inmates = []
+    stale_inmates = []
 
     try:
         inmate_id = int(query.replace("-", ""))
@@ -171,8 +211,14 @@ async def search_inmates(
         for first, last in candidates:
             errors.extend(await upsert_inmates_by_name(session, first, last))
 
-        inmates = await query_inmates_by_name(session, candidates)
-        logger.debug("name search matched %d inmate(s)", len(inmates))
+        stale = stale_inmate_clause(errors)
+        inmates = await query_inmates_by_name(session, candidates, ~stale)
+        stale_inmates = await query_inmates_by_name(session, candidates, stale)
+        logger.debug(
+            "name search matched %d inmate(s), %d more stale",
+            len(inmates),
+            len(stale_inmates),
+        )
 
     else:
         logger.debug("searching by inmate ID")
@@ -182,7 +228,9 @@ async def search_inmates(
 
     # Multiple provider passes can repeat the same error; dedupe for display.
     errors_as_strings = list(dict.fromkeys(map(str, errors)))
-    return schemas.InmateSearchResults(inmates=inmates, errors=errors_as_strings)
+    return schemas.InmateSearchResults(
+        inmates=inmates, stale_inmates=stale_inmates, errors=errors_as_strings
+    )
 
 
 async def load_request_by_legacy_id(
