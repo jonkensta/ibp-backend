@@ -232,6 +232,24 @@ def test_name_search_unattributed_error_keeps_all_matches(client, aged, by_name)
     assert data["stale_inmates"] == []
 
 
+def test_name_search_orders_same_name_by_freshness(client, seeded, by_name):
+    """With FBOP down, its old same-name match shows but below the fresh one."""
+    with seeded.begin() as session:
+        session.add(
+            models.Inmate(
+                jurisdiction="Federal",
+                id=5555555,
+                first_name="MARIA",
+                last_name="GARCIA",
+                datetime_fetched=OLD,
+            )
+        )
+    by_name.errors = [_provider_error("Federal")]
+
+    data = _search(client, "maria garcia")
+    assert _ids(data["inmates"])[:2] == [11111, 5555555]
+
+
 def test_id_search_returns_old_match(client, aged, by_id):
     """An ID search returns its inmate however old the data is."""
     data = _search(client, "22222")

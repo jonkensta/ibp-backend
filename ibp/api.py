@@ -93,6 +93,21 @@ def parse_name_query(query: str) -> list[tuple[str, str]]:
     return []
 
 
+def old_data_clause():
+    """SQL clause for inmates never fetched or not fetched in the grace period.
+
+    The grace period is ``[search] stale_after_days``.
+    """
+    days = config.getint("search", "stale_after_days")
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        days=days
+    )
+    return sqlalchemy.or_(
+        models.Inmate.datetime_fetched.is_(None),
+        models.Inmate.datetime_fetched < cutoff,
+    )
+
+
 def stale_inmate_clause(errors: list):
     """SQL clause for the inmates a name search should set aside as stale.
 
@@ -112,14 +127,7 @@ def stale_inmate_clause(errors: list):
     if None in failed:
         return sqlalchemy.false()
 
-    days = config.getint("search", "stale_after_days")
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
-        days=days
-    )
-    clause = sqlalchemy.or_(
-        models.Inmate.datetime_fetched.is_(None),
-        models.Inmate.datetime_fetched < cutoff,
-    )
+    clause = old_data_clause()
     if failed:
         clause = sqlalchemy.and_(clause, models.Inmate.jurisdiction.not_in(failed))
     return clause
@@ -135,7 +143,9 @@ async def query_inmates_by_name(
     assignment matches, where each non-empty component is a case-insensitive
     prefix match, and ``where`` (an extra SQL clause, if given) holds.
     Results are ordered with exact last-name matches first, then by name, and
-    capped at ``MAX_SEARCH_RESULTS`` rows.
+    capped at ``MAX_SEARCH_RESULTS`` rows. Among inmates with the same name,
+    recently fetched ones come first (see :func:`old_data_clause`), so old
+    records never sit above the people a provider just returned.
     """
     lower = sqlalchemy.func.lower
 
@@ -166,6 +176,7 @@ async def query_inmates_by_name(
             exact_last_rank,
             lower(models.Inmate.last_name),
             lower(models.Inmate.first_name),
+            sqlalchemy.case((old_data_clause(), 1), else_=0),
             models.Inmate.jurisdiction,
             models.Inmate.id,
         )
