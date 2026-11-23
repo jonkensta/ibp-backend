@@ -85,6 +85,14 @@ answer nothing.
 providers (TDCJ, FBOP) and saves what they return, then answers from the
 `inmates` table, so the table serves as a cache when a provider is down.
 
+Last names are compared without their spaces, so "juan de la cruz" finds a
+Texas DELACRUZ (TDCJ stores such names run together) and a federal DE LA
+CRUZ. TDCJ refuses a name with characters its search form does not take, so
+it is sent the last name without spaces and the first name's leading letters
+(it matches first names by prefix). A last name it would still refuse, such
+as one with a digit, is not sent, and that search treats TDCJ's answer as
+capped.
+
 A name search sets aside matches that are stale: an inmate the provider was
 just asked for and did not return, most likely because they were released.
 Those come back as `stale_inmates`, not in `inmates`. A match is stale only if
@@ -98,8 +106,8 @@ all of these hold:
   stale;
 - the provider's own search would have returned it for one of the query's
   (first, last) orderings. The local search matches both names by prefix, but
-  TDCJ needs the exact last name (the first name may be a prefix), and FBOP
-  needs both names exactly and finds nobody by an initial.
+  TDCJ needs the exact last name, spaces aside (the first name may be a
+  prefix), and FBOP needs both names exactly and finds nobody by an initial.
 
 Other old matches stay in `inmates`, below fresh ones with the same name. An
 ID search never sets its match aside.

@@ -33,6 +33,15 @@ NO_RESULTS_TEXT = "No Inmates were found matching the search criteria"
 PAGE_SIZE = 50
 MAX_PAGES = 10
 
+# What TDCJ's name fields accept; it answers anything else with its search
+# form and an error, and no results. Surnames written with spaces are stored
+# run together (DE LA CRUZ as DELACRUZ), so a search removes the spaces.
+SEARCHABLE_LAST_NAME = re.compile(r"[A-Za-z'-]+")
+# The first-name field takes letters only. TDCJ matches it as a prefix, so a
+# search sends the letters before any other character ("MARY ANN" as MARY),
+# which can only widen the answer.
+SEARCHABLE_FIRST_NAME = re.compile(r"[A-Za-z]*")
+
 
 def format_inmate_id(inmate_id: typing.Union[int, str]) -> str:
     """Format a TDCJ inmate ID."""
@@ -125,6 +134,12 @@ async def _later_page(
     return inmates
 
 
+def _first_letters(name: str) -> str:
+    """Return the letters ``name`` starts with (see SEARCHABLE_FIRST_NAME)."""
+    match = SEARCHABLE_FIRST_NAME.match(name.strip())
+    return match.group() if match else ""
+
+
 async def query(
     last_name: str = "",
     first_name: str = "",
@@ -137,10 +152,22 @@ async def query(
     pages concurrently; a page that fails fails the whole query. Past that
     limit, or if a full page comes with no page count, the answer is
     incomplete.
+
+    Names are made searchable first (see :data:`SEARCHABLE_LAST_NAME` and
+    :data:`SEARCHABLE_FIRST_NAME`). A name TDCJ would still refuse, such as a
+    last name with a digit, is not sent: the answer is empty and incomplete,
+    since TDCJ was not asked.
     """
 
-    if not inmate_id and not (first_name and last_name):
+    if not inmate_id and not (first_name.strip() and last_name.strip()):
         return Answer([])
+
+    if not inmate_id:
+        last_name = "".join(last_name.split())
+        first_name = _first_letters(first_name)
+        if not (first_name and SEARCHABLE_LAST_NAME.fullmatch(last_name)):
+            LOGGER.info("Not searching for a name TDCJ refuses")
+            return Answer([], complete=False)
 
     html = await _curl_search_url(last_name, first_name, inmate_id, timeout)
     soup = BeautifulSoup(html, "html.parser")
@@ -166,6 +193,23 @@ async def query(
         inmates.extend(page_inmates)
 
     return Answer(inmates, complete=page_count <= MAX_PAGES)
+
+
+def _split_display_name(display: str) -> tuple[str, str]:
+    """Return the (first, last) name of a results row's "Name" cell.
+
+    TDCJ shows names as ``LAST, FIRST [MIDDLE] [SUFFIX]``, with the whole last
+    name before the comma and any suffix (JR, III) after the first or middle
+    name. The first name is the first word after the comma. A general name
+    parser would read some first names (KING, PRINCE) as titles; it is only
+    used for a name with no comma.
+    """
+    last, comma, rest = display.partition(",")
+    if not comma:
+        name = HumanName(display)
+        return name.first, name.last
+    words = rest.split()
+    return (words[0] if words else ""), last.strip()
 
 
 def _parse_results(soup: BeautifulSoup) -> list[QueryResult]:
@@ -218,9 +262,7 @@ def _parse_results(soup: BeautifulSoup) -> list[QueryResult]:
 
         inmate_id = parse_inmate_id(entry["TDCJ Number"])
 
-        name = HumanName(entry.get("Name", ""))
-        first: str = name.first
-        last: str = name.last
+        first, last = _split_display_name(entry.get("Name", ""))
 
         url = urljoin(BASE_URL, str(href)) if href else None
 

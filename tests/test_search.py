@@ -312,6 +312,118 @@ def test_name_search_orders_same_name_by_freshness(client, seeded, by_name):
     assert _ids(data["inmates"])[:2] == [11111, 5555555]
 
 
+TDCJ_PAGE = """<html><body><table class="tdcj_table">
+<thead><tr><th>Name</th><th>TDCJ Number</th><th>Race</th><th>Gender</th>
+<th>Projected Release Date</th><th>Unit of Assignment</th></tr></thead>
+<tbody><tr><td><a href="/InmateSearch/viewDetail.action?sid=1">{name}</a></td>
+<td>00066666</td><td>W</td><td>M</td><td>2030-01-01</td><td>Alpha</td></tr></tbody>
+</table></body></html>"""
+
+
+@pytest.fixture
+def tdcj_lists(api_db, monkeypatch):
+    """Fake TDCJ's results page for any name search; FBOP finds nobody.
+
+    The real provider wrapper and TDCJ page parser run. Returns a setter for
+    the one row's displayed name, whose ``.sent`` lists the (last, first)
+    names sent to TDCJ.
+    """
+    shown = {}
+
+    async def fake_curl(last_name, first_name, *_args, **_kwargs):
+        show.sent.append((last_name, first_name))
+        return TDCJ_PAGE.format(name=shown["name"]).encode()
+
+    async def nobody(**_kwargs):
+        return providers.Answer([])
+
+    monkeypatch.setattr(providers.base.tdcj, "_curl_search_url", fake_curl)
+    monkeypatch.setattr(providers.base.fbop, "query", nobody)
+    monkeypatch.setattr(providers, "query_by_name", providers.base.query_by_name)
+
+    def show(name):
+        shown.update(name=name)
+
+    show.sent = []
+    return show
+
+
+@pytest.mark.parametrize(
+    "query, display",
+    [
+        ("john doe", "DOE, JOHN ALLEN JR"),
+        ("king doe", "DOE, KING JAMES"),
+    ],
+)
+def test_name_search_tdcj_row_it_returns_is_not_stale(
+    client, seeded, tdcj_lists, query, display
+):
+    """An old row TDCJ returns again, however its name is shown, is fresh."""
+    first = query.split()[0].upper()
+    _add_inmate(seeded, ("Texas", 66666, first, "DOE"), OLD)
+    tdcj_lists(display)
+
+    data = _search(client, query)
+
+    assert data["errors"] == []
+    assert _ids(data["inmates"]) == [66666]
+    assert data["stale_inmates"] == []
+    with seeded() as session:
+        inmate = session.get(models.Inmate, ("Texas", 66666))
+        assert (inmate.first_name, inmate.last_name) == (first, "DOE")
+
+
+@pytest.fixture
+def spaced(seeded):
+    """Cached inmates whose last names are written with and without spaces."""
+    for row in [
+        ("Texas", 81111, "JUAN", "DELACRUZ"),
+        ("Federal", 8222222, "JUAN", "DE LA CRUZ"),
+        ("Texas", 83333, "JUAN", "DELACRUZADO"),
+    ]:
+        _add_inmate(seeded, row, NOW)
+    return seeded
+
+
+@pytest.mark.parametrize(
+    "query", ["juan de la cruz", "de la cruz, juan", "juan delacruz"]
+)
+def test_name_search_ignores_spaces_in_last_names(client, spaced, by_name, query):
+    """A last name matches with or without its spaces, exact matches first."""
+    data = _search(client, query)
+    assert _ids(data["inmates"]) == [8222222, 81111, 83333]
+
+
+def test_name_search_last_name_wildcards_are_literal(client, spaced, by_name):
+    """LIKE wildcards in a last name match only themselves."""
+    assert _search(client, "juan dela_ruz")["inmates"] == []
+    assert _search(client, "juan de%")["inmates"] == []
+
+
+def test_name_search_spaced_last_name_stale(client, spaced, by_name):
+    """TDCJ would return its DELACRUZ row for "de la cruz", so an old one is
+    stale; FBOP is sent the spaces, so only its "DE LA CRUZ" row would be."""
+    _add_inmate(spaced, ("Federal", 8444444, "JUAN", "DELACRUZ"), OLD)
+    with spaced.begin() as session:
+        session.get(models.Inmate, ("Texas", 81111)).datetime_fetched = OLD
+        session.get(models.Inmate, ("Federal", 8222222)).datetime_fetched = OLD
+        session.get(models.Inmate, ("Texas", 83333)).datetime_fetched = OLD
+
+    data = _search(client, "juan de la cruz")
+
+    assert _ids(data["inmates"]) == [8444444, 83333]
+    assert _ids(data["stale_inmates"]) == [8222222, 81111]
+
+
+def test_name_search_spaced_last_name_reaches_tdcj(client, seeded, tdcj_lists):
+    """A last name with spaces is searched on TDCJ, not refused as an error."""
+    tdcj_lists("DELACRUZ, JUAN III")
+    data = _search(client, "juan de la cruz")
+    assert tdcj_lists.sent == [("delacruz", "juan"), ("juan", "de")]
+    assert data["errors"] == []
+    assert _ids(data["inmates"]) == [66666]
+
+
 def test_id_search_returns_old_match(client, aged, by_id):
     """An ID search returns its inmate however old the data is."""
     data = _search(client, "22222")
@@ -356,6 +468,49 @@ def test_capped_answers_are_reported_apart_from_errors(monkeypatch):
     assert [inmate.jurisdiction for inmate in results.inmates] == ["Federal"]
     assert results.errors == []
     assert results.incomplete == ["Federal"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["king doe", "doe king", "doe, king", "king james doe", "doe, king james jr"],
+)
+def test_name_search_reads_titles_as_names(client, seeded, by_name, query):
+    """A first name nameparser knows as a title is still a first name."""
+    _search(client, query)
+    assert sorted(by_name.calls) == [("doe", "king"), ("king", "doe")]
+
+
+@pytest.mark.parametrize(
+    "query, first_orderings",
+    [
+        ("juan de la cruz", [("juan", "de la cruz"), ("de la cruz", "juan")]),
+        ("de la cruz, juan", [("juan", "de la cruz"), ("de la cruz", "juan")]),
+        ("john van horn", [("john", "van horn"), ("van horn", "john")]),
+        # Last name first, no comma: also read as "van horn, john".
+        ("van horn john", [("john", "van horn"), ("van horn", "john")]),
+        ("de la cruz juan", [("juan", "de la cruz"), ("de la cruz", "juan")]),
+        ("mary st. john", [("mary", "st john"), ("st john", "mary")]),
+    ],
+)
+def test_name_search_multi_word_last_names(
+    client, seeded, by_name, query, first_orderings
+):
+    """A last name of several words is kept whole, whichever end it is at."""
+    _search(client, query)
+    assert by_name.calls[:2] == first_orderings
+
+
+def test_name_search_particle_first_keeps_plain_reading(client, seeded, by_name):
+    """A query that starts with a particle may still be first name first."""
+    _search(client, "al james smith")
+    assert ("al", "smith") in by_name.calls
+
+
+def test_name_search_ignores_periods(client, seeded, by_name):
+    """An initial typed with a period searches as the initial."""
+    data = _search(client, "j. smith")
+    assert by_name.calls == [("j", "smith"), ("smith", "j")]
+    assert _ids(data["inmates"]) == [44444]
 
 
 @pytest.mark.parametrize("query", ["garcia", "   "])

@@ -71,6 +71,29 @@ def test_race_and_sex_codes_become_words(monkeypatch, race, gender, expected):
     assert (inmate.race, inmate.sex) == expected
 
 
+@pytest.mark.parametrize(
+    "display, first_last",
+    [
+        ("DOE, JANE", ("JANE", "DOE")),
+        ("DOE, JOHN ALLEN JR", ("JOHN", "DOE")),
+        ("DOE, JOHN JR", ("JOHN", "DOE")),
+        # First names a general name parser reads as titles.
+        ("DOE, KING JAMES", ("KING", "DOE")),
+        ("DOE, PRINCE", ("PRINCE", "DOE")),
+        ("DELACRUZ, JUAN III", ("JUAN", "DELACRUZ")),
+        ("O'NEAL, PAT", ("PAT", "O'NEAL")),
+        ("DOE-ROE, JANE ANN", ("JANE", "DOE-ROE")),
+        # No comma: parsed as a free-form name.
+        ("JANE DOE", ("JANE", "DOE")),
+    ],
+)
+def test_results_name_is_split_at_the_comma(monkeypatch, display, first_last):
+    """The last name is all before the comma; the first, the next word."""
+    page = RESULTS_PAGE.replace("DOE, JANE", display)
+    [inmate] = run_query(monkeypatch, page)
+    assert (inmate.first_name, inmate.last_name) == first_last
+
+
 LAST_SEARCH = '{"tdcj":"","lastName":"Doe","firstName":"Jane","race":"ALL"}'
 
 
@@ -196,3 +219,56 @@ def test_later_page_without_its_results_fails_the_query(monkeypatch, bad_page):
             results_page(1, tdcj.PAGE_SIZE, 2),
             lambda number, page_count: bad_page,
         )
+
+
+def run_sent_query(monkeypatch, first: str, last: str):
+    """Run a name query; return the answer and the (last, first) sent to TDCJ."""
+    sent = []
+
+    async def fake_search(last_name, first_name, *_args, **_kwargs):
+        sent.append((last_name, first_name))
+        return NO_RESULTS_PAGE.encode()
+
+    monkeypatch.setattr(tdcj, "_curl_search_url", fake_search)
+    answer = asyncio.run(tdcj.query(first_name=first, last_name=last))
+    return answer, sent
+
+
+@pytest.mark.parametrize(
+    "first, last, sent",
+    [
+        ("jane", "doe", ("doe", "jane")),
+        # TDCJ stores these surnames run together.
+        ("juan", "de la cruz", ("delacruz", "juan")),
+        ("juan", " de  la\tcruz ", ("delacruz", "juan")),
+        ("pat", "o'neal", ("o'neal", "pat")),
+        ("jane", "doe-roe", ("doe-roe", "jane")),
+        # The first-name field takes letters only and matches a prefix.
+        ("mary ann", "doe", ("doe", "mary")),
+        ("de la cruz", "juan", ("juan", "de")),
+        ("j.", "doe", ("doe", "j")),
+    ],
+)
+def test_names_are_sent_as_tdcj_accepts_them(monkeypatch, first, last, sent):
+    """Spaces leave the last name; the first name is cut to its letters."""
+    answer, calls = run_sent_query(monkeypatch, first, last)
+    assert calls == [sent]
+    assert answer.complete
+
+
+@pytest.mark.parametrize(
+    "first, last", [("jane", "doe 2"), ("jane", "st.john"), ("'jo", "doe")]
+)
+def test_name_tdcj_refuses_is_not_sent(monkeypatch, first, last):
+    """A name TDCJ would refuse is not sent; nobody is found, incompletely."""
+    answer, calls = run_sent_query(monkeypatch, first, last)
+    assert not calls
+    assert (answer.inmates, answer.complete) == ([], False)
+
+
+@pytest.mark.parametrize("first, last", [("jane", "  "), ("", "doe")])
+def test_missing_name_part_is_not_sent(monkeypatch, first, last):
+    """A query without both names finds nobody without asking TDCJ."""
+    answer, calls = run_sent_query(monkeypatch, first, last)
+    assert not calls
+    assert (answer.inmates, answer.complete) == ([], True)
