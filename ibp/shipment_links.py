@@ -18,10 +18,13 @@ each named by the link's ``basis``:
   date that USPS has scanned, or that was bought less than ``FRESH_BOX``
   (7 days) ago and so may not have its first scan yet. A Filled request
   with no label of its own (no ``reference`` or ``inmate_number`` link)
-  links to every box of the first session to its inmate's unit (as it is
-  now) at least ``BULK_LEAD`` (a day) after the request's processed date,
+  links to every box of the first session to its unit at least
+  ``BULK_LEAD`` (a day) after the request's processed date,
   so a request processed on a session's date waits for the next one, if
-  that session is within ``BULK_LINK_WINDOW`` of it. The unit's shipping
+  that session is within ``BULK_LINK_WINDOW`` of it. A request's unit is
+  the one it recorded when it was filled (``requests.unit_name``), so a
+  transfer afterwards doesn't move it; a request filled before that was
+  recorded (NULL) uses its inmate's unit as it is now. The unit's shipping
   method is not consulted: boxes do go to units marked Individual, and a
   package with its own label is already linked to it.
 
@@ -172,8 +175,11 @@ def _bulk_sessions(
 def _unit_requests(
     session: Session, unit: tuple[str, str], first: datetime.date, last: datetime.date
 ) -> list[sa.Row]:
-    """Filled requests of a unit's inmates that a session from ``first`` to
-    ``last`` could link: (jurisdiction, inmate id, index, processed date)."""
+    """Filled requests to a unit that a session from ``first`` to ``last``
+    could link: (jurisdiction, inmate id, index, processed date).
+
+    A request's unit is the one it recorded, else its inmate's current one.
+    """
     jurisdiction, unit_name = unit
     return list(
         session.execute(
@@ -192,7 +198,8 @@ def _unit_requests(
             )
             .where(
                 models.Inmate.jurisdiction == jurisdiction,
-                models.Inmate.unit_name == unit_name,
+                sa.func.coalesce(models.Request.unit_name, models.Inmate.unit_name)
+                == unit_name,
                 models.Request.action == "Filled",
                 models.Request.date_processed >= first - BULK_LINK_WINDOW,
                 models.Request.date_processed <= last - BULK_LEAD,
