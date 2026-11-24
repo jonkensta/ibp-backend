@@ -4,6 +4,7 @@
 
 import datetime
 import email.message
+import http.client
 import io
 import json
 import logging
@@ -634,6 +635,76 @@ def test_job_engine_hides_parameters(monkeypatch, tmp_path):
         assert engine.hide_parameters
     finally:
         engine.dispose()
+
+
+class BrokenBody(io.BytesIO):
+    """A response body whose reading fails with ``error``."""
+
+    def __init__(self, error: Exception):
+        super().__init__()
+        self.error = error
+
+    def read(self, *args):  # pylint: disable=unused-argument
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        lambda: BrokenBody(TimeoutError("timed out")),
+        lambda: BrokenBody(http.client.IncompleteRead(b'{"shipments": [', 500)),
+        lambda: BrokenBody(ConnectionResetError(104, "reset")),
+        lambda: io.BytesIO(b'{"shipments": ['),
+        lambda: io.BytesIO(b"<html>maintenance</html>"),
+        lambda: io.BytesIO(b"\xff\xfe"),
+    ],
+)
+def test_unreadable_response_is_retried_then_an_api_error(answer):
+    """A timeout, truncated body or invalid JSON is retried, then raises
+    ApiError."""
+    calls = []
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        calls.append(request)
+        return answer()
+
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError, match="reading response"):
+        client.get("shipments")
+    assert len(calls) == shipment_sync.RETRIES
+
+
+def test_unreadable_response_succeeds_on_retry():
+    """One bad read then a good answer gives the good answer."""
+    answers = [BrokenBody(TimeoutError("timed out")), io.BytesIO(b'{"ok": true}')]
+    client = EasyPost(
+        KEY, urlopen=lambda request, timeout: answers.pop(0), sleep=lambda _: None
+    )
+    assert client.get("shipments") == {"ok": True}
+
+
+def test_unreadable_tracker_is_a_poll_failure_and_the_run_goes_on(sessions):
+    """A tracker whose answer can't be read is counted as a failed poll; the
+    other trackers are still polled and the links still rebuilt."""
+    with sessions() as session:
+        add_inmate(session, 40000001, "ALPHA")
+        add_request(session, 40000001, 0, "2026-01-20")
+        bad = old_label(session, 50, [(48, "in_transit")])
+        good = old_label(session, 49, [(48, "in_transit")], inmate_number="40000001")
+        session.commit()
+        bad_path, good_tracker = f"trackers/{bad.tracker_id}", good.tracker_id
+    fake = FakeEasyPost(
+        trackers={good_tracker: {"id": good_tracker, "status": "delivered"}}
+    )
+
+    def urlopen(request, timeout):
+        if request.full_url.endswith(bad_path):
+            return io.BytesIO(b'{"id": "trk_')
+        return fake(request, timeout)
+
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    summary = shipment_sync.run(client, sessions, now=NOW)
+    assert (summary.polled, summary.poll_failures, summary.links) == (1, 1, 1)
 
 
 def test_client_paces_requests():

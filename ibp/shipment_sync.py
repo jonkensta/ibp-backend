@@ -430,7 +430,9 @@ Opener = Callable[..., Any]
 
 
 class EasyPost:  # pylint: disable=too-few-public-methods
-    """A GET-only EasyPost client, paced, retrying 429 and 5xx with backoff.
+    """A GET-only EasyPost client, paced, retrying 429, 5xx, network errors
+    and unreadable responses with backoff; a request that still fails raises
+    ``ApiError``.
 
     ``urlopen`` and ``sleep`` are for tests.
     """
@@ -481,6 +483,13 @@ class EasyPost:  # pylint: disable=too-few-public-methods
                 if attempt == RETRIES - 1:
                     raise ApiError(f"GET {path}: {error.reason}") from error
                 logger.warning("GET %s: %s, retrying", path, error.reason)
+                self._sleep(2.0**attempt)
+            except (OSError, http.client.HTTPException, ValueError) as error:
+                # A read timeout, a dropped or truncated body, or bad JSON.
+                failure = type(error).__name__
+                if attempt == RETRIES - 1:
+                    raise ApiError(f"GET {path}: {failure} reading response") from error
+                logger.warning("GET %s: %s reading response, retrying", path, failure)
                 self._sleep(2.0**attempt)
         raise ApiError(f"GET {path}: giving up after retries")
 
