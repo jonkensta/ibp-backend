@@ -429,22 +429,38 @@ def is_finished(shipment: models.Shipment, now: datetime.datetime) -> bool:
 Opener = Callable[..., Any]
 
 
+class RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Fails every redirect, as an ``HTTPError`` with its 3xx status:
+    following one would send the key's ``Authorization`` header on."""
+
+    def redirect_request(
+        self, req, fp, code, msg, headers, newurl
+    ):  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+def build_opener() -> Opener:
+    """``urlopen`` for EasyPost: the standard one, but never redirected."""
+    return urllib.request.build_opener(RefuseRedirects).open
+
+
 class EasyPost:  # pylint: disable=too-few-public-methods
     """A GET-only EasyPost client, paced, retrying 429, 5xx, network errors
     and unreadable responses with backoff; a request that still fails raises
     ``ApiError``.
 
-    ``urlopen`` and ``sleep`` are for tests.
+    A redirect is not followed: it fails as ``HTTP 3xx``. ``urlopen``
+    (``build_opener()`` by default) and ``sleep`` are for tests.
     """
 
     def __init__(
         self,
         key: str,
-        urlopen: Opener = urllib.request.urlopen,
+        urlopen: Optional[Opener] = None,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self._auth = base64.b64encode(f"{key}:".encode()).decode()
-        self._urlopen = urlopen
+        self._urlopen = urlopen if urlopen is not None else build_opener()
         self._sleep = sleep
         self.requests = 0
 
