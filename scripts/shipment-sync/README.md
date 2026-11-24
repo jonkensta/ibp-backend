@@ -17,8 +17,13 @@ never buys, refunds or changes anything at EasyPost.
   that is older, so even a longer outage leaves no gap.
 
 Each run logs one line of counts, e.g.
-`shipment sync: 412 labels seen, 11 new, 37 updated, 0 fetched by id, 160 events added, 388 trackers polled (0 failed), 1420 links built`.
-No names or addresses are logged or stored.
+`shipment sync: 412 labels seen, 11 new, 37 updated, 0 fetched by id, 0 skipped, 160 events added, 388 trackers polled (0 failed), 1420 links built`.
+No names or addresses are logged or stored. A listed label not of
+EasyPost's shape (an id other than `shp_` and hex digits, a tracker id
+other than `trk_` and hex digits, a tracking code other than 8 to 40
+letters and digits, or a field of the wrong type) is not stored and is
+counted as "skipped"; a tracker of the wrong shape is a failed poll. Only
+checked ids reach a log line.
 
 Exit status: 0 ok, 1 an EasyPost or database error (or a tracker it could
 not fetch) or any other failure, 2 no usable key. Failures, retries and

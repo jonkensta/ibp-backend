@@ -49,14 +49,17 @@ from .easypost_client import (  # pylint: disable=unused-import
     EasyPost,
 )
 from .label_reading import (  # pylint: disable=unused-import
+    SHIPMENT_ID,
     EventValues,
     Label,
+    Malformed,
     Tag,
     event_key,
     inmate_number,
     normalize,
     parse_events,
     parse_reference,
+    as_text,
     read_label,
 )
 from .shipment_links import never_mailed, rebuild_links
@@ -137,6 +140,8 @@ def list_window(
 
     The end is pushed a second later so a label bought on a boundary second
     is listed by one window or both (the caller keys on the shipment id).
+    A page that is not a list, or whose last shipment has no id of
+    EasyPost's shape to page on, raises ``ApiError``.
     """
     params: dict[str, Any] = {
         "page_size": PAGE_SIZE,
@@ -149,11 +154,16 @@ def list_window(
     while True:
         data = client.get("shipments", params)
         batch = data.get("shipments") or []
+        if not isinstance(batch, list):
+            raise ApiError("GET shipments: page not of EasyPost's shape")
         if batch:
             yield batch
-        if not batch or not data.get("has_more"):
+        if not batch or data.get("has_more") is not True:
             return
-        params["before_id"] = batch[-1]["id"]
+        last = batch[-1].get("id") if isinstance(batch[-1], dict) else None
+        if not isinstance(last, str) or not SHIPMENT_ID.fullmatch(last):
+            raise ApiError("GET shipments: page not of EasyPost's shape")
+        params["before_id"] = last
 
 
 # --- storing -----------------------------------------------------------------
@@ -171,12 +181,14 @@ class Summary:  # pylint: disable=too-many-instance-attributes
     poll_failures: int = 0
     links: int = 0
     fetched_by_id: int = 0
+    skipped: int = 0
 
     def line(self) -> str:
         """The one-line summary (counts only)."""
         return (
             f"shipment sync: {self.seen} labels seen, {self.new} new, "
             f"{self.updated} updated, {self.fetched_by_id} fetched by id, "
+            f"{self.skipped} skipped, "
             f"{self.events_added} events added, "
             f"{self.polled} trackers polled ({self.poll_failures} failed), "
             f"{self.links} links built"
@@ -234,11 +246,13 @@ def apply_tracker(
     now: datetime.datetime,
     summary: Summary,
 ) -> None:
-    """Update a stored label from its tracker, fetched on its own."""
-    status = tracker.get("status") or None
+    """Update a stored label from its tracker, fetched on its own; raise
+    ``Malformed``, changing nothing, for a tracker not of EasyPost's shape."""
+    status = as_text(tracker.get("status"), "tracker status")
+    events = parse_events(tracker)
     changed = status != shipment.tracker_status
     shipment.tracker_status = status
-    added = add_events(shipment, parse_events(tracker))
+    added = add_events(shipment, events)
     summary.updated += changed
     summary.events_added += added
     if added or changed:
@@ -280,12 +294,15 @@ def sync_listed(
         for page in list_window(client, low, high):
             with sessions() as session, session.begin():
                 for shipment in page:
-                    if shipment["id"] in seen:
+                    try:
+                        label = read_label(shipment, units, unit_recipient)
+                    except Malformed:
+                        # Not stored, and its values are never logged.
+                        summary.skipped += 1
                         continue
-                    label = read_label(shipment, units, unit_recipient)
-                    if label is None:
+                    if label is None or label.easypost_id in seen:
                         continue
-                    seen.add(shipment["id"])
+                    seen.add(label.easypost_id)
                     summary.seen += 1
                     store_label(session, label, now, summary)
     return seen
@@ -328,6 +345,14 @@ def fetch_unlisted(  # pylint: disable=too-many-arguments,too-many-positional-ar
                 store_label(session, label, now, summary)
 
 
+def loggable_id(shipment: models.Shipment) -> str:
+    """The label's EasyPost id for a log line, if it is of EasyPost's shape
+    (every id stored since ids were checked is)."""
+    if SHIPMENT_ID.fullmatch(shipment.easypost_id or ""):
+        return shipment.easypost_id
+    return "a label with an id of another shape"
+
+
 def poll_unfinished(
     client: EasyPost,
     sessions: sessionmaker,
@@ -365,14 +390,14 @@ def poll_unfinished(
                 continue
             try:
                 tracker = client.get(f"trackers/{shipment.tracker_id}")
-            except ApiError as error:
+                apply_tracker(shipment, tracker, now, summary)
+            except (ApiError, Malformed) as error:
                 logger.warning(
-                    "tracker for %s not fetched: %s", shipment.easypost_id, error
+                    "tracker for %s not fetched: %s", loggable_id(shipment), error
                 )
                 summary.poll_failures += 1
                 continue
             summary.polled += 1
-            apply_tracker(shipment, tracker, now, summary)
 
 
 def relink(sessions: sessionmaker, now: Optional[datetime.datetime] = None) -> int:

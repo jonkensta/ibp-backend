@@ -82,10 +82,10 @@ def add_shipment(
     """Add a stored label bought at ``purchased`` (UTC) with ``events``
     given as (UTC time, status)."""
     number = next(_ids)
+    columns.setdefault("easypost_id", f"shp_ffff{number:08x}")
+    columns.setdefault("tracker_id", f"trk_ffff{number:08x}")
     shipment = models.Shipment(
-        easypost_id=f"shp_test{number}",
         tracking_code=f"9400{number:018d}",
-        tracker_id=f"trk_test{number}",
         purchased_at=utc(purchased),
         kind=kind,
         synced_at=utc(purchased),

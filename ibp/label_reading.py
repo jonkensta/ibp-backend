@@ -7,12 +7,55 @@ kind and destination, and never stored.
 import dataclasses
 import datetime
 import decimal
+import math
 import re
 from collections import defaultdict
 from typing import Any, NamedTuple, Optional
 
 from .labels import RequestKey, parse_request_code
 from .unit_matching import UnitMatcher
+
+# --- checking EasyPost's values ----------------------------------------------
+
+# EasyPost's ids and USPS tracking codes. Only values of these shapes are
+# stored, so only they can reach a log line (e.g. a tracker warning).
+SHIPMENT_ID = re.compile(r"shp_[0-9a-f]{8,64}")
+TRACKER_ID = re.compile(r"trk_[0-9a-f]{8,64}")
+TRACKING_CODE = re.compile(r"[A-Za-z0-9]{8,40}")
+
+
+class Malformed(ValueError):
+    """A listed shipment or tracker isn't of the shape EasyPost documents.
+
+    Its message is fixed text naming the field, never the value.
+    """
+
+
+def as_text(value: Any, field: str) -> Optional[str]:
+    """A string field, or None for a missing or empty one."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise Malformed(f"{field} is not text")
+    return value
+
+
+def mapping(value: Any, field: str) -> dict[str, Any]:
+    """An object field, ``{}`` for a missing one."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise Malformed(f"{field} is not an object")
+    return value
+
+
+def checked(value: Any, pattern: re.Pattern, field: str) -> Optional[str]:
+    """A field that must match ``pattern`` when present."""
+    found = as_text(value, field)
+    if found is not None and not pattern.fullmatch(found):
+        raise Malformed(f"{field} is not of EasyPost's shape")
+    return found
+
 
 # --- the label reference tag -------------------------------------------------
 
@@ -107,9 +150,14 @@ def event_key(event: Any) -> tuple:
     )
 
 
-def parse_timestamp(value: str) -> datetime.datetime:
+def parse_timestamp(value: Any) -> datetime.datetime:
     """Parse an EasyPost timestamp into an aware UTC datetime."""
-    moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if not isinstance(value, str):
+        raise Malformed("timestamp is not text")
+    try:
+        moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise Malformed("timestamp is not a time") from error
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=datetime.timezone.utc)
     return moment.astimezone(datetime.timezone.utc)
@@ -125,19 +173,23 @@ def parse_events(tracker: Optional[dict[str, Any]]) -> list[EventValues]:
     """
     events = []
     seen: dict[tuple, int] = defaultdict(int)
-    for detail in (tracker or {}).get("tracking_details") or []:
+    details = mapping(tracker, "tracker").get("tracking_details") or []
+    if not isinstance(details, list):
+        raise Malformed("tracking_details is not a list")
+    for detail in details:
+        detail = mapping(detail, "tracking detail")
         if not detail.get("datetime"):
             continue
-        location = detail.get("tracking_location") or {}
+        location = mapping(detail.get("tracking_location"), "tracking_location")
         values = EventValues(
             occurred_at=parse_timestamp(detail["datetime"]),
-            local_time=detail.get("datetime_local") or None,
-            status=detail.get("status") or None,
-            status_detail=detail.get("status_detail") or None,
-            message=detail.get("message") or None,
-            city=location.get("city") or None,
-            state=location.get("state") or None,
-            zip=location.get("zip") or None,
+            local_time=as_text(detail.get("datetime_local"), "datetime_local"),
+            status=as_text(detail.get("status"), "status"),
+            status_detail=as_text(detail.get("status_detail"), "status_detail"),
+            message=as_text(detail.get("message"), "message"),
+            city=as_text(location.get("city"), "city"),
+            state=as_text(location.get("state"), "state"),
+            zip=as_text(location.get("zip"), "zip"),
             occurrence=0,
         )
         identity = values.key()[:-1]
@@ -194,6 +246,49 @@ class Label:  # pylint: disable=too-many-instance-attributes
         }
 
 
+def parcel_weight(shipment: dict[str, Any]) -> Optional[float]:
+    """The parcel's weight in ounces, if given."""
+    weight = mapping(shipment.get("parcel"), "parcel").get("weight")
+    if weight is None:
+        return None
+    try:
+        if isinstance(weight, bool) or not isinstance(weight, (int, float, str)):
+            raise ValueError
+        ounces = float(weight)
+        if not math.isfinite(ounces):
+            raise ValueError
+    except ValueError as error:
+        raise Malformed("weight is not a number") from error
+    return ounces
+
+
+def recipient(shipment: dict[str, Any]) -> dict[str, Optional[str]]:
+    """The ``to_address`` lines a label is read by (never stored)."""
+    address = mapping(shipment.get("to_address"), "to_address")
+    return {
+        field: as_text(address.get(field), field)
+        for field in ("name", "company", "street1", "street2", "zip")
+    }
+
+
+def label_kind(
+    tag: Optional[Tag],
+    number: Optional[str],
+    to_address: dict[str, Optional[str]],
+    unit_recipient: str,
+) -> str:
+    """``individual``, ``bulk`` or ``other`` (see ``read_label``)."""
+    if tag is not None:
+        return {"request": "individual", "unit": "bulk"}.get(tag.kind, "other")
+    if number is not None:
+        return "individual"
+    if unit_recipient and unit_recipient in normalize(
+        f"{to_address.get('name') or ''} {to_address.get('company') or ''}"
+    ):
+        return "bulk"
+    return "other"
+
+
 def read_label(
     shipment: dict[str, Any], units: UnitMatcher, unit_recipient: str
 ) -> Optional[Label]:
@@ -204,14 +299,26 @@ def read_label(
     to ``unit_recipient`` (the shipping settings' mailroom line) is
     ``bulk``, and anything else is ``other``. The name and street address
     are read here and never stored, nor is a reference that is not a tag.
+
+    Raises ``Malformed`` for a shipment not of EasyPost's shape: ids and the
+    tracking code not of theirs (``SHIPMENT_ID``, ``TRACKER_ID``,
+    ``TRACKING_CODE``), or a field of the wrong type.
     """
-    rate = shipment.get("selected_rate") or {}
-    if not shipment.get("tracking_code") or not rate:
+    shipment = mapping(shipment, "shipment")
+    if checked(shipment.get("id"), SHIPMENT_ID, "id") is None:
+        raise Malformed("id is missing")
+    tracking_code = checked(
+        shipment.get("tracking_code"), TRACKING_CODE, "tracking_code"
+    )
+    rate = mapping(shipment.get("selected_rate"), "selected_rate")
+    if tracking_code is None or not rate:
         return None
-    to_address = shipment.get("to_address") or {}
-    tracker = shipment.get("tracker") or {}
-    label_info = shipment.get("postage_label") or {}
-    tag = parse_reference(shipment.get("reference"))
+    to_address = recipient(shipment)
+    tracker = mapping(shipment.get("tracker"), "tracker")
+    tracker_id = checked(tracker.get("id"), TRACKER_ID, "tracker id")
+    label_info = mapping(shipment.get("postage_label"), "postage_label")
+    reference = as_text(shipment.get("reference"), "reference")
+    tag = parse_reference(reference)
     number = inmate_number(to_address.get("name"))
 
     unit = None
@@ -220,31 +327,20 @@ def read_label(
     if unit is None:
         unit = units.by_address(to_address)
 
-    if tag is not None:
-        kind = {"request": "individual", "unit": "bulk"}.get(tag.kind, "other")
-    elif number is not None:
-        kind = "individual"
-    elif unit_recipient and unit_recipient in normalize(
-        f"{to_address.get('name') or ''} {to_address.get('company') or ''}"
-    ):
-        kind = "bulk"
-    else:
-        kind = "other"
-
+    kind = label_kind(tag, number, to_address, unit_recipient)
     request = tag.request if tag is not None else None
-    weight = (shipment.get("parcel") or {}).get("weight")
     return Label(
         easypost_id=shipment["id"],
-        tracking_code=shipment["tracking_code"],
-        tracker_id=tracker.get("id") or None,
+        tracking_code=tracking_code,
+        tracker_id=tracker_id,
         purchased_at=parse_timestamp(
-            label_info.get("created_at") or shipment["created_at"]
+            label_info.get("created_at") or shipment.get("created_at")
         ),
-        weight_oz=float(weight) if weight is not None else None,
+        weight_oz=parcel_weight(shipment),
         cost_cents=cents(rate.get("rate")),
-        service=rate.get("service") or None,
+        service=as_text(rate.get("service"), "service"),
         # Only our own tags: free text could be anything, a name included.
-        reference=shipment.get("reference") if tag is not None else None,
+        reference=reference if tag is not None else None,
         kind=kind,
         unit_jurisdiction=unit[0] if unit else None,
         unit_name=unit[1] if unit else None,
@@ -252,7 +348,7 @@ def read_label(
         request_inmate_id=request.inmate_id if request else None,
         request_index=request.index if request else None,
         inmate_number=number,
-        refund_status=shipment.get("refund_status") or None,
-        tracker_status=tracker.get("status") or None,
+        refund_status=as_text(shipment.get("refund_status"), "refund_status"),
+        tracker_status=as_text(tracker.get("status"), "tracker status"),
         events=parse_events(tracker),
     )
