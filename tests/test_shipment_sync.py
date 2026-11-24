@@ -356,6 +356,24 @@ def test_no_recipient_name_or_street_is_stored(sessions):
         assert secret.upper() not in text
 
 
+def test_reference_that_is_not_a_tag_is_not_stored(sessions):
+    """Free text in the reference (a name, say) is dropped; a tag is kept."""
+    sentinel = "Sentinel Q. Personname"
+    fake = FakeEasyPost(
+        [
+            shipment(1, ago(3), reference=sentinel),
+            shipment(2, ago(3), reference=f"ibp1:req:{sentinel}"),
+            shipment(3, ago(3), reference="ibp1:manual"),
+        ]
+    )
+    sync(fake, sessions)
+    assert stored(sessions, "shp_0001").reference is None
+    assert stored(sessions, "shp_0002").reference is None
+    assert stored(sessions, "shp_0003").reference == "ibp1:manual"
+    text = repr(snapshot(sessions)).upper()
+    assert "SENTINEL" not in text and "PERSONNAME" not in text
+
+
 def test_second_identical_run_changes_nothing(sessions):
     """Running again with the same answers writes nothing."""
     with sessions() as session:

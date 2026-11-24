@@ -338,7 +338,7 @@ def read_label(
     addressee line ends in an inmate number is ``individual``, one addressed
     to ``unit_recipient`` (the shipping settings' mailroom line) is
     ``bulk``, and anything else is ``other``. The name and street address
-    are read here and never stored.
+    are read here and never stored, nor is a reference that is not a tag.
     """
     rate = shipment.get("selected_rate") or {}
     if not shipment.get("tracking_code") or not rate:
@@ -378,7 +378,8 @@ def read_label(
         weight_oz=float(weight) if weight is not None else None,
         cost_cents=cents(rate.get("rate")),
         service=rate.get("service") or None,
-        reference=shipment.get("reference") or None,
+        # Only our own tags: free text could be anything, a name included.
+        reference=shipment.get("reference") if tag is not None else None,
         kind=kind,
         unit_jurisdiction=unit[0] if unit else None,
         unit_name=unit[1] if unit else None,
