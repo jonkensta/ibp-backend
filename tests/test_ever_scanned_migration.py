@@ -178,23 +178,67 @@ def test_downgrade_with_foreign_keys_on_keeps_events_and_links(tmp_path: Path):
         engine.dispose()
 
 
-def test_bootstrap_restores_a_missing_column_from_stored_data(
-    tmp_path: Path, monkeypatch
-):
-    """At head with ever_scanned missing, the next start replays the
-    backfill: the column is restored exactly from the stored data."""
+def head_without_flag(tmp_path: Path, with_labels: bool) -> str:
+    """A database at head (labels stored or not) whose ever_scanned was lost."""
     url = f"sqlite:///{tmp_path / 'missing.db'}"
     command.upgrade(db_bootstrap.build_alembic_config(url), "head")
     engine = sqlalchemy.create_engine(url)
     try:
-        insert_labels(engine)
+        if with_labels:
+            insert_labels(engine)
         with engine.begin() as connection:
             connection.execute(sqlalchemy.text(DROP_EVER_SCANNED))
+    finally:
+        engine.dispose()
+    return url
+
+
+def test_bootstrap_refuses_a_lost_flag_with_labels_stored(tmp_path: Path, monkeypatch):
+    """At head with ever_scanned gone and labels stored, startup fails: the
+    flag can hold scans no stored status or event shows any more."""
+    url = head_without_flag(tmp_path, with_labels=True)
+    with pytest.raises(RuntimeError, match="missing at head with 6 labels stored"):
+        bootstrap(monkeypatch, url)
+    assert COLUMN not in columns(url)
+
+
+def test_bootstrap_restores_a_lost_flag_with_no_labels(tmp_path: Path, monkeypatch):
+    """With no label stored nothing is lost: the column is restored."""
+    url = head_without_flag(tmp_path, with_labels=False)
+    bootstrap(monkeypatch, url)
+    assert COLUMN in columns(url)
+
+
+def test_versioned_upgrade_still_adds_and_backfills(tmp_path: Path, monkeypatch):
+    """A database at the request unit revision, labels stored, is upgraded
+    by bootstrap: the column is added and backfilled, not refused."""
+    url = f"sqlite:///{tmp_path / 'versioned.db'}"
+    command.upgrade(
+        db_bootstrap.build_alembic_config(url), db_bootstrap.PRE_EVER_SCANNED_REVISION
+    )
+    engine = sqlalchemy.create_engine(url)
+    try:
+        insert_labels(engine)
         bootstrap(monkeypatch, url)
         assert flags(engine) == EXPECTED
-        assert scalar(engine, "SELECT version_num FROM alembic_version") == (
-            head_revision()
-        )
+    finally:
+        engine.dispose()
+
+
+def test_bootstrap_backfills_a_create_all_schema_stamped_at_head(
+    tmp_path: Path, monkeypatch
+):
+    """A create_all schema at the current models is stamped at head, which
+    skips the migration's backfill, so bootstrap runs it: an older box whose
+    only scan evidence is its in_transit status gets the flag."""
+    url = f"sqlite:///{tmp_path / 'adopted.db'}"
+    engine = sqlalchemy.create_engine(url)
+    try:
+        ibp.models.Base.metadata.create_all(engine)
+        insert_labels(engine)
+        assert not any(flags(engine).values())
+        bootstrap(monkeypatch, url)
+        assert flags(engine) == EXPECTED
     finally:
         engine.dispose()
 

@@ -33,6 +33,7 @@ from alembic import command
 from alembic.config import Config
 
 from . import models
+from .shipment_links import UNSCANNED
 from .base import config as server_config
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,28 @@ def seed_shipping_settings(url: str) -> None:
                         **models.DEFAULT_SHIPPING_SETTINGS,
                     )
                 )
+    finally:
+        engine.dispose()
+
+
+def backfill_ever_scanned(url: str) -> int:
+    """Set ``shipments.ever_scanned`` for every label whose stored status or
+    events show a scan (the ``f4c2a8e6b1d3`` backfill); return how many."""
+    unscanned: sa.BindParameter = sa.bindparam(
+        "unscanned", sorted(UNSCANNED), expanding=True
+    )
+    engine = sa.create_engine(url)
+    try:
+        with engine.begin() as connection:
+            return connection.execute(
+                sa.text(
+                    "UPDATE shipments SET ever_scanned = :yes WHERE NOT ever_scanned "
+                    "AND ((tracker_status IS NOT NULL AND tracker_status NOT IN "
+                    ":unscanned) OR EXISTS (SELECT 1 FROM tracking_events AS e "
+                    "WHERE e.shipment_id = shipments.id AND e.status IS NOT NULL "
+                    "AND e.status NOT IN :unscanned))"
+                ).bindparams(sa.bindparam("yes", True), unscanned)
+            ).rowcount
     finally:
         engine.dispose()
 
@@ -286,14 +309,42 @@ def missing_columns(url: str) -> set[str]:
     return expected - columns
 
 
+def refuse_lost_scans(url: str) -> None:
+    """Fail if ``shipments.ever_scanned`` went missing with labels stored.
+
+    The flag keeps scans that a later status replaced, so it can't be
+    rebuilt from what is stored: replaying its backfill would drop them and
+    the links they are the evidence for. An empty ``shipments`` loses
+    nothing, so the column is restored then.
+    """
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as connection:
+            stored = connection.execute(
+                sa.text("SELECT COUNT(*) FROM shipments")
+            ).scalar_one()
+    finally:
+        engine.dispose()
+    if stored:
+        raise RuntimeError(
+            f"shipments.ever_scanned is missing at head with {stored} labels "
+            "stored: which of them USPS ever scanned can't be rebuilt from what "
+            "is stored; restore the database from the backup taken before the "
+            "upgrade (deploy/pi/README.md, roll back)"
+        )
+
+
 def check_columns(config: Config, url: str) -> None:
     """Make sure the upgraded schema has every column of the models.
 
     A column a half-run upgrade or downgrade left missing is restored by
-    replaying its revision, whose upgrade adds only what is missing; any
-    other missing column fails the bootstrap loudly.
+    replaying its revision, whose upgrade adds only what is missing, except
+    ``shipments.ever_scanned`` with labels stored (``refuse_lost_scans``);
+    any other missing column fails the bootstrap loudly.
     """
     missing = missing_columns(url)
+    if "shipments.ever_scanned" in missing:
+        refuse_lost_scans(url)
     if missing and missing <= REPAIRABLE_COLUMNS.keys():
         needed = {REPAIRABLE_COLUMNS[column] for column in missing}
         revision = next(rev for rev in REPAIR_ORDER if rev in needed)
@@ -322,6 +373,9 @@ def bootstrap() -> None:
         command.upgrade(config, "head")
     elif "alembic_version" not in tables:
         adopt_create_all_schema(config, tables, columns)
+        # A schema stamped past the ever_scanned revision missed its backfill.
+        if "shipments" in tables:
+            backfill_ever_scanned(url)
     else:
         logger.info("alembic_version table present; running alembic upgrade to head.")
         command.upgrade(config, "head")
