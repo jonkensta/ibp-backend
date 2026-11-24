@@ -62,7 +62,7 @@ from .label_reading import (  # pylint: disable=unused-import
     as_text,
     read_label,
 )
-from .shipment_links import never_mailed, rebuild_links
+from .shipment_links import StaleLinks, never_mailed, rebuild_links
 from .unit_matching import UnitMatcher
 
 logger = logging.getLogger(__name__)
@@ -401,9 +401,15 @@ def poll_unfinished(
 
 
 def relink(sessions: sessionmaker, now: Optional[datetime.datetime] = None) -> int:
-    """Rebuild the request links in one transaction; return how many."""
-    with sessions() as session, session.begin():
-        return rebuild_links(session, now)
+    """Rebuild the request links and commit them; return how many.
+
+    ``rebuild_links`` may roll back and retry, so it gets a session outside
+    a ``begin()`` block; a failure closes the session, rolling back.
+    """
+    with sessions() as session:
+        written = rebuild_links(session, now)
+        session.commit()
+        return written
 
 
 def listing_start(
@@ -532,7 +538,7 @@ def describe_failure(error: Exception) -> str:
         return type(error).__name__
     if isinstance(error, sa.exc.SQLAlchemyError):
         return type(error).__name__
-    if isinstance(error, ApiError):
+    if isinstance(error, (ApiError, StaleLinks)):
         return str(error)
     return f"{type(error).__name__} at {crash_location(error)}"
 

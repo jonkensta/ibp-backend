@@ -39,8 +39,11 @@ here works out delivery: the stored events are left for that.
 
 ``rebuild_links`` does all its reading first (``compute_links``: no write,
 so on SQLite no write lock, and every place's candidate requests in one
-query), then replaces the rows in two statements (``write_links``), so the
-write lock a volunteer saving a request could wait on is held only briefly.
+query), then replaces the rows in two statements, so the write lock a
+volunteer saving a request could wait on is held only briefly. Since those
+reads hold no lock, SQLite's ``data_version`` checks that no other
+connection committed while they ran; if one did, the links are computed
+again (``REBUILD_ATTEMPTS``), and never published from a mix of two states.
 """
 
 import bisect
@@ -302,66 +305,66 @@ def compute_links(
 _STAGED = sa.Table(
     "staged_package_shipments",
     sa.MetaData(),
-    sa.Column("inmate_jurisdiction", sa.String, nullable=False),
+    sa.Column("inmate_jurisdiction", sa.String(16), nullable=False),
     sa.Column("inmate_id", sa.Integer, nullable=False),
     sa.Column("request_index", sa.Integer, nullable=False),
     sa.Column("shipment_id", sa.Integer, nullable=False),
-    sa.Column("basis", sa.String, nullable=False),
+    sa.Column("basis", sa.String(20), nullable=False),
     prefixes=["TEMPORARY"],
 )
+# How many times the SQLite rebuild computes the links before giving up
+# because the data changed under it every time.
+REBUILD_ATTEMPTS = 5
+
+
+class StaleLinks(RuntimeError):
+    """The data changed during every rebuild attempt; nothing was written."""
+
+
+def copy_staged_statement() -> sa.Insert:
+    """The INSERT copying the staged links whose request and label still
+    exist into ``package_shipments``.
+
+    The jurisdiction is cast to the requests' own type (a native enum on
+    PostgreSQL, which won't compare with or take a VARCHAR).
+    """
+    staged = _STAGED.c
+    request = models.Request.__table__.c
+    jurisdiction = sa.cast(staged.inmate_jurisdiction, models.Jurisdiction)
+    return sa.insert(models.PackageShipment).from_select(
+        ["inmate_jurisdiction", "inmate_id", "request_index", "shipment_id", "basis"],
+        sa.select(
+            jurisdiction,
+            staged.inmate_id,
+            staged.request_index,
+            staged.shipment_id,
+            staged.basis,
+        )
+        .join(
+            models.Request.__table__,
+            sa.and_(
+                request.inmate_jurisdiction == jurisdiction,
+                request.inmate_id == staged.inmate_id,
+                request.index == staged.request_index,
+            ),
+        )
+        .join(
+            models.Shipment.__table__,
+            models.Shipment.__table__.c.id == staged.shipment_id,
+        ),
+    )
 
 
 def _copy_staged(session: Session) -> int:
-    """Insert the staged links whose request and label still exist; return
-    how many."""
-    staged = _STAGED.c
-    request = models.Request.__table__.c
-    copied = session.execute(  # an INSERT's result is a CursorResult
-        sa.insert(models.PackageShipment).from_select(
-            [
-                "inmate_jurisdiction",
-                "inmate_id",
-                "request_index",
-                "shipment_id",
-                "basis",
-            ],
-            sa.select(
-                staged.inmate_jurisdiction,
-                staged.inmate_id,
-                staged.request_index,
-                staged.shipment_id,
-                staged.basis,
-            )
-            .join(
-                models.Request.__table__,
-                sa.and_(
-                    request.inmate_jurisdiction == staged.inmate_jurisdiction,
-                    request.inmate_id == staged.inmate_id,
-                    request.index == staged.request_index,
-                ),
-            )
-            .join(
-                models.Shipment.__table__,
-                models.Shipment.__table__.c.id == staged.shipment_id,
-            ),
-        )
-    )
+    """Copy the staged links (``copy_staged_statement``); return how many."""
+    copied = session.execute(copy_staged_statement())
+    session.execute(sa.delete(_STAGED))
     return cast(sa.CursorResult, copied).rowcount
 
 
-def write_links(session: Session, links: dict[LinkKey, str]) -> int:
-    """Replace every ``package_shipments`` row with ``links``; return how
-    many were written.
-
-    The links are staged first, then ``package_shipments`` is emptied and
-    filled from the staged rows, so the write lock (SQLite's, from the
-    delete to the caller's commit) is held only for those two statements.
-    A link whose request or label was deleted after ``compute_links`` read
-    it is dropped: the copy only takes links whose parents still exist,
-    checked under that lock.
-    """
-    connection = session.connection()
-    _STAGED.create(connection, checkfirst=True)
+def stage_links(session: Session, links: dict[LinkKey, str]) -> None:
+    """Put ``links`` in the connection's staging table, replacing any there."""
+    _STAGED.create(session.connection(), checkfirst=True)
     session.execute(sa.delete(_STAGED))
     if links:
         session.execute(
@@ -379,17 +382,56 @@ def write_links(session: Session, links: dict[LinkKey, str]) -> int:
                 )
             ],
         )
+
+
+def write_links(session: Session, links: dict[LinkKey, str]) -> int:
+    """Replace every ``package_shipments`` row with ``links``; return how
+    many were written.
+
+    The links are staged first, then ``package_shipments`` is emptied and
+    filled from the staged rows, so the write lock (SQLite's, from the
+    delete to the caller's commit) is held only for those two statements.
+    A link whose request or label was deleted after ``compute_links`` read
+    it is dropped: the copy only takes links whose parents still exist,
+    checked under that lock.
+    """
+    stage_links(session, links)
     session.execute(sa.delete(models.PackageShipment))
-    written = _copy_staged(session)
-    session.execute(sa.delete(_STAGED))
-    return written
+    return _copy_staged(session)
+
+
+def data_version(session: Session) -> int:
+    """SQLite's ``data_version`` on the session's connection: it changes
+    when another connection commits, never for this one's own writes."""
+    return int(session.execute(sa.text("PRAGMA data_version")).scalar_one())
 
 
 def rebuild_links(session: Session, now: Optional[datetime.datetime] = None) -> int:
     """Rebuild every ``package_shipments`` row; return how many.
 
-    Runs in the caller's transaction, all reading first (``compute_links``)
-    and the writes last (``write_links``), so the caller's commit should
+    Must start the session's transaction, and the caller's commit should
     follow at once. ``now`` is as for ``compute_links``.
+
+    On SQLite the links are computed with no lock held (``compute_links``)
+    and checked to come from one state of the database: ``data_version`` is
+    read before the first read and again once the write lock is held (by
+    emptying ``package_shipments``). If another connection committed in
+    between, the attempt is rolled back and the links computed again, up to
+    ``REBUILD_ATTEMPTS`` times; then ``StaleLinks`` is raised and the old
+    links are kept. On any other database the reads and the write are one
+    transaction at REPEATABLE READ, so they see one snapshot.
     """
-    return write_links(session, compute_links(session, now))
+    if session.get_bind().dialect.name != "sqlite":
+        session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        return write_links(session, compute_links(session, now))
+    for _ in range(REBUILD_ATTEMPTS):
+        before = data_version(session)
+        stage_links(session, compute_links(session, now))
+        session.execute(sa.delete(models.PackageShipment))
+        if data_version(session) == before:
+            return _copy_staged(session)
+        session.rollback()
+    raise StaleLinks(
+        f"links not rebuilt: the data changed during each of {REBUILD_ATTEMPTS} "
+        "attempts; the old links are kept"
+    )
