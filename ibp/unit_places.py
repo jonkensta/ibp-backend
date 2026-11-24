@@ -147,9 +147,15 @@ def words(text: Optional[str]) -> list[str]:
     return re.findall(r"[A-Z0-9]+", (text or "").upper())
 
 
-def zip5(zipcode: Optional[str]) -> str:
-    """The first five digits of a ZIP code."""
-    return re.sub(r"\D", "", zipcode or "")[:5]
+_ZIP = re.compile(r"\s*(\d{5})(?:-?\d{4})?\s*")
+
+
+def zip5(zipcode: Optional[str]) -> Optional[str]:
+    """The 5-digit ZIP of a well-formed ZIP or ZIP+4 (``77000``,
+    ``77000-1234``), or None: ``77-000`` or an empty ZIP is no ZIP, so two
+    of them never compare equal."""
+    match = _ZIP.fullmatch(zipcode or "")
+    return match[1] if match else None
 
 
 def leading_number(line: Optional[str]) -> Optional[str]:
@@ -248,7 +254,7 @@ class Places:
         for unit in units:
             name = squeeze(display_name(unit))
             zipcode = zip5(unit.zipcode)
-            if name and len(zipcode) == 5:
+            if name and zipcode is not None:
                 candidates[(unit.jurisdiction, name, zipcode)].append(unit)
             else:
                 groups.append([(unit.jurisdiction, unit.name)])

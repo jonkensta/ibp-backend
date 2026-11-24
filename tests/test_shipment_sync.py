@@ -431,6 +431,79 @@ def test_same_named_units_at_different_streets_stay_ambiguous(api_db):
     assert matcher.by_address({"street1": "TWIN UNIT", "zip": "77000"}) is None
 
 
+@pytest.fixture
+def evidence_matcher(api_db):
+    """A Texas unit, a Federal unit elsewhere, and units with malformed or
+    empty ZIPs (invented names and addresses)."""
+    with api_db() as session:
+        units = [
+            add_unit(
+                session,
+                "ALPHA CODE",
+                street1="Alpha Unit",
+                street2="100 Example Rd",
+                zipcode="77000",
+            ),
+            add_unit(
+                session,
+                "DELTA CODE",
+                jurisdiction="Federal",
+                street1="Delta Unit",
+                street2="5 Federal Way",
+                zipcode="77600",
+                shipping_method="Federal Tub",
+            ),
+            add_unit(session, "BADZIP", street1="300 Odd Rd", zipcode="77-000"),
+            add_unit(session, "NOZIP", street1="400 Blank Rd", zipcode=""),
+            add_unit(session, "Doubled", street1="6 Texas Way", zipcode=""),
+            add_unit(
+                session,
+                "Doubled",
+                jurisdiction="Federal",
+                street1="6 Federal Way",
+                zipcode="77600",
+                shipping_method="Federal Tub",
+            ),
+        ]
+        return UnitMatcher(units)
+
+
+@pytest.mark.parametrize(
+    "address, unit",
+    [
+        # The street and ZIP say one unit, a name line another: unknown.
+        (
+            {"company": "DELTA UNIT", "street1": "100 EXAMPLE RD", "zip": "77000"},
+            None,
+        ),
+        # Name and address agreeing, or a name with no address match, stand.
+        (
+            {"street1": "100 EXAMPLE RD", "street2": "ALPHA UNIT", "zip": "77000"},
+            ("Texas", "ALPHA CODE"),
+        ),
+        (
+            {"company": "DELTA UNIT", "street1": "1 Nowhere Rd", "zip": "77000"},
+            ("Federal", "DELTA CODE"),
+        ),
+        # Only a well-formed ZIP counts, on either side.
+        ({"street1": "100 EXAMPLE RD", "zip": "77-000"}, None),
+        ({"street1": "100 EXAMPLE RD", "zip": "77000-1234"}, ("Texas", "ALPHA CODE")),
+        ({"street1": "300 ODD RD", "zip": "77000"}, None),
+        ({"street1": "300 ODD RD", "zip": "77-000"}, None),
+        # Empty ZIPs never equal each other.
+        ({"street1": "400 BLANK RD", "zip": ""}, None),
+        ({"street1": "DOUBLED", "zip": ""}, None),
+        # A name in both jurisdictions, the label's ZIP matching neither.
+        ({"street1": "DOUBLED", "zip": "77000"}, None),
+        ({"street1": "DOUBLED", "zip": "77600"}, ("Federal", "Doubled")),
+    ],
+)
+def test_unit_matching_weighs_name_against_address(evidence_matcher, address, unit):
+    """A name pointing away from the street and ZIP gives no unit, and only
+    valid ZIPs are compared."""
+    assert evidence_matcher.by_address(address) == unit
+
+
 def test_relisting_updates_a_stored_labels_unit(sessions):
     """A label stored before its unit could be told gets the unit when it is
     listed again (as ``--since`` lists every label back to its date)."""
