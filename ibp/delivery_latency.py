@@ -24,8 +24,14 @@ definitions:
 
 Unlinked and undelivered requests appear only in the counts, never as a
 latency.
+
+A month is provisional while it is younger than the settle time (see
+``settle_days``): unanswered letters are not in the database until they are
+processed, so a recent month holds only its fastest requests so far, and
+no coverage figure can show that.
 """
 
+import calendar
 import datetime
 import math
 from collections import Counter, defaultdict
@@ -44,6 +50,16 @@ DELIVERED = "delivered"
 RETURN_TO_SENDER = "return_to_sender"
 # A latency over this many days, like a negative one, means a bad postmark.
 MAX_LATENCY_DAYS = 365
+
+# A postmark month is provisional until it is ``settle_days`` old: letters
+# from it are still being answered, the slow ones last. The settle time is
+# the ``SETTLE_PERCENTILE`` latency (latest bound) of the months that ended
+# more than ``SETTLE_AGE`` days ago, or ``DEFAULT_SETTLE_DAYS`` when they
+# have fewer than ``SETTLE_MIN_REQUESTS`` delivered requests.
+SETTLE_PERCENTILE = 0.9
+SETTLE_AGE = 120
+SETTLE_MIN_REQUESTS = 50
+DEFAULT_SETTLE_DAYS = 90
 
 # The link bases each method counts.
 METHOD_BASES: dict[schemas.DeliveryMethodEnum, frozenset[str]] = {
@@ -201,12 +217,50 @@ def percentile(values: Sequence[float], fraction: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
+def month_key(day: datetime.date) -> str:
+    """The ``YYYY-MM`` month of ``day``."""
+    return day.strftime("%Y-%m")
+
+
+def month_end(month: str) -> datetime.date:
+    """The last day of a ``YYYY-MM`` month."""
+    year, number = (int(part) for part in month.split("-"))
+    return datetime.date(year, number, calendar.monthrange(year, number)[1])
+
+
+def settle_days(
+    latest_by_month: Mapping[str, Sequence[int]], today: datetime.date
+) -> int:
+    """How long a postmark month takes to settle, in days.
+
+    The ``SETTLE_PERCENTILE`` of the latest-bound latencies of the months
+    that ended more than ``SETTLE_AGE`` days before ``today``, rounded up;
+    ``DEFAULT_SETTLE_DAYS`` when those months have fewer than
+    ``SETTLE_MIN_REQUESTS`` delivered requests.
+    """
+    latencies = [
+        days
+        for month, values in latest_by_month.items()
+        if (today - month_end(month)).days > SETTLE_AGE
+        for days in values
+    ]
+    if len(latencies) < SETTLE_MIN_REQUESTS:
+        return DEFAULT_SETTLE_DAYS
+    return math.ceil(percentile(latencies, SETTLE_PERCENTILE))
+
+
+def is_provisional(month: str, today: datetime.date, settle: int) -> bool:
+    """Whether a postmark month ended fewer than ``settle`` days before today,
+    so letters from it are still being answered and its figures will rise."""
+    return (today - month_end(month)).days < settle
+
+
 @dataclass
 class _Month:
     counts: Counter[str] = field(default_factory=Counter)
     latencies: list[Latency] = field(default_factory=list)
 
-    def point(self, month: str) -> schemas.DeliveryLatencyMonth:
+    def point(self, month: str, provisional: bool) -> schemas.DeliveryLatencyMonth:
         """This month's counts and, if any request was delivered, statistics."""
         delivered = bool(self.latencies)
         return schemas.DeliveryLatencyMonth(
@@ -220,6 +274,7 @@ class _Month:
             latest=self._quartiles("latest") if delivered else None,
             median_handling=self._median("handling") if delivered else None,
             median_waiting=self._median("waiting") if delivered else None,
+            provisional=provisional,
         )
 
     def _median(self, name: str) -> float:
@@ -235,32 +290,43 @@ class _Month:
         )
 
 
-def summarize(
-    requests: Iterable[FilledRequest],
-    links: Iterable[Link],
-    events: Iterable[Event],
-    method: schemas.DeliveryMethodEnum = schemas.DeliveryMethodEnum.ALL,
-    timezone: ZoneInfo = clock.TIMEZONE,
-) -> list[schemas.DeliveryLatencyMonth]:
-    """The latency metric per postmark month, oldest first.
+@dataclass(frozen=True)
+class Summary:
+    """The metric's months, oldest first, and the settle time used to mark
+    the provisional ones."""
 
-    Every month with a Filled request is listed, linked or not. Only links
-    whose basis ``method`` counts are used.
-    """
-    bases = METHOD_BASES[method]
+    months: list[schemas.DeliveryLatencyMonth]
+    settle_days: int
+
+
+def _links_by_request(
+    links: Iterable[Link], bases: frozenset[str]
+) -> dict[RequestKey, list[Link]]:
+    """Each request's links whose basis is in ``bases``."""
     by_request: dict[RequestKey, list[Link]] = defaultdict(list)
     for link in links:
         if link.basis in bases:
             by_request[link.key].append(link)
-    outcomes = label_outcomes(events, timezone)
+    return by_request
 
+
+def _cohorts(
+    requests: Sequence[FilledRequest],
+    by_request: Mapping[RequestKey, list[Link]],
+    outcomes: Mapping[int, LabelOutcome],
+    filled: Mapping[str, int],
+    timezone: ZoneInfo,
+) -> dict[str, _Month]:
+    """Count and measure each postmark month's requests over their links in
+    ``by_request``; ``filled`` gives each month's Filled requests."""
     months: dict[str, _Month] = defaultdict(_Month)
+    for key, count in filled.items():
+        months[key].counts["filled"] = count
     for request in requests:
-        month = months[request.postmarked.strftime("%Y-%m")]
-        month.counts["filled"] += 1
         request_links = by_request.get(request.key)
         if not request_links:
             continue
+        month = months[month_key(request.postmarked)]
         month.counts["linked"] += 1
         delivery = request_delivery(request_links, outcomes, timezone)
         if delivery.status != "delivered":
@@ -271,28 +337,87 @@ def summarize(
             month.counts["excluded"] += 1
         else:
             month.latencies.append(latency)
-    return [months[key].point(key) for key in sorted(months)]
+    return months
 
 
-async def load_rows(
-    session: AsyncSession,
-    start_date: Optional[datetime.date] = None,
-    end_date: Optional[datetime.date] = None,
+def summarize(  # pylint: disable=too-many-arguments, too-many-positional-arguments
+    requests: Iterable[FilledRequest],
+    links: Iterable[Link],
+    events: Iterable[Event],
     method: schemas.DeliveryMethodEnum = schemas.DeliveryMethodEnum.ALL,
-) -> tuple[list[FilledRequest], list[Link], list[Event]]:
-    """Fetch the Filled requests postmarked in the range, their links of the
-    method and those labels' delivered and returned events.
+    timezone: ZoneInfo = clock.TIMEZONE,
+    today: Optional[datetime.date] = None,
+    filled: Optional[Mapping[str, int]] = None,
+) -> Summary:
+    """The latency metric per postmark month, oldest first.
 
-    One statement, so one consistent read: a sync or link rebuild committing
-    meanwhile shows up entirely or not at all. Every Filled request in the
-    range is returned, linked or not; only links whose basis ``method``
-    counts, and only their labels' events, are fetched. The rows are a
-    request per link per event, deduplicated here.
+    Every month with a Filled request is listed, linked or not. Only links
+    whose basis ``method`` counts are used, but the settle time is worked
+    out over every link, so the methods agree on which months are
+    provisional. ``filled`` is the number of Filled requests per month;
+    without it, ``requests`` must be every Filled request and are counted.
+    ``today`` is ``clock.today()`` by default.
     """
+    requests = list(requests)
+    links = list(links)
+    if today is None:
+        today = clock.today()
+    if filled is None:
+        filled = Counter(month_key(request.postmarked) for request in requests)
+    outcomes = label_outcomes(events, timezone)
+
+    def cohorts(bases: frozenset[str]) -> dict[str, _Month]:
+        by_request = _links_by_request(links, bases)
+        return _cohorts(requests, by_request, outcomes, filled, timezone)
+
+    everything = cohorts(METHOD_BASES[schemas.DeliveryMethodEnum.ALL])
+    months = (
+        everything
+        if method == schemas.DeliveryMethodEnum.ALL
+        else cohorts(METHOD_BASES[method])
+    )
+    settle = settle_days(
+        {key: [x.latest for x in month.latencies] for key, month in everything.items()},
+        today,
+    )
+    return Summary(
+        [
+            months[key].point(key, is_provisional(key, today, settle))
+            for key in sorted(months)
+        ],
+        settle,
+    )
+
+
+@dataclass(frozen=True)
+class Rows:
+    """What ``load_rows`` reads: the Filled requests per postmark month, the
+    linked Filled requests, their links and their labels' delivered and
+    returned events."""
+
+    filled: dict[str, int]
+    requests: list[FilledRequest]
+    links: list[Link]
+    events: list[Event]
+
+
+def _rows_statement(
+    start_date: Optional[datetime.date], end_date: Optional[datetime.date]
+) -> sa.CompoundSelect:
+    """The ``load_rows`` statement: the linked Filled requests in the range,
+    a row per link per delivered or returned event, then the number of
+    Filled requests per postmark date."""
     request, link = models.Request, models.PackageShipment
     shipment, event = models.Shipment, models.TrackingEvent
-    query = (
+    in_range = [request.action == "Filled"]
+    if start_date:
+        in_range.append(request.date_postmarked >= start_date)
+    if end_date:
+        in_range.append(request.date_postmarked <= end_date)
+
+    linked = (
         sa.select(
+            sa.literal("link").label("row_kind"),
             request.inmate_jurisdiction,
             request.inmate_id,
             request.index.label("request_index"),
@@ -304,18 +429,18 @@ async def load_rows(
             event.id.label("event_id"),
             event.occurred_at,
             event.status,
+            sa.literal(0).label("filled"),
         )
-        .select_from(request)
-        .outerjoin(
-            link,
+        .select_from(link)
+        .join(
+            request,
             sa.and_(
                 link.inmate_jurisdiction == request.inmate_jurisdiction,
                 link.inmate_id == request.inmate_id,
                 link.request_index == request.index,
-                link.basis.in_(sorted(METHOD_BASES[method])),
             ),
         )
-        .outerjoin(shipment, shipment.id == link.shipment_id)
+        .join(shipment, shipment.id == link.shipment_id)
         .outerjoin(
             event,
             sa.and_(
@@ -323,29 +448,61 @@ async def load_rows(
                 event.status.in_((DELIVERED, RETURN_TO_SENDER)),
             ),
         )
-        .where(request.action == "Filled")
+        .where(*in_range)
     )
-    if start_date:
-        query = query.where(request.date_postmarked >= start_date)
-    if end_date:
-        query = query.where(request.date_postmarked <= end_date)
+    counted = (
+        sa.select(
+            sa.literal("filled"),
+            *([sa.null()] * 3),
+            request.date_postmarked,
+            *([sa.null()] * 7),
+            sa.func.count(),  # pylint: disable=not-callable
+        )
+        .where(*in_range)
+        .group_by(request.date_postmarked)
+    )
 
+    return sa.union_all(linked, counted)
+
+
+async def load_rows(
+    session: AsyncSession,
+    start_date: Optional[datetime.date] = None,
+    end_date: Optional[datetime.date] = None,
+) -> Rows:
+    """Read the Filled requests postmarked in the range: their number per
+    postmark date, and the linked ones with every link and their labels'
+    delivered and returned events.
+
+    One statement (a ``UNION ALL``), so one consistent read: a sync or link
+    rebuild committing meanwhile shows up entirely or not at all. Unlinked
+    requests are only counted in SQL, which keeps an all-time read small.
+    The linked rows are a request per link per event, deduplicated here.
+    """
     requests: dict[RequestKey, FilledRequest] = {}
     links: dict[tuple[RequestKey, int], Link] = {}
     events: dict[int, Event] = {}
-    for row in (await session.execute(query)).all():
+    filled: Counter[str] = Counter()
+    statement = _rows_statement(start_date, end_date)
+    for row in (await session.execute(statement)).all():
+        if row.row_kind == "filled":
+            filled[month_key(row.date_postmarked)] += row.filled
+            continue
         key = (row.inmate_jurisdiction, row.inmate_id, row.request_index)
         if key not in requests:
             requests[key] = FilledRequest(key, row.date_postmarked, row.date_processed)
-        if row.shipment_id is None or row.purchased_at is None:
-            continue
         if (key, row.shipment_id) not in links:
             links[(key, row.shipment_id)] = Link(
                 key, row.shipment_id, row.basis, row.purchased_at
             )
         if row.event_id is not None and row.event_id not in events:
             events[row.event_id] = Event(row.shipment_id, row.occurred_at, row.status)
-    return list(requests.values()), list(links.values()), list(events.values())
+    return Rows(
+        dict(filled),
+        list(requests.values()),
+        list(links.values()),
+        list(events.values()),
+    )
 
 
 async def get_delivery_latency(
@@ -353,7 +510,15 @@ async def get_delivery_latency(
     method: schemas.DeliveryMethodEnum = schemas.DeliveryMethodEnum.ALL,
     start_date: Optional[datetime.date] = None,
     end_date: Optional[datetime.date] = None,
-) -> list[schemas.DeliveryLatencyMonth]:
+    today: Optional[datetime.date] = None,
+) -> Summary:
     """The latency metric for Filled requests postmarked in the range."""
-    requests, links, events = await load_rows(session, start_date, end_date, method)
-    return summarize(requests, links, events, method)
+    rows = await load_rows(session, start_date, end_date)
+    return summarize(
+        rows.requests,
+        rows.links,
+        rows.events,
+        method,
+        today=today,
+        filled=rows.filled,
+    )

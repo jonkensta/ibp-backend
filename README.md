@@ -286,25 +286,43 @@ postmark, as for `/metrics/requests`. The definitions:
 Each month has `filled` (every Filled request), `linked` (with a link of
 the method), `delivered` (in the statistics), `returned` and `excluded`;
 the rest of `linked` are still in the mail. Unlinked and undelivered
-requests are only counted, never taken as zero days. The metric reads the
-stored links, so after an upgrade that changes the link rules, rebuild them
-(`--rebuild-links`, see [`deploy/pi/README.md`](deploy/pi/README.md)) before
-trusting it. For the delivered
+requests are only counted, never taken as zero days. For the delivered
 ones, `earliest` and `latest` give the 25th percentile, median and 75th
 percentile of latency (linear interpolation) and the median transit, and
 `median_handling` and `median_waiting` the other stages; all are null when
-none was delivered. For example:
+none was delivered.
+
+Recent months are `provisional`. A letter is not in the database until it
+is processed, so a month whose letters are still being answered holds only
+its fastest ones, and its figures read low (coverage cannot show this,
+since the unanswered letters are missing from `filled` too). The response's
+`settle_days` is the 90th percentile of latency (latest bound) over the
+delivered requests, every method counted, of the months in the response
+that ended more than 120 days before today (in `[server] timezone`),
+rounded up; 90 when those months have fewer than 50. A month that ended
+fewer than `settle_days` days ago is `provisional`. For example:
 
 ```json
 {
-  "month": "2026-02",
-  "filled": 530, "linked": 431, "delivered": 412, "returned": 3, "excluded": 2,
-  "earliest": {"p25": 11.0, "median": 14.0, "p75": 18.0, "median_transit": 4.0},
-  "latest": {"p25": 12.0, "median": 15.0, "p75": 19.0, "median_transit": 5.0},
-  "median_handling": 7.0,
-  "median_waiting": 2.0
+  "data": [{
+    "month": "2026-02",
+    "filled": 530, "linked": 431, "delivered": 412, "returned": 3, "excluded": 2,
+    "earliest": {"p25": 11.0, "median": 14.0, "p75": 18.0, "median_transit": 4.0},
+    "latest": {"p25": 12.0, "median": 15.0, "p75": 19.0, "median_transit": 5.0},
+    "median_handling": 7.0,
+    "median_waiting": 2.0,
+    "provisional": false
+  }],
+  "settle_days": 98,
+  "filters_applied": {"method": "all", "date_range": "12months", ...}
 }
 ```
+
+The metric reads the stored links, so after an upgrade that changes the
+link rules, rebuild them (`--rebuild-links`, see
+[`deploy/pi/README.md`](deploy/pi/README.md)) before trusting it. It is read
+in one SQL statement: the Filled requests are counted per postmark date in
+SQL, and only the linked ones are read one by one.
 
 ## Deployment
 
