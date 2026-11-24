@@ -41,6 +41,9 @@ KEY_IN_CONTAINER = "/run/secrets/easypost-api-key"
 LOCK_FILE = Path.home() / ".local" / "state" / "ibp-shipment-sync" / "run.lock"
 # Exit status when another run holds the lock.
 BUSY = 75
+# The label on the one-off container, so a run in progress can be found
+# (docker ps --filter label=ibp.job=shipment-sync).
+CONTAINER_LABEL = "ibp.job=shipment-sync"
 
 
 def read_secret(name: str) -> str | None:
@@ -81,6 +84,8 @@ def build_command(key_file: Path, args: list[str]) -> list[str]:
         "--rm",
         "--no-deps",
         "-T",
+        "--label",
+        CONTAINER_LABEL,
         *mount,
         "ibp-backend",
         "python",

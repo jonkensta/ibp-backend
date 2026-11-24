@@ -101,22 +101,41 @@ trusting the chart, rather than waiting for the next nightly sync:
 
 A release that changes unit matching (`ibp/unit_places.py`,
 `ibp/unit_matching.py`, `ibp/label_reading.py`) needs every stored label
-matched again instead, which also rebuilds the links. Stop the daily timer
-*before* upgrading and let any sync already running finish (stopping the
-timer doesn't stop a run in progress), upgrade as above, re-run the sync
-from the first label's date until it exits 0 (a run that fails part-way
-says the re-evaluation is incomplete and leaves the links as they were),
-then start the timer again (`scripts/shipment-sync/README.md`):
+matched again instead, which also rebuilds the links. Do it in this order
+*instead of* the plain upgrade above (step 5 is that upgrade): stopping the
+timer doesn't stop a run in progress, and the old wrapper takes no lock, so
+it is replaced before the backfill. A run that fails part-way says the
+re-evaluation is incomplete and leaves the links as they were
+(`scripts/shipment-sync/README.md`).
 
+    # 1. Stop the timer, so no new daily run starts.
     sudo systemctl stop ibp-shipment-sync.timer
-    while systemctl is-active --quiet ibp-shipment-sync.service; do sleep 10; done
-    # ... the upgrade steps above ...
-    ~/.local/bin/ibp-shipment-sync --since 2025-11-01   # repeat until it exits 0
+    # 2. Wait for a run already in progress: a running oneshot service is
+    #    "activating", which is-active alone doesn't count as running.
+    while systemctl is-active --quiet ibp-shipment-sync.service || [ "$(systemctl show -p ActiveState --value ibp-shipment-sync.service)" = activating ]; do sleep 5; done
+    # 3. ...and for any one-off sync container (an older wrapper's has no
+    #    label of its own, so wait on every one-off backend container).
+    while [ -n "$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)" ]; do sleep 5; done
+    # 4. Install the new release's wrapper and units (with its run lock)
+    #    before anything else runs the sync; from a checkout of the new tag:
+    cd <checkout of the new tag>/scripts/shipment-sync
+    install -D -m755 ibp-shipment-sync ~/.local/bin/ibp-shipment-sync
+    sudo cp ibp-shipment-sync.service ibp-shipment-sync.timer /etc/systemd/system/
+    sudo systemctl daemon-reload
+    # 5. Upgrade the backend (deploy/pi/README.md, Upgrading: backup, new
+    #    IBP_TAG, docker compose pull && docker compose up -d).
+    # 6. Re-evaluate every label from the first label's date until it exits
+    #    0; it is re-run only after an incomplete run (1); any other status
+    #    (2 no key, 75 another run) stops the loop to be looked at.
+    while true; do ~/.local/bin/ibp-shipment-sync --since 2025-11-01; status=$?; [ "$status" -eq 1 ] || break; echo "not complete; again in 60 s"; sleep 60; done; echo "exit status $status"
+    # 7. Start the timer again.
     sudo systemctl start ibp-shipment-sync.timer
 
-Runs never overlap in any case: each holds a lock, and one that finds it
-held exits 75 at once ("another ibp-shipment-sync run is in progress")
-without running or pinging Healthchecks; just run it again later.
+The new wrapper's runs never overlap: each holds a lock
+(`~/.local/state/ibp-shipment-sync/run.lock`), and one that finds it held
+exits 75 at once ("another ibp-shipment-sync run is in progress") without
+running or pinging Healthchecks. Its container is labelled
+`ibp.job=shipment-sync` (`docker ps --filter label=ibp.job=shipment-sync`).
 
 Roll back by setting the previous tag and running `docker compose up -d`
 again. If the new release ran a database migration, the old backend can't
