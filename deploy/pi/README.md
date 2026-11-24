@@ -92,6 +92,13 @@ missing file:
     docker compose pull && docker compose up -d
     docker image prune -f
 
+The links between requests and labels (`package_shipments`) are stored, and
+the delivery chart reads them as stored. After an upgrade to a release that
+changes the link rules (`ibp/shipment_links.py`), rebuild them before
+trusting the chart, rather than waiting for the next nightly sync:
+
+    ~/.local/bin/ibp-shipment-sync --rebuild-links
+
 Roll back by setting the previous tag and running `docker compose up -d`
 again. If the new release ran a database migration, the old backend can't
 start on the migrated database, so restore the backup taken just before the

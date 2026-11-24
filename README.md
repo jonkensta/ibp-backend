@@ -286,7 +286,10 @@ postmark, as for `/metrics/requests`. The definitions:
 Each month has `filled` (every Filled request), `linked` (with a link of
 the method), `delivered` (in the statistics), `returned` and `excluded`;
 the rest of `linked` are still in the mail. Unlinked and undelivered
-requests are only counted, never taken as zero days. For the delivered
+requests are only counted, never taken as zero days. The metric reads the
+stored links, so after an upgrade that changes the link rules, rebuild them
+(`--rebuild-links`, see [`deploy/pi/README.md`](deploy/pi/README.md)) before
+trusting it. For the delivered
 ones, `earliest` and `latest` give the 25th percentile, median and 75th
 percentile of latency (linear interpolation) and the median transit, and
 `median_handling` and `median_waiting` the other stages; all are null when
