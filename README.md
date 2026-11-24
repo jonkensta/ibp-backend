@@ -245,9 +245,13 @@ evidence conflicts: the label has no unit, and an untagged one is `other`
 (below). Without a name, the address must find units of one place.
 
 Units with the same jurisdiction, display name and 5-digit ZIP that also
-share a house number or P.O. box number are one place (one facility under
-several provider codes); units with no number are never merged, and units
-at one street address with different display names are not one place. A
+share a delivery line are one place (one facility under several provider
+codes): the same P.O. box number, or the same house number and street once
+spelling is normalised (case, punctuation, `S`/`South`, `St`/`Street`,
+`Hwy`/`Highway`, `First`/`1st`, a trailing `#1` and the like). Lines that
+can't be shown the same (`100 Main Street`, `100 Oak Lane`) are different
+places; units with no delivery line are never merged, and units at one
+street address with different display names are not one place. A
 label to one place stores its representative, the alphabetically first
 unit name. Stored labels are matched again only when read again: the daily
 run relists 35 days, and `--since YYYY-MM-DD` relists everything back to
