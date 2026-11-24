@@ -48,6 +48,21 @@ def calculate_date_range(
     return start_date, end_date
 
 
+def resolve_date_range(
+    date_range: Optional[str],
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+) -> tuple[Optional[date], Optional[date]]:
+    """The range a metrics endpoint uses: an explicit ``start_date`` or
+    ``end_date`` wins for its bound, and the ``date_range`` preset only fills
+    a bound not given (``all`` and unknown presets fill none)."""
+    preset_start, preset_end = calculate_date_range(date_range)
+    return (
+        start_date if start_date is not None else preset_start,
+        end_date if end_date is not None else preset_end,
+    )
+
+
 # pylint: disable=too-many-arguments, too-many-positional-arguments
 async def get_request_metrics(
     session: AsyncSession,
