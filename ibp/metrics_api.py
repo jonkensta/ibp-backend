@@ -30,13 +30,20 @@ async def get_metrics_delivery_latency(
     ``date_range`` preset, or ``start_date`` and ``end_date``) filters the
     postmark, as for ``/metrics/requests``. See ``ibp/delivery_latency.py``
     for the definitions. ``settle_days`` is how long a postmark month takes
-    to settle; each month says whether it is still ``provisional``.
+    to settle; each month says whether it is still ``provisional``. With no
+    start to the range, the months before the first with a linked request
+    are left out.
     """
     if date_range and not (start_date and end_date):
         start_date, end_date = metrics.calculate_date_range(date_range)
 
+    # With no start, begin where shipment data does, not decades back.
     summary = await delivery_latency.get_delivery_latency(
-        session, method=method, start_date=start_date, end_date=end_date
+        session,
+        method=method,
+        start_date=start_date,
+        end_date=end_date,
+        from_first_linked=start_date is None,
     )
     return schemas.DeliveryLatencyResponse(
         data=summary.months,
