@@ -872,3 +872,55 @@ class RequestShipment(BaseModel):
     def serialize_dt(self, dt: datetime.datetime, _info):
         """Serialize datetime to ISO format with UTC timezone if naive."""
         return _utc_isoformat(dt)
+
+
+class DeliveryMethodEnum(str, Enum):
+    """Which links the delivery latency metric counts: every link, a
+    request's own label (``reference``, ``inmate_number``) or a bulk box
+    (``unit_session``)."""
+
+    ALL = "all"
+    INDIVIDUAL = "individual"
+    BULK = "bulk"
+
+
+class LatencyQuartiles(BaseModel):
+    """Days from postmark to delivery for one bound, over a month's delivered
+    requests: the 25th percentile, median and 75th percentile, and the
+    median transit (label purchase to delivery) for that bound."""
+
+    p25: float
+    median: float
+    p75: float
+    median_transit: float
+
+
+class DeliveryLatencyMonth(BaseModel):
+    """Postmark-to-delivery latency of the Filled requests postmarked in one
+    month (``YYYY-MM``); see ``ibp/delivery_latency.py``.
+
+    ``filled`` counts every Filled request; ``linked`` those with a link
+    the method counts; ``delivered`` those with a delivered label that are
+    in the statistics; ``returned`` those whose every label came back;
+    ``excluded`` those delivered with a latency under 0 or over 365 days.
+    The rest of ``linked`` are not delivered yet. The latency and stage
+    fields are null when ``delivered`` is 0.
+    """
+
+    month: str
+    filled: int
+    linked: int
+    delivered: int
+    returned: int
+    excluded: int
+    earliest: Optional[LatencyQuartiles] = None
+    latest: Optional[LatencyQuartiles] = None
+    median_handling: Optional[float] = None
+    median_waiting: Optional[float] = None
+
+
+class DeliveryLatencyResponse(BaseModel):
+    """Schema for the delivery latency metric response."""
+
+    data: list[DeliveryLatencyMonth]
+    filters_applied: dict[str, Any]
