@@ -62,19 +62,21 @@ the `docker` group (`id -nG`).
     sudo systemctl daemon-reload
 
 Backfill once, before enabling the timer (about 12 months; takes a few
-minutes, mostly paced listing requests):
+minutes, mostly paced listing requests); the timer is enabled only if the
+backfill completed:
 
-    ~/.local/bin/ibp-shipment-sync --since 2025-11-01
+    if ~/.local/bin/ibp-shipment-sync --since 2025-11-01; then sudo systemctl enable --now ibp-shipment-sync.timer; else echo "TIMER NOT ENABLED: the backfill did not complete; run this line again until it does"; fi
 
-Then:
+Then check a run:
 
-    sudo systemctl enable --now ibp-shipment-sync.timer
     sudo systemctl start ibp-shipment-sync.service && journalctl -u ibp-shipment-sync -n 30
 
 Rebuild the links alone (no key, no EasyPost requests), e.g. after a
-release that changes only the link rules:
-`~/.local/bin/ibp-shipment-sync --rebuild-links`. That does not match any
-label to a unit again.
+release that changes only the link rules (a failure keeps the old links):
+
+    ~/.local/bin/ibp-shipment-sync --rebuild-links || echo "LINKS NOT REBUILT: the old links are kept; run it again"
+
+That does not match any label to a unit again.
 
 ## Re-evaluating every label's unit
 
@@ -106,18 +108,15 @@ old one takes no lock) before the backfill, in this order:
     while [ -n "$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)" ]; do sleep 5; done
     # 4. Install the new release's wrapper and units (with its run lock)
     #    before anything else runs the sync; from a checkout of the new tag:
-    cd <checkout of the new tag>/scripts/shipment-sync
-    install -D -m755 ibp-shipment-sync ~/.local/bin/ibp-shipment-sync
-    sudo cp ibp-shipment-sync.service ibp-shipment-sync.timer /etc/systemd/system/
-    sudo systemctl daemon-reload
+    cd <checkout of the new tag>/scripts/shipment-sync && install -D -m755 ibp-shipment-sync ~/.local/bin/ibp-shipment-sync && sudo cp ibp-shipment-sync.service ibp-shipment-sync.timer /etc/systemd/system/ && sudo systemctl daemon-reload || echo "NOT INSTALLED: fix this step before going on; the old wrapper takes no lock"
     # 5. Upgrade the backend (deploy/pi/README.md, Upgrading: backup, new
     #    IBP_TAG, docker compose pull && docker compose up -d).
     # 6. Re-evaluate every label from the first label's date until it exits
     #    0; it is re-run only after an incomplete run (1); any other status
     #    (2 no key, 75 another run) stops the loop to be looked at.
     while true; do ~/.local/bin/ibp-shipment-sync --since 2025-11-01; status=$?; [ "$status" -eq 1 ] || break; echo "not complete; again in 60 s"; sleep 60; done; echo "exit status $status"
-    # 7. Start the timer again.
-    sudo systemctl start ibp-shipment-sync.timer
+    # 7. Start the timer again, only if the backfill completed (exit 0).
+    if [ "${status:-}" = 0 ]; then sudo systemctl start ibp-shipment-sync.timer; else echo "TIMER STILL STOPPED: the backfill did not complete (exit ${status:-not run}); re-run step 6 until it exits 0, then this line; do not start the timer before"; fi
 
 Runs never overlap: the wrapper holds an exclusive lock
 (`~/.local/state/ibp-shipment-sync/run.lock`) for the whole run. A run that

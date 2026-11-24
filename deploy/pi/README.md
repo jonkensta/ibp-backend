@@ -88,16 +88,15 @@ missing file:
     cd /srv/ibp
     cp -p .env .env.pre-<new tag>             # for a rollback
     $EDITOR .env                              # new IBP_TAG
-    sudo systemctl start ibp-backup.service  # fresh backup first
-    docker compose pull && docker compose up -d
-    docker image prune -f
+    # A fresh backup first; nothing is pulled or started if it fails.
+    sudo systemctl start ibp-backup.service && docker compose pull && docker compose up -d && docker image prune -f || echo "UPGRADE STOPPED: a step failed (backup, pull or start); fix it and run this line again"
 
 The links between requests and labels (`package_shipments`) are stored, and
 the delivery chart reads them as stored. After an upgrade to a release that
 changes only the link rules (`ibp/shipment_links.py`), rebuild them before
 trusting the chart, rather than waiting for the next nightly sync:
 
-    ~/.local/bin/ibp-shipment-sync --rebuild-links
+    ~/.local/bin/ibp-shipment-sync --rebuild-links || echo "LINKS NOT REBUILT: the chart still shows the old links; run it again"
 
 A release that changes unit matching (`ibp/unit_places.py`,
 `ibp/unit_matching.py`, `ibp/label_reading.py`) needs every stored label
@@ -118,18 +117,15 @@ re-evaluation is incomplete and leaves the links as they were
     while [ -n "$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)" ]; do sleep 5; done
     # 4. Install the new release's wrapper and units (with its run lock)
     #    before anything else runs the sync; from a checkout of the new tag:
-    cd <checkout of the new tag>/scripts/shipment-sync
-    install -D -m755 ibp-shipment-sync ~/.local/bin/ibp-shipment-sync
-    sudo cp ibp-shipment-sync.service ibp-shipment-sync.timer /etc/systemd/system/
-    sudo systemctl daemon-reload
+    cd <checkout of the new tag>/scripts/shipment-sync && install -D -m755 ibp-shipment-sync ~/.local/bin/ibp-shipment-sync && sudo cp ibp-shipment-sync.service ibp-shipment-sync.timer /etc/systemd/system/ && sudo systemctl daemon-reload || echo "NOT INSTALLED: fix this step before going on; the old wrapper takes no lock"
     # 5. Upgrade the backend (deploy/pi/README.md, Upgrading: backup, new
     #    IBP_TAG, docker compose pull && docker compose up -d).
     # 6. Re-evaluate every label from the first label's date until it exits
     #    0; it is re-run only after an incomplete run (1); any other status
     #    (2 no key, 75 another run) stops the loop to be looked at.
     while true; do ~/.local/bin/ibp-shipment-sync --since 2025-11-01; status=$?; [ "$status" -eq 1 ] || break; echo "not complete; again in 60 s"; sleep 60; done; echo "exit status $status"
-    # 7. Start the timer again.
-    sudo systemctl start ibp-shipment-sync.timer
+    # 7. Start the timer again, only if the backfill completed (exit 0).
+    if [ "${status:-}" = 0 ]; then sudo systemctl start ibp-shipment-sync.timer; else echo "TIMER STILL STOPPED: the backfill did not complete (exit ${status:-not run}); re-run step 6 until it exits 0, then this line; do not start the timer before"; fi
 
 The new wrapper's runs never overlap: each holds a lock
 (`~/.local/state/ibp-shipment-sync/run.lock`), and one that finds it held
@@ -144,11 +140,14 @@ upgrade first, with both containers stopped (writes since then are lost):
 
     cd /srv/ibp
     docker compose down
-    mkdir -p ~/restore && zstd -d ~/backups/ibp/data-<before upgrade>.db.zst -o ~/restore/data.db
-    sqlite3 ~/restore/data.db "PRAGMA integrity_check;"   # must print: ok
-    mv data/data.db data/data.db.before-rollback          # keep until verified
-    rm -f data/data.db-journal data/data.db-wal data/data.db-shm
-    install -m 0644 ~/restore/data.db data/data.db
-    cp .env.pre-<new tag> .env                            # the previous IBP_TAG
-    docker compose up -d
-    docker compose ps                                     # both on the old tag, healthy
+    mkdir -p ~/restore && zstd -f -d ~/backups/ibp/data-<before upgrade>.db.zst -o ~/restore/data.db
+    # Only a backup that passes its integrity check replaces the database.
+    if [ "$(sqlite3 ~/restore/data.db 'PRAGMA integrity_check;')" = ok ]; then
+        mv data/data.db data/data.db.before-rollback &&   # keep until verified
+        rm -f data/data.db-journal data/data.db-wal data/data.db-shm &&
+        install -m 0644 ~/restore/data.db data/data.db &&
+        cp .env.pre-<new tag> .env &&                     # the previous IBP_TAG
+        docker compose up -d && docker compose ps         # both on the old tag, healthy
+    else
+        echo "NOT RESTORED: the backup failed its integrity check; nothing was replaced; pick another backup"
+    fi
