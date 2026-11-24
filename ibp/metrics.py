@@ -2,6 +2,7 @@
 
 # pylint: disable=not-callable
 
+import math
 from datetime import date, timedelta
 from typing import Optional
 
@@ -10,6 +11,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from . import clock, models, schemas
+from .delivery_latency import is_provisional, month_end, percentile
+
+# A postmark month is provisional until it is ``settle_days`` old: a request
+# is only recorded when its letter is answered, so a recent month's counts
+# are still rising. The settle time is the ``SETTLE_PERCENTILE`` of the days
+# from postmark to processing, over the requests postmarked in the
+# ``SETTLE_SAMPLE`` days before the months that ended more than
+# ``SETTLE_AGE`` days ago; ``DEFAULT_SETTLE_DAYS`` when there are fewer than
+# ``SETTLE_MIN_REQUESTS`` of them. Waits outside 0..``MAX_WAIT`` days are
+# mistyped postmarks and are left out.
+SETTLE_PERCENTILE = 0.95
+SETTLE_AGE = 120
+SETTLE_SAMPLE = 365
+SETTLE_MIN_REQUESTS = 50
+DEFAULT_SETTLE_DAYS = 75
+MAX_WAIT = 365
 
 
 def get_month_key(date_column, dialect: str):
@@ -63,6 +80,28 @@ def resolve_date_range(
     )
 
 
+async def request_settle_days(session: AsyncSession, today: date) -> int:
+    """How long a postmark month's request counts take to settle, in days
+    (see ``SETTLE_PERCENTILE``). It ignores the page's filters, so a month is
+    provisional or not whatever is being shown."""
+    newest = today - timedelta(days=SETTLE_AGE)
+    rows = await session.execute(
+        select(models.Request.date_postmarked, models.Request.date_processed).where(
+            models.Request.date_postmarked >= newest - timedelta(days=SETTLE_SAMPLE),
+            models.Request.date_postmarked < newest,
+        )
+    )
+    waits = [
+        (processed - postmarked).days
+        for postmarked, processed in rows
+        if (today - month_end(postmarked.strftime("%Y-%m"))).days > SETTLE_AGE
+        and 0 <= (processed - postmarked).days <= MAX_WAIT
+    ]
+    if len(waits) < SETTLE_MIN_REQUESTS:
+        return DEFAULT_SETTLE_DAYS
+    return math.ceil(percentile(waits, SETTLE_PERCENTILE))
+
+
 # pylint: disable=too-many-arguments, too-many-positional-arguments
 async def get_request_metrics(
     session: AsyncSession,
@@ -72,8 +111,11 @@ async def get_request_metrics(
     action: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
+    settle_days: int = DEFAULT_SETTLE_DAYS,
 ) -> list[schemas.MonthlyMetricPoint]:
-    """Get request counts grouped by month."""
+    """Get request counts grouped by postmark month. A month that ended
+    fewer than ``settle_days`` ago is marked provisional."""
+    today = clock.today()
     # Get database dialect for proper date function
     dialect = session.bind.dialect.name
     month_key = get_month_key(models.Request.date_postmarked, dialect)
@@ -134,6 +176,7 @@ async def get_request_metrics(
             filled_count=row.filled_count,
             tossed_count=row.tossed_count,
             total_count=row.total_count,
+            provisional=is_provisional(row.month, today, settle_days),
         )
         for row in rows
     ]
