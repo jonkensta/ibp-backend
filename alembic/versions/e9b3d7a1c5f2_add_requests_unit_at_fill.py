@@ -8,7 +8,7 @@ Create Date: 2026-11-24 00:00:00.000000
 
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
@@ -18,6 +18,28 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def new_columns() -> list[sa.Column]:
+    """The columns this revision adds, in order."""
+    return [
+        sa.Column('unit_name', sa.String(), nullable=True),
+        sa.Column(
+            'unit_recorded', sa.Boolean(), server_default=sa.false(), nullable=False
+        ),
+    ]
+
+
+def check_existing(found: dict, column: sa.Column) -> None:
+    """Fail unless a column already there is the one this revision adds."""
+    if not isinstance(found['type'], type(column.type)) or (
+        bool(found['nullable']) != bool(column.nullable)
+    ):
+        raise RuntimeError(
+            f"requests.{column.name} exists but is not "
+            f"{column.type}{'' if column.nullable else ' NOT NULL'}: "
+            f"found {found['type']}{'' if found['nullable'] else ' NOT NULL'}"
+        )
+
+
 def upgrade() -> None:
     """Upgrade schema.
 
@@ -25,14 +47,25 @@ def upgrade() -> None:
     filled is not known, so every existing request records none
     (``unit_recorded`` false, ``unit_name`` NULL); copying today's unit
     would record a transfer's new unit as if it were the old one.
+
+    Each column is added only if it is missing: SQLite DDL isn't
+    transactional under alembic, so a run interrupted after adding one may
+    have left it without recording this revision. A column already there
+    must have the type and nullability this revision gives it.
     """
-    op.add_column('requests', sa.Column('unit_name', sa.String(), nullable=True))
-    op.add_column(
-        'requests',
-        sa.Column(
-            'unit_recorded', sa.Boolean(), server_default=sa.false(), nullable=False
-        ),
+    existing = (
+        {}
+        if context.is_offline_mode()
+        else {
+            found['name']: found
+            for found in sa.inspect(op.get_bind()).get_columns('requests')
+        }
     )
+    for column in new_columns():
+        if column.name in existing:
+            check_existing(existing[column.name], column)
+        else:
+            op.add_column('requests', column)
 
 
 def downgrade() -> None:

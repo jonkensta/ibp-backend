@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import pytest
 import sqlalchemy
 from alembic import command
 
@@ -10,6 +11,7 @@ from ibp import db_bootstrap
 
 from .conftest import DROP_REQUEST_UNIT_COLUMNS, TOPLEVEL
 from .test_package_items_migration import head_revision, scalar
+from .test_shipments_migration import insert_shipment
 
 MIGRATION = (
     TOPLEVEL / "alembic" / "versions" / "e9b3d7a1c5f2_add_requests_unit_at_fill.py"
@@ -143,5 +145,55 @@ def test_bootstrap_stamps_current_create_all_schema(tmp_path: Path, monkeypatch)
         assert scalar(engine, "SELECT version_num FROM alembic_version") == (
             head_revision()
         )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "already",
+    [
+        ["unit_name VARCHAR"],
+        ["unit_name VARCHAR", "unit_recorded BOOLEAN DEFAULT 0 NOT NULL"],
+    ],
+)
+def test_interrupted_upgrade_can_be_run_again(tmp_path: Path, already):
+    """An upgrade that added columns but never recorded the revision (SQLite
+    DDL isn't transactional) succeeds when run again."""
+    url = f"sqlite:///{tmp_path / 'interrupted.db'}"
+    config = db_bootstrap.build_alembic_config(url)
+    command.upgrade(config, db_bootstrap.PRE_REQUEST_UNIT_REVISION)
+    engine = sqlalchemy.create_engine(url)
+    try:
+        insert_filled_request(engine)
+        with engine.begin() as connection:
+            for column in already:
+                connection.execute(
+                    sqlalchemy.text(f"ALTER TABLE requests ADD COLUMN {column}")
+                )
+        command.upgrade(config, "head")
+        assert COLUMNS <= columns(url)
+        assert rows(engine, RECORDED) == [(None, 0)]
+        assert scalar(engine, "SELECT version_num FROM alembic_version") == (
+            head_revision()
+        )
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("column", ["unit_recorded VARCHAR", "unit_recorded BOOLEAN"])
+def test_upgrade_refuses_a_different_existing_column(tmp_path: Path, column):
+    """A column already there with another type or nullability fails the
+    upgrade instead of being taken as this revision's."""
+    url = f"sqlite:///{tmp_path / 'different.db'}"
+    config = db_bootstrap.build_alembic_config(url)
+    command.upgrade(config, db_bootstrap.PRE_REQUEST_UNIT_REVISION)
+    engine = sqlalchemy.create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                sqlalchemy.text(f"ALTER TABLE requests ADD COLUMN {column}")
+            )
+        with pytest.raises(RuntimeError, match="requests.unit_recorded exists"):
+            command.upgrade(config, "head")
     finally:
         engine.dispose()
