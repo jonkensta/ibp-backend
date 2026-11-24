@@ -53,12 +53,14 @@ Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
          set -Eeuo pipefail
          trap 'echo "SETUP STOPPED: fix the failed step and run this block again" >&2' ERR
          sudo install -d -o jstarr -g jstarr /srv/ibp /srv/ibp/data
-         git clone https://github.com/jonkensta/ibp-backend.git ~/ibp-backend
+         # A re-run keeps what an earlier attempt made: the checkout, the
+         # edited .env and the database (which the backend may have written).
+         [ -d ~/ibp-backend ] || git clone https://github.com/jonkensta/ibp-backend.git ~/ibp-backend
          cp ~/ibp-backend/deploy/pi/{compose.yaml,nginx.conf} /srv/ibp/
-         cp ~/ibp-backend/deploy/pi/.env.example /srv/ibp/.env
+         [ -e /srv/ibp/.env ] || cp ~/ibp-backend/deploy/pi/.env.example /srv/ibp/.env
          "${EDITOR:-nano}" /srv/ibp/.env     # IBP_TAG, ISBN lookup keys
          chmod 600 /srv/ibp/.env
-         cp /path/to/migrated.db /srv/ibp/data/data.db
+         [ -e /srv/ibp/data/data.db ] || cp /path/to/migrated.db /srv/ibp/data/data.db
          cd /srv/ibp
          docker compose pull
          docker compose up -d
@@ -96,16 +98,57 @@ missing file:
 
 ## Upgrading
 
+The block stops the shipment timer and holds the sync's run lock while it
+runs, so no sync can start on the new image and migrate the database before
+the backup; it starts the timer again at the end if it was running before.
+It keeps the first saved copy of the previous `.env` if it is run again.
+
     (
       set -Eeuo pipefail
-      trap 'echo "UPGRADE STOPPED: fix the failed step and run this block again" >&2' ERR
+      trap 'echo "UPGRADE STOPPED: fix the failed step and run this block again (the shipment timer stays stopped until it completes)" >&2' ERR
       cd /srv/ibp
-      cp -p .env .env.pre-<new tag>             # for a rollback
+      # Save the previous .env once: a re-run after .env was edited must
+      # not replace the saved copy with the new tag.
+      saved=.env.pre-<new tag>
+      if [ ! -e "$saved" ]; then cp -p .env "$saved"; fi
+      saved_tag=$(sed -n 's/^IBP_TAG=//p' "$saved")
+      if [ -z "$saved_tag" ] || [ "$saved_tag" = "<new tag>" ]; then
+        echo "NOT UPGRADED: $saved names ${saved_tag:-no IBP_TAG}, not the version to roll back to; fix it by hand first"
+        exit 1
+      fi
+      # No sync may start until the new version is up: one on the new image
+      # would migrate the database before the backup. The timer's state is
+      # kept, once, to restore it at the end.
+      timer_was=.shipment-timer-before-<new tag>
+      if [ ! -e "$timer_was" ]; then
+        timer_state=$(systemctl show -p ActiveState --value ibp-shipment-sync.timer)
+        printf '%s\n' "$timer_state" > "$timer_was"
+      fi
+      sudo systemctl stop ibp-shipment-sync.timer
+      # Wait for a sync already running: the service (a running oneshot is
+      # "activating") and any one-off backend container (an older wrapper's has
+      # no label of its own). Each query must succeed: a failed one stops the
+      # block instead of reading as "nothing running".
+      while :; do
+        state=$(systemctl show -p ActiveState --value ibp-shipment-sync.service)
+        case "$state" in active | activating | deactivating | reloading) sleep 5; continue ;; esac
+        running=$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)
+        if [ -z "$running" ]; then break; fi
+        sleep 5
+      done
+      # Hold the sync's run lock (the wrapper's) for the rest of the block, so
+      # no sync can start until it is done.
+      mkdir -p ~/.local/state/ibp-shipment-sync
+      exec 9>>~/.local/state/ibp-shipment-sync/run.lock
+      flock -n 9 || { echo "NOT UPGRADED: a shipment sync holds its run lock; wait for it to finish and run this block again"; exit 1; }
       "${EDITOR:-nano}" .env                     # new IBP_TAG
-      sudo systemctl start ibp-backup.service   # a fresh backup first
+      sudo systemctl start ibp-backup.service    # a fresh backup first
       docker compose pull
       docker compose up -d
       docker image prune -f
+      read -r timer_state < "$timer_was"
+      if [ "$timer_state" = active ]; then sudo systemctl start ibp-shipment-sync.timer; fi
+      rm -f "$timer_was"
     )
 
 The links between requests and labels (`package_shipments`) are stored, and
@@ -129,12 +172,18 @@ re-evaluation is incomplete and leaves the links as they were
       trap 'echo "STOPPED before the upgrade: fix the failed step and run this block again; the timer stays stopped" >&2' ERR
       # 1. Stop the timer, so no new daily run starts.
       sudo systemctl stop ibp-shipment-sync.timer
-      # 2. Wait for a run already in progress: a running oneshot service is
-      #    "activating", which is-active alone doesn't count as running.
-      while systemctl is-active --quiet ibp-shipment-sync.service || [ "$(systemctl show -p ActiveState --value ibp-shipment-sync.service)" = activating ]; do sleep 5; done
-      # 3. ...and for any one-off sync container (an older wrapper's has no
-      #    label of its own, so wait on every one-off backend container).
-      while [ -n "$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)" ]; do sleep 5; done
+      # 2.-3. Then:
+      # Wait for a sync already running: the service (a running oneshot is
+      # "activating") and any one-off backend container (an older wrapper's has
+      # no label of its own). Each query must succeed: a failed one stops the
+      # block instead of reading as "nothing running".
+      while :; do
+        state=$(systemctl show -p ActiveState --value ibp-shipment-sync.service)
+        case "$state" in active | activating | deactivating | reloading) sleep 5; continue ;; esac
+        running=$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)
+        if [ -z "$running" ]; then break; fi
+        sleep 5
+      done
       # 4. Install the new release's wrapper and units (with its run lock)
       #    before anything else runs the sync; from a checkout of the new tag:
       cd <checkout of the new tag>/scripts/shipment-sync
@@ -171,13 +220,41 @@ running or pinging Healthchecks. Its container is labelled
 Roll back by setting the previous tag and running `docker compose up -d`
 again. If the new release ran a database migration, the old backend can't
 start on the migrated database, so restore the backup taken just before the
-upgrade first, with both containers stopped (writes since then are lost):
+upgrade with the block below (writes since then are lost, but the database
+it replaces is kept in a new `data/before-rollback-…` directory). It stops
+the shipment timer and holds the sync's run lock throughout, so no sync can
+migrate the restored database; it checks everything that can fail before
+moving any file, and it can be run again after a failure. It leaves the
+timer stopped:
 
     (
       set -Eeuo pipefail
-      trap 'echo "ROLLBACK STOPPED: the step above failed" >&2' ERR
+      trap 'echo "ROLLBACK STOPPED: the step above failed; the shipment timer stays stopped" >&2' ERR
       cd /srv/ibp
-      # The containers must be stopped before anything else.
+      # Every check that can fail comes before anything is moved.
+      previous=.env.pre-<new tag>
+      [ -s "$previous" ] || { echo "NOT ROLLED BACK: $previous is missing or empty; nothing was changed"; exit 1; }
+      previous_tag=$(sed -n 's/^IBP_TAG=//p' "$previous")
+      [ -n "$previous_tag" ] || { echo "NOT ROLLED BACK: $previous names no IBP_TAG; nothing was changed"; exit 1; }
+      # No sync may start on the new image and migrate the restored database.
+      sudo systemctl stop ibp-shipment-sync.timer
+      # Wait for a sync already running: the service (a running oneshot is
+      # "activating") and any one-off backend container (an older wrapper's has
+      # no label of its own). Each query must succeed: a failed one stops the
+      # block instead of reading as "nothing running".
+      while :; do
+        state=$(systemctl show -p ActiveState --value ibp-shipment-sync.service)
+        case "$state" in active | activating | deactivating | reloading) sleep 5; continue ;; esac
+        running=$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)
+        if [ -z "$running" ]; then break; fi
+        sleep 5
+      done
+      # Hold the sync's run lock (the wrapper's) for the rest of the block, so
+      # no sync can start until it is done.
+      mkdir -p ~/.local/state/ibp-shipment-sync
+      exec 9>>~/.local/state/ibp-shipment-sync/run.lock
+      flock -n 9 || { echo "NOT ROLLED BACK: a shipment sync holds its run lock; wait for it to finish and run this block again"; exit 1; }
+      # The containers must be stopped.
       docker compose down || { echo "NOT RESTORED: the containers did not stop; nothing was changed"; exit 1; }
       # A fresh staging file, so no older one can be taken for this backup.
       mkdir -p ~/restore
@@ -186,16 +263,22 @@ upgrade first, with both containers stopped (writes since then are lost):
       zstd -d ~/backups/ibp/data-<before upgrade>.db.zst -o "$staging" || { echo "NOT RESTORED: the backup did not decompress; nothing was changed"; exit 1; }
       check=$(sqlite3 "$staging" 'PRAGMA integrity_check;') || check="failed"
       [ "$check" = ok ] || { echo "NOT RESTORED: the backup failed its integrity check; nothing was changed; pick another backup"; exit 1; }
-      # Only now is the live database replaced: the backup is copied in
-      # beside it first, then the live one and its sidecar files are moved
-      # aside (kept until verified) and the copy moved into place.
+      # Stage the new files beside the live ones, and a new directory for
+      # the live database (never an existing one, so a re-run can't
+      # overwrite what an earlier attempt kept).
       install -m 0644 "$staging" data/data.db.restoring
-      mv data/data.db data/data.db.before-rollback
-      for sidecar in -journal -wal -shm; do
-        if [ -e "data/data.db$sidecar" ]; then mv "data/data.db$sidecar" "data/data.db.before-rollback$sidecar"; fi
+      cp "$previous" .env.restoring
+      aside=data/before-rollback-$EPOCHSECONDS-$$
+      mkdir "$aside"
+      cp -p .env "$aside/.env"
+      # The swap: renames only. (An earlier attempt stopped in the middle of
+      # it may have moved the live database aside already.)
+      for file in "" -journal -wal -shm; do
+        if [ -e "data/data.db$file" ]; then mv "data/data.db$file" "$aside/data.db$file"; fi
       done
       mv data/data.db.restoring data/data.db
-      cp .env.pre-<new tag> .env                # the previous IBP_TAG
+      mv .env.restoring .env
       docker compose up -d
       docker compose ps                         # both on the old tag, healthy
+      echo "ROLLED BACK to $previous_tag; the database it replaced is in /srv/ibp/$aside. The shipment timer is still stopped: start it (sudo systemctl start ibp-shipment-sync.timer) only once the old version is confirmed healthy, and first reinstall the old wrapper and units from a checkout of $previous_tag if the rollback crosses the release that changed them."
     )
