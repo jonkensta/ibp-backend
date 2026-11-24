@@ -8,7 +8,7 @@ Create Date: 2026-11-23 00:00:00.000000
 
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
@@ -40,7 +40,23 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
-    with op.batch_alter_table('inmates') as batch_op:
-        for column in COLUMNS:
-            batch_op.drop_column(column)
+    """Downgrade schema.
+
+    On SQLite the columns are dropped with a native ``ALTER TABLE ... DROP
+    COLUMN``, not batch mode: rebuilding ``inmates`` would drop the table,
+    and with foreign keys on, that deletes (or fails on) the rows of every
+    table referring to it. Each is dropped only if it is there, so an
+    interrupted downgrade can be run again.
+    """
+    existing = (
+        set(COLUMNS)
+        if context.is_offline_mode()
+        else {found['name'] for found in sa.inspect(op.get_bind()).get_columns('inmates')}
+    )
+    for column in COLUMNS:
+        if column not in existing:
+            continue
+        if op.get_context().dialect.name == 'sqlite':
+            op.execute(f'ALTER TABLE inmates DROP COLUMN {column}')
+        else:
+            op.drop_column('inmates', column)
