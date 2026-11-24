@@ -259,11 +259,13 @@ requested) that USPS never scanned, since it was never mailed:
   Filled request processed on or up to 60 days before its purchase date
   (local). The destination unit's jurisdiction tells Texas and Federal
   numbers apart; with no destination, a number both have links to neither.
-- `unit_session`: all mailed bulk boxes to one unit on one local date are a
+- `unit_session`: all mailed bulk boxes to one place on one local date are a
   session; a box counts only once USPS has scanned it, or while it is under 7
-  days old (time for its first scan). A Filled request with no label of its
-  own links to every box of the first session to its unit on a date after
-  its processed date (a request processed on a session's date waits for the
+  days old (time for its first scan). A place is a unit, or the units that
+  are one place (above): a box stored under any of them serves the inmates
+  under every one. A Filled request with no label of its own links to every
+  box of the first session to its unit's place on a date after its
+  processed date (a request processed on a session's date waits for the
   next one), if within 28 days. A request's unit is the one its inmate was
   at when it was filled (`requests.unit_name`, recorded since that column
   was added), so a transfer afterwards doesn't move it; an older request,

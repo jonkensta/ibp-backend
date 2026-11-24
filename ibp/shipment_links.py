@@ -14,19 +14,24 @@ each named by the link's ``basis``:
   before it. Texas and Federal numbers look alike, so the label's
   destination unit decides the jurisdiction; with no destination, a number
   that both jurisdictions could match links to neither.
-- ``unit_session``: a session is every bulk box to one unit on one local
+- ``unit_session``: a session is every bulk box to one place on one local
   date that USPS has scanned, or that was bought less than ``FRESH_BOX``
-  (7 days) ago and so may not have its first scan yet. A Filled request
-  with no label of its own (no ``reference`` or ``inmate_number`` link)
-  links to every box of the first session to its unit at least
-  ``BULK_LEAD`` (a day) after the request's processed date,
-  so a request processed on a session's date waits for the next one, if
-  that session is within ``BULK_LINK_WINDOW`` of it. A request's unit is
-  the one it recorded when it was filled (``requests.unit_name``), so a
-  transfer afterwards doesn't move it; a request filled before that was
-  recorded (NULL) uses its inmate's unit as it is now. The unit's shipping
-  method is not consulted: boxes do go to units marked Individual, and a
-  package with its own label is already linked to it.
+  (7 days) ago and so may not have its first scan yet. A place is a unit,
+  or the units that are one facility under several provider codes
+  (``ibp.unit_places.Places``: same jurisdiction, display name and 5-digit
+  ZIP): a box stored under any of them serves the inmates under every one,
+  and boxes stored under different units of one place on one date are one
+  session. A box to a unit IBP doesn't have makes no session. A Filled
+  request with no label of its own (no ``reference`` or ``inmate_number``
+  link) links to every box of the first session to its unit's place at
+  least ``BULK_LEAD`` (a day) after the request's processed date, so a
+  request processed on a session's date waits for the next one, if that
+  session is within ``BULK_LINK_WINDOW`` of it. A request's unit is the one
+  it recorded when it was filled (``requests.unit_name``), so a transfer
+  afterwards doesn't move it; a request filled before that was recorded
+  (NULL) uses its inmate's unit as it is now. The unit's shipping method is
+  not consulted: boxes do go to units marked Individual, and a package with
+  its own label is already linked to it.
 
 A label that was never mailed (``never_mailed``) gets no links. Nothing
 here works out delivery: the stored events are left for that.
@@ -42,6 +47,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session, selectinload
 
 from . import clock, models
+from .unit_places import Places, UnitKey
 
 # How long before an untagged individual label's purchase date its request
 # may have been processed.
@@ -150,14 +156,16 @@ def _inmate_number_links(
 
 
 def _bulk_sessions(
-    shipments: list[models.Shipment], now: datetime.datetime
-) -> dict[tuple[str, str], dict[datetime.date, list[int]]]:
-    """Group bulk boxes by unit, then by local date: unit -> date -> box ids.
+    shipments: list[models.Shipment], places: Places, now: datetime.datetime
+) -> dict[UnitKey, dict[datetime.date, list[int]]]:
+    """Group bulk boxes by place (its representative), then by local date:
+    place -> date -> box ids.
 
     Only boxes USPS has scanned, or bought less than ``FRESH_BOX`` ago,
-    count: an older box never scanned was likely never mailed.
+    count: an older box never scanned was likely never mailed. A box to a
+    unit IBP doesn't have is left out.
     """
-    sessions: dict[tuple[str, str], dict[datetime.date, list[int]]] = defaultdict(
+    sessions: dict[UnitKey, dict[datetime.date, list[int]]] = defaultdict(
         lambda: defaultdict(list)
     )
     for shipment in shipments:
@@ -167,20 +175,27 @@ def _bulk_sessions(
             and shipment.unit_name is not None
             and (is_scanned(shipment) or now - shipment.purchased_at < FRESH_BOX)
         ):
-            unit = (shipment.unit_jurisdiction, shipment.unit_name)
-            sessions[unit][local_date(shipment.purchased_at)].append(shipment.id)
+            place = places.representative(
+                (shipment.unit_jurisdiction, shipment.unit_name)
+            )
+            if place is not None:
+                sessions[place][local_date(shipment.purchased_at)].append(shipment.id)
     return sessions
 
 
-def _unit_requests(
-    session: Session, unit: tuple[str, str], first: datetime.date, last: datetime.date
+def _place_requests(
+    session: Session,
+    units: frozenset[UnitKey],
+    first: datetime.date,
+    last: datetime.date,
 ) -> list[sa.Row]:
-    """Filled requests to a unit that a session from ``first`` to ``last``
-    could link: (jurisdiction, inmate id, index, processed date).
+    """Filled requests to a place's ``units`` that a session from ``first``
+    to ``last`` could link: (jurisdiction, inmate id, index, processed date).
 
     A request's unit is the one it recorded, else its inmate's current one.
     """
-    jurisdiction, unit_name = unit
+    (jurisdiction,) = {unit[0] for unit in units}
+    unit_names = sorted(unit[1] for unit in units)
     return list(
         session.execute(
             sa.select(
@@ -198,8 +213,9 @@ def _unit_requests(
             )
             .where(
                 models.Inmate.jurisdiction == jurisdiction,
-                sa.func.coalesce(models.Request.unit_name, models.Inmate.unit_name)
-                == unit_name,
+                sa.func.coalesce(models.Request.unit_name, models.Inmate.unit_name).in_(
+                    unit_names
+                ),
                 models.Request.action == "Filled",
                 models.Request.date_processed >= first - BULK_LINK_WINDOW,
                 models.Request.date_processed <= last - BULK_LEAD,
@@ -216,12 +232,11 @@ def _unit_session_links(
 ) -> None:
     # Requests already linked to a label of their own did not ride in a box.
     labelled = {key[:3] for key in links}
-    for unit, by_date in sorted(_bulk_sessions(shipments, now).items()):
-        if session.get(models.Unit, unit) is None:
-            continue
+    places = Places(session.scalars(sa.select(models.Unit)).all())
+    for place, by_date in sorted(_bulk_sessions(shipments, places, now).items()):
         dates = sorted(by_date)
-        for jurisdiction, inmate_id, index, processed in _unit_requests(
-            session, unit, dates[0], dates[-1]
+        for jurisdiction, inmate_id, index, processed in _place_requests(
+            session, places.members(place), dates[0], dates[-1]
         ):
             if (jurisdiction, inmate_id, index) in labelled:
                 continue
