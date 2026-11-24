@@ -289,16 +289,39 @@ def label_kind(
     return "other"
 
 
+def destination(
+    tag: Optional[Tag],
+    number: Optional[str],
+    to_address: dict[str, Optional[str]],
+    units: UnitMatcher,
+    unit_recipient: str,
+) -> tuple[Optional[tuple[str, str]], str]:
+    """The label's unit (from its tag, else its address) and its kind."""
+    unit = None
+    if tag is not None and tag.unit is not None:
+        unit = units.by_tag(*tag.unit)
+    conflict = False
+    if unit is None:
+        unit, conflict = units.locate(to_address)
+    if conflict and tag is None:
+        # Where it went is in doubt, so its addressee's number can't be
+        # trusted to be an inmate at either place.
+        return unit, "other"
+    return unit, label_kind(tag, number, to_address, unit_recipient)
+
+
 def read_label(
     shipment: dict[str, Any], units: UnitMatcher, unit_recipient: str
 ) -> Optional[Label]:
     """Read a listed shipment, or None if it has no label (never purchased).
 
     The kind comes from the reference tag; without one, a label whose
-    addressee line ends in an inmate number is ``individual``, one addressed
-    to ``unit_recipient`` (the shipping settings' mailroom line) is
-    ``bulk``, and anything else is ``other``. The name and street address
-    are read here and never stored, nor is a reference that is not a tag.
+    address's evidence of its destination conflicts (``Destination``) is
+    ``other``; else one whose addressee line ends in an inmate number is
+    ``individual``, one addressed to ``unit_recipient`` (the shipping
+    settings' mailroom line) is ``bulk``, and anything else is ``other``.
+    The name and street address are read here and never stored, nor is a
+    reference that is not a tag.
 
     Raises ``Malformed`` for a shipment not of EasyPost's shape: ids and the
     tracking code not of theirs (``SHIPMENT_ID``, ``TRACKER_ID``,
@@ -321,13 +344,7 @@ def read_label(
     tag = parse_reference(reference)
     number = inmate_number(to_address.get("name"))
 
-    unit = None
-    if tag is not None and tag.unit is not None:
-        unit = units.by_tag(*tag.unit)
-    if unit is None:
-        unit = units.by_address(to_address)
-
-    kind = label_kind(tag, number, to_address, unit_recipient)
+    unit, kind = destination(tag, number, to_address, units, unit_recipient)
     request = tag.request if tag is not None else None
     return Label(
         easypost_id=shipment["id"],

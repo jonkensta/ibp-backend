@@ -211,8 +211,14 @@ def display_name(unit: models.Unit) -> Optional[str]:
 
 def address_numbers(unit: models.Unit) -> set[tuple[str, str]]:
     """The unit's house numbers and P.O. box numbers, tagged by kind."""
+    return line_numbers((unit.street1, unit.street2))
+
+
+def line_numbers(lines: Iterable[Optional[str]]) -> set[tuple[str, str]]:
+    """The house numbers and P.O. box numbers address lines start with,
+    tagged by kind (``("house", "264")``, ``("box", "9000")``)."""
     numbers = set()
-    for line in (unit.street1, unit.street2):
+    for line in lines:
         house = leading_number(line)
         if house is not None:
             numbers.add(("house", house))

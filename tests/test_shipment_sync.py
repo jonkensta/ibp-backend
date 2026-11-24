@@ -1605,3 +1605,96 @@ def test_odd_error_code_does_not_stop_the_polling(sessions):
     client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
     summary = shipment_sync.run(client, sessions, now=NOW)
     assert (summary.polled, summary.poll_failures) == (1, 1)
+
+
+# --- conflicting destination evidence ------------------------------------------
+
+
+@pytest.fixture
+def conflict_matcher(api_db):
+    """Texas units at a street and at a P.O. box, and a Federal unit
+    elsewhere (invented names and addresses)."""
+    with api_db() as session:
+        return UnitMatcher(
+            [
+                add_unit(session, "ALPHA", street1="100 Example Rd", zipcode="77000"),
+                add_unit(
+                    session,
+                    "BRADLEY",
+                    street1="Bradley Unit",
+                    street2="P.O. Box 9000",
+                    zipcode="75600",
+                ),
+                add_unit(
+                    session,
+                    "DELTA CODE",
+                    jurisdiction="Federal",
+                    street1="Delta Unit",
+                    street2="5 Federal Way",
+                    zipcode="77600",
+                    shipping_method="Federal Tub",
+                ),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "address, destination",
+    [
+        # A Texas street, a Federal name.
+        (
+            {"company": "DELTA UNIT", "street1": "100 EXAMPLE RD", "zip": "77000"},
+            (None, True),
+        ),
+        # A Texas P.O. box, a Federal name.
+        (
+            {"company": "DELTA UNIT", "street1": "PO BOX 9000", "zip": "75600"},
+            (None, True),
+        ),
+        # A P.O. box alone is address evidence.
+        ({"street1": "PO BOX 9000", "zip": "75600"}, (("Texas", "BRADLEY"), False)),
+        ({"street1": "PO BOX 9001", "zip": "75600"}, (None, False)),
+        # No evidence at all is not a conflict.
+        ({"street1": "1 Nowhere Rd", "zip": "77000"}, (None, False)),
+        (
+            {"company": "BRADLEY UNIT", "street1": "PO BOX 9000", "zip": "75600"},
+            (("Texas", "BRADLEY"), False),
+        ),
+    ],
+)
+def test_locate_tells_conflicting_evidence_from_none(
+    conflict_matcher, address, destination
+):
+    """A name contradicted by the street or P.O. box is a conflict, which
+    no evidence is not."""
+    assert tuple(conflict_matcher.locate(address)) == destination
+
+
+def test_label_with_conflicting_destination_links_no_one(sessions):
+    """An untagged label to a Texas street naming a Federal facility is
+    kind other, so its addressee's number links no request in either
+    jurisdiction; listed again with clean evidence it is individual again."""
+    with sessions() as session:
+        add_unit(
+            session,
+            "DELTA CODE",
+            jurisdiction="Federal",
+            street1="Delta Unit",
+            street2="5 Federal Way",
+            zipcode="77600",
+            shipping_method="Federal Tub",
+        )
+        add_inmate(session, 40000001, jurisdiction="Federal")
+        add_request(
+            session, 40000001, 0, ago(5).date().isoformat(), jurisdiction="Federal"
+        )
+        session.commit()
+    conflicting = shipment(1, ago(3), company="DELTA UNIT")
+    summary = sync(FakeEasyPost([conflicting]), sessions)
+    row = stored(sessions, "shp_00000001")
+    assert (row.kind, row.unit_name, row.inmate_number) == ("other", None, "40000001")
+    assert summary.links == 0
+    clean = shipment(1, ago(3))
+    sync(FakeEasyPost([clean]), sessions)
+    row = stored(sessions, "shp_00000001")
+    assert (row.kind, row.unit_name) == ("individual", "ALPHA")
