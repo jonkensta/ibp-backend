@@ -145,8 +145,9 @@ def list_window(
 
     The end is pushed a second later so a label bought on a boundary second
     is listed by one window or both (the caller keys on the shipment id).
-    A page that is not a list, or whose last shipment has no id of
-    EasyPost's shape to page on, raises ``ApiError``.
+    A page without a ``shipments`` list or a boolean ``has_more``, or whose
+    last shipment has no id of EasyPost's shape to page on, raises
+    ``ApiError``.
     """
     params: dict[str, Any] = {
         "page_size": PAGE_SIZE,
@@ -158,12 +159,14 @@ def list_window(
     }
     while True:
         data = client.get("shipments", params)
-        batch = data.get("shipments") or []
-        if not isinstance(batch, list):
+        batch, has_more = data.get("shipments"), data.get("has_more", False)
+        # A page without its list, or with has_more not a boolean, would
+        # otherwise end the listing early as if it were complete.
+        if not isinstance(batch, list) or not isinstance(has_more, bool):
             raise ApiError("GET shipments: page not of EasyPost's shape")
         if batch:
             yield batch
-        if not batch or data.get("has_more") is not True:
+        if not batch or not has_more:
             return
         last = batch[-1].get("id") if isinstance(batch[-1], dict) else None
         if not isinstance(last, str) or not SHIPMENT_ID.fullmatch(last):
@@ -590,7 +593,8 @@ def main(
     sessions: Optional[sessionmaker] = None,
     client: Optional[EasyPost] = None,
 ) -> int:
-    """Run the sync; return 0, 1 if anything failed, 2 without a key.
+    """Run the sync; return 0, 1 if anything failed (a label skipped or a
+    tracker not fetched included), 2 without a key.
 
     Any failure but a missing key is logged as one line (``describe_failure``),
     never as a traceback. ``sessions`` and ``client`` are for tests.
@@ -622,7 +626,8 @@ def main(
             )
         return 1
     logger.info("%s", summary.line())
-    return 1 if summary.poll_failures else 0
+    # A label skipped or a tracker not fetched is data the run didn't get.
+    return 1 if summary.poll_failures or summary.skipped else 0
 
 
 if __name__ == "__main__":

@@ -1076,14 +1076,15 @@ def test_malformed_label_is_skipped_counted_and_never_logged(
     sessions, logs, capsys, overrides
 ):
     """A listed label not of EasyPost's shape is not stored, is counted as
-    skipped, and none of its values reach the log; the run goes on."""
+    skipped, and none of its values reach the log; the run goes on, and
+    fails at the end (it didn't get every label)."""
     now = datetime.datetime.now(datetime.timezone.utc)
     fake = FakeEasyPost(
         [shipment(1, now - 2 * DAY, **overrides), shipment(2, now - DAY)]
     )
     client = EasyPost(KEY, urlopen=fake, sleep=lambda _: None)
     with logs.at_level(logging.INFO):
-        assert shipment_sync.main([], sessions=sessions, client=client) == 0
+        assert shipment_sync.main([], sessions=sessions, client=client) == 1
     assert "1 labels seen, 1 new" in logs.text and "1 skipped" in logs.text
     with sessions() as session:
         assert [row.easypost_id for row in session.query(models.Shipment)] == [
@@ -1117,6 +1118,10 @@ def test_malformed_tracker_is_a_poll_failure_and_never_logged(sessions, logs):
         {"shipments": {"0": SENTINEL}, "has_more": False},
         {"shipments": [{"id": SENTINEL}], "has_more": True},
         {"shipments": [SENTINEL], "has_more": True},
+        # Either would end the listing early as if it were complete.
+        {"has_more": False},
+        {"shipments": [], "has_more": "true"},
+        {"shipments": [{"id": "shp_00000001"}], "has_more": 1},
     ],
 )
 def test_page_not_of_easyposts_shape_is_an_api_error(page):

@@ -22,11 +22,14 @@ No names or addresses are logged or stored. A listed label not of
 EasyPost's shape (an id other than `shp_` and hex digits, a tracker id
 other than `trk_` and hex digits, a tracking code other than 8 to 40
 letters and digits, or a field of the wrong type) is not stored and is
-counted as "skipped"; a tracker of the wrong shape is a failed poll. Only
+counted as "skipped", and the run then exits 1; a tracker of the wrong
+shape is a failed poll. A listing page without its list of shipments or a
+boolean `has_more` fails the run rather than ending the listing early. Only
 checked ids reach a log line.
 
 Exit status: 0 ok, 1 an EasyPost or database error (or a tracker it could
-not fetch) or any other failure, 2 no usable key. Failures, retries and
+not fetch, or a listed label it skipped) or any other failure, 2 no usable
+key, 75 another run in progress (the wrapper's lock, below). Failures, retries and
 unfetched trackers are logged as one line each with no values: a fixed
 operation (`GET shipments`, `GET shipment`, `GET tracker`, never an id or
 query string) with an EasyPost error's HTTP status and code (a known code,
