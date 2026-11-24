@@ -489,7 +489,7 @@ def test_endpoint_empty(client, api_db):  # pylint: disable=unused-argument
     assert response.json()["data"] == []
 
 
-def run_loader(api_db, start=None, end=None):
+def run_loader(api_db, start=None, end=None, from_first_linked=False):
     """Run ``load_rows`` on the test database; return its result and every
     statement it sent, with its parameters."""
     with api_db() as session:
@@ -504,7 +504,7 @@ def run_loader(api_db, start=None, end=None):
         sa.event.listen(engine.sync_engine, "before_cursor_execute", record)
         try:
             async with AsyncSession(engine) as session:
-                return await load_rows(session, start, end)
+                return await load_rows(session, start, end, from_first_linked)
         finally:
             await engine.dispose()
 
@@ -948,3 +948,14 @@ def test_nothing_linked_gives_no_months(client, api_db):
 
     assert months_of(client) == []
     assert len(months_of(client, start_date="2025-01-01")) == 4
+
+
+def test_trimmed_load_is_one_statement(api_db):
+    """Finding the first linked month adds no statement, and the Filled
+    requests before its month are not even counted."""
+    seed_months(api_db)
+
+    rows, statements = run_loader(api_db, from_first_linked=True)
+
+    assert len(statements) == 1
+    assert rows.filled == {"2026-01": 2, "2026-02": 1, "2026-03": 1}
