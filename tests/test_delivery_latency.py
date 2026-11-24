@@ -1,17 +1,21 @@
 """The postmark-to-delivery latency metric. All data is invented."""
 
+import asyncio
 import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from ibp import models
+from ibp import delivery_latency, models
 from ibp.delivery_latency import (
     Event,
     FilledRequest,
     LabelOutcome,
     Link,
     label_outcomes,
+    load_rows,
     percentile,
     request_delivery,
     summarize,
@@ -472,3 +476,75 @@ def test_endpoint_empty(client, api_db):  # pylint: disable=unused-argument
 
     assert response.status_code == 200
     assert response.json()["data"] == []
+
+
+def run_loader(api_db, start=None, end=None):
+    """Run ``load_rows`` on the test database; return its result and every
+    statement it sent, with its parameters."""
+    with api_db() as session:
+        path = session.get_bind().url.database
+    statements: list[tuple[str, tuple]] = []
+
+    def record(_conn, _cursor, statement, parameters, _context, _executemany):
+        statements.append((statement, tuple(parameters)))
+
+    async def run():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+        sa.event.listen(engine.sync_engine, "before_cursor_execute", record)
+        try:
+            async with AsyncSession(engine) as session:
+                return await load_rows(session, start, end)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(run()), statements
+
+
+def event_queries(statements):
+    """The statements after the first (the events queries)."""
+    return statements[1:]
+
+
+def test_loader_fetches_events_only_for_cohort_labels(api_db):
+    """A postmark range loads the events of its own requests' labels only."""
+    seed(api_db)
+
+    (requests, links, events), statements = run_loader(
+        api_db, datetime.date(2026, 1, 1), datetime.date(2026, 1, 31)
+    )
+
+    assert [r.key for r in requests] == [("Texas", NUMBER, 1)]
+    (label,) = {link.shipment_id for link in links}
+    (query,) = event_queries(statements)
+    assert label in query[1]
+    assert set(query[1]) - {"delivered", "return_to_sender"} == {label}
+    assert events == []  # the January label is still in the mail
+
+
+def test_loader_fetches_no_events_for_an_empty_cohort(api_db):
+    """No request in the range means no events query at all."""
+    seed(api_db)
+
+    (requests, links, events), statements = run_loader(
+        api_db, datetime.date(2030, 1, 1), datetime.date(2030, 12, 31)
+    )
+
+    assert (requests, links, events) == ([], [], [])
+    assert len(statements) == 1
+
+
+def test_loader_reads_the_links_once(api_db, monkeypatch):
+    """The events come from the first query's labels, in chunks, and the
+    link table is never read again."""
+    seed(api_db)
+    monkeypatch.setattr(delivery_latency, "EVENT_CHUNK", 1)
+
+    (_, links, events), statements = run_loader(api_db)
+
+    labels = {link.shipment_id for link in links}
+    assert "package_shipments" in statements[0][0]
+    assert len(event_queries(statements)) == len(labels) == 4
+    for statement, _ in event_queries(statements):
+        assert "package_shipments" not in statement
+    assert sorted(e.status for e in events) == ["delivered"] * 3
+    assert {e.shipment_id for e in events} < labels
