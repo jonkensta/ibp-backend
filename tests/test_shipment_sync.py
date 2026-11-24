@@ -279,6 +279,154 @@ def test_unit_matching_by_address(matcher, address, unit):
     assert matcher.by_address(address) == unit
 
 
+@pytest.fixture
+def coded_matcher(api_db):
+    """Units keyed by provider codes that differ from the names labels print
+    (invented codes, names and addresses)."""
+    with api_db() as session:
+        units = [
+            # Two units at one address, told apart by display name only.
+            add_unit(
+                session,
+                "PLAIN JAIL",
+                street1="Plain Unit",
+                street2="904 FM 686",
+                zipcode="77535",
+            ),
+            add_unit(
+                session,
+                "SANTA BABY BOND",
+                street1="Santa Baby Bonding Unit",
+                street2="904 FM 686",
+                zipcode="77535",
+            ),
+            # A P.O. box for the street.
+            add_unit(
+                session,
+                "BRADLEY",
+                street1="Bradley Unit",
+                street2="P.O. Box 9000",
+                zipcode="75600",
+            ),
+            add_unit(
+                session, "MURRAYS", street1="Murrays Unit", street2="1916 N Hwy 36"
+            ),
+            # One place under two codes (the street spelled two ways), and a
+            # different unit at the same street address.
+            add_unit(
+                session,
+                "WAINRIGHT",
+                street1="J. Doe Wainright Unit",
+                street2="2665 Prison Road #1",
+                zipcode="75851",
+            ),
+            add_unit(
+                session,
+                "J. DOE WAINRIGHT",
+                street1="J. Doe Wainright Unit",
+                street2="2665 Prison Rd. #1",
+                zipcode="75851-1234",
+            ),
+            add_unit(
+                session,
+                "EASTMAN",
+                street1="Eastman Unit",
+                street2="2665 Prison Road #1",
+                zipcode="75851",
+            ),
+            # One display name in two towns.
+            add_unit(
+                session,
+                "TWINTOWN NORTH",
+                street1="Twin Town Unit",
+                street2="1 North Rd",
+                zipcode="76000",
+            ),
+            add_unit(
+                session,
+                "TWINTOWN SOUTH",
+                street1="Twin Town Unit",
+                street2="1 South Rd",
+                zipcode="76100",
+            ),
+        ]
+        return UnitMatcher(units)
+
+
+@pytest.mark.parametrize(
+    "address, unit",
+    [
+        # The display name, where the key name differs.
+        (
+            {"street1": "904 FM 686", "street2": "PLAIN UNIT", "zip": "77535"},
+            ("Texas", "PLAIN JAIL"),
+        ),
+        (
+            {"street1": "SANTA BABY BONDING UNIT", "zip": "77535"},
+            ("Texas", "SANTA BABY BOND"),
+        ),
+        # The shared address alone is ambiguous.
+        ({"street1": "904 FM 686", "zip": "77535"}, None),
+        # The key name still matches.
+        ({"company": "Plain Jail", "street1": "904 FM 686"}, ("Texas", "PLAIN JAIL")),
+        # A P.O. box unit, by name.
+        (
+            {"street1": "PO BOX 9000", "street2": "BRADLEY UNIT", "zip": "75600"},
+            ("Texas", "BRADLEY"),
+        ),
+        # A unique name in another ZIP than the unit's.
+        (
+            {"street1": "1916 N HWY 36", "street2": "MURRAYS UNIT", "zip": "76528"},
+            ("Texas", "MURRAYS"),
+        ),
+        # One place under two codes: its representative, by name or address.
+        (
+            {"street1": "2665 PRISON RD # 1", "street2": "J DOE WAINRIGHT UNIT"},
+            ("Texas", "J. DOE WAINRIGHT"),
+        ),
+        ({"street1": "Wainright", "zip": "75851"}, ("Texas", "J. DOE WAINRIGHT")),
+        # The different unit at that address is not merged with it.
+        (
+            {"street1": "2665 PRISON RD # 1", "street2": "EASTMAN UNIT"},
+            ("Texas", "EASTMAN"),
+        ),
+        ({"street1": "2665 PRISON RD # 1", "zip": "75851"}, None),
+        # A display name in two towns: the ZIP decides, or nothing does.
+        ({"street1": "TWIN TOWN UNIT", "zip": "76100"}, ("Texas", "TWINTOWN SOUTH")),
+        ({"street1": "TWIN TOWN UNIT", "zip": "76200"}, None),
+    ],
+)
+def test_unit_matching_by_display_name(coded_matcher, address, unit):
+    """A label's lines match a unit's key name or display name; units that
+    are one place give their representative."""
+    assert coded_matcher.by_address(address) == unit
+
+
+def test_relisting_updates_a_stored_labels_unit(sessions):
+    """A label stored before its unit could be told gets the unit when it is
+    listed again (as ``--since`` lists every label back to its date)."""
+    fake = FakeEasyPost(
+        [
+            shipment(
+                1,
+                ago(3),
+                name="ATTN: MAILROOM STAFF",
+                street1="300 New Rd",
+                street2="GAMMA UNIT",
+                zip="77002",
+            )
+        ]
+    )
+    sync(fake, sessions)
+    assert stored(sessions, "shp_0001").unit_name is None
+    with sessions() as session:
+        add_unit(session, "GAMMA CODE", street1="Gamma Unit", zipcode="77002")
+        session.commit()
+    summary = sync(fake, sessions)
+    assert summary.updated == 1
+    assert stored(sessions, "shp_0001").unit_name == "GAMMA CODE"
+
+
 # --- listing -------------------------------------------------------------------
 
 

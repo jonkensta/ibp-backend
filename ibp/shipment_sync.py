@@ -50,6 +50,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from . import models
 from .labels import RequestKey, parse_request_code
 from .shipment_links import never_mailed, rebuild_links
+from .unit_places import Places, display_name, squeeze, zip5
 
 logger = logging.getLogger(__name__)
 
@@ -142,16 +143,6 @@ def normalize(text: Optional[str]) -> str:
     return re.sub(r"[^A-Z0-9]+", " ", (text or "").upper()).strip()
 
 
-def zip5(zipcode: Optional[str]) -> str:
-    """The first five digits of a ZIP code."""
-    return re.sub(r"\D", "", zipcode or "")[:5]
-
-
-def squeeze(text: Optional[str]) -> str:
-    """Uppercase letters and digits only (``O'Daniel Unit`` is ``ODANIELUNIT``)."""
-    return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
-
-
 _HOUSE_NUMBER = re.compile(r"\s*(\d+)(?!\d)")
 
 
@@ -165,14 +156,16 @@ class UnitMatcher:
     """Finds the IBP unit a label went to, by its tag, name or address."""
 
     def __init__(self, units: Iterable[models.Unit]):
+        units = list(units)
+        self._places = Places(units)
         self._by_tag: dict[tuple[str, str], tuple[str, str]] = {}
         self._by_name: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
         self._by_number: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
         for unit in units:
             key = (unit.jurisdiction, unit.name)
             self._by_tag[(unit.jurisdiction, unit.name.upper())] = key
-            if squeeze(unit.name):
-                self._by_name[squeeze(unit.name)].append((*key, zip5(unit.zipcode)))
+            for name in {squeeze(unit.name), squeeze(display_name(unit))} - {""}:
+                self._by_name[name].append((*key, zip5(unit.zipcode)))
             for street in (unit.street1, unit.street2):
                 number = house_number(street)
                 if number is not None:
@@ -183,18 +176,23 @@ class UnitMatcher:
         return self._by_tag.get((jurisdiction, name.upper()))
 
     def by_address(self, address: dict[str, Any]) -> Optional[tuple[str, str]]:
-        """The one unit a label's address names or is at, or None.
+        """The one place a label's address names or is at, or None.
 
-        Units store the street in either line (usually the unit's name in
-        ``street1`` and the street in ``street2``), and EasyPost's verified
-        addresses come back in USPS spelling with the name moved to
+        Units store the street in either line (usually the unit's display
+        name in ``street1`` and the street in ``street2``), and EasyPost's
+        verified addresses come back in USPS spelling with the name moved to
         ``street2``, so whole lines are not compared. First, a ``street1``,
-        ``street2`` or ``company`` line that is a unit's name (letters and
-        digits only, any case) names that unit; a name more than one unit has
-        (Texas and Federal) counts only if the ZIP leaves one. Otherwise the
-        house number either street line starts with, with the 5-digit ZIP,
-        must lead one unit's ``street1`` or ``street2``. Units sharing an
-        address are told apart only by name; anything ambiguous is unknown.
+        ``street2`` or ``company`` line that is a unit's key name or display
+        name (``unit_places.display_name``; letters and digits only, any
+        case) names that unit, whatever the ZIP; a name units in more than
+        one place have (Texas and Federal, or one display name in two towns)
+        counts only if the ZIP leaves one place. Otherwise the house number
+        either street line starts with, with the 5-digit ZIP, must lead the
+        ``street1`` or ``street2`` of units in one place. Units in different
+        places at one address are told apart only by name; anything
+        ambiguous is unknown. The unit returned is its place's
+        representative (``unit_places.Places``), so units that are one
+        place give one answer.
         """
         zipcode = zip5(address.get("zip"))
         named = {
@@ -203,18 +201,18 @@ class UnitMatcher:
             for unit in self._by_name.get(squeeze(address.get(field)), [])
         }
         if named:
-            if len(named) > 1:
-                named = {unit for unit in named if unit[2] == zipcode}
-            if len(named) != 1:
-                return None
-            jurisdiction, name, _ = named.pop()
-            return (jurisdiction, name)
+            place = self._places.one_place((j, name) for j, name, _ in named)
+            if place is None:
+                place = self._places.one_place(
+                    (j, name) for j, name, unit_zip in named if unit_zip == zipcode
+                )
+            return place
         at_number: set[tuple[str, str]] = set()
         for field in ("street1", "street2"):
             number = house_number(address.get(field))
             if number is not None:
                 at_number |= self._by_number.get((number, zipcode), set())
-        return at_number.pop() if len(at_number) == 1 else None
+        return self._places.one_place(at_number)
 
 
 class EventValues(NamedTuple):
