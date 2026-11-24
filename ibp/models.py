@@ -246,6 +246,13 @@ class Request(HasInmateIndex, Base):
 
     request_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
+    # The inmate's unit (in ``inmate_jurisdiction``) when the request was
+    # filled: where the person was when the package was prepared, kept after
+    # a transfer. NULL for every request filled before the column was
+    # added. No foreign key:
+    # a unit renamed or removed later just matches nothing.
+    unit_name: Mapped[Optional[str]] = mapped_column(String)
+
     # Incremented on every add, edit or delete of the request's items, in the
     # same transaction (see ibp/package_api.py).
     contents_revision: Mapped[int] = mapped_column(

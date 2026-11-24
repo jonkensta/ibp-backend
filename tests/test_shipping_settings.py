@@ -11,7 +11,7 @@ from alembic import command
 
 from ibp import db_bootstrap, models
 
-from .conftest import SHIPMENT_TABLES
+from .conftest import DROP_REQUEST_UNIT_NAME, SHIPMENT_TABLES
 
 DEFAULTS = {
     "return_address": {
@@ -220,6 +220,7 @@ def test_bootstrap_adopts_pre_settings_create_all_schema(tmp_path, monkeypatch):
     models.Base.metadata.create_all(engine, tables=tables)
     with engine.begin() as connection:
         # Added after this schema's era.
+        connection.execute(sqlalchemy.text(DROP_REQUEST_UNIT_NAME))
         for column in [
             "inmates.next_request_index",
             "requests.contents_revision",

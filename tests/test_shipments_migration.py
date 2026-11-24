@@ -9,7 +9,12 @@ from alembic import command
 import ibp.models
 from ibp import db_bootstrap
 
-from .conftest import DROP_SHIPMENT_TABLES, SHIPMENT_TABLES, TOPLEVEL
+from .conftest import (
+    DROP_REQUEST_UNIT_NAME,
+    DROP_SHIPMENT_TABLES,
+    SHIPMENT_TABLES,
+    TOPLEVEL,
+)
 from .test_package_items_migration import head_revision, insert_request, scalar
 from .test_race_sex_migration import ROWS, after, insert_rows, stored
 
@@ -53,9 +58,8 @@ def insert_shipment(engine: sqlalchemy.Engine) -> None:
         )
 
 
-def test_migration_is_the_only_head_after_race_sex():
-    """The revision is the single head, right after the race and sex one."""
-    assert head_revision() == "a3c8e6f2d9b4"
+def test_migration_follows_race_sex():
+    """The revision comes right after the race and sex one."""
     source = MIGRATION.read_text(encoding="utf-8")
     assert "down_revision: Union[str, None] = 'd2a6f8c3e1b7'" in source
     assert db_bootstrap.PRE_SHIPMENTS_REVISION == "d2a6f8c3e1b7"
@@ -171,7 +175,7 @@ def test_bootstrap_adopts_pre_shipments_create_all_schema(tmp_path: Path, monkey
     try:
         ibp.models.Base.metadata.create_all(engine)
         with engine.begin() as connection:
-            for statement in DROP_SHIPMENT_TABLES:
+            for statement in [*DROP_SHIPMENT_TABLES, DROP_REQUEST_UNIT_NAME]:
                 connection.execute(sqlalchemy.text(statement))
         insert_rows(engine, ROWS)
         bootstrap(monkeypatch, url)
