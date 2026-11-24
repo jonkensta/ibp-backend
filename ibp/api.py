@@ -877,9 +877,8 @@ async def get_metrics_requests(
     """Get request metrics aggregated by month."""
     logger.debug("Fetching request metrics")
 
-    # Calculate date range from preset if provided
-    if date_range and not (start_date and end_date):
-        start_date, end_date = metrics.calculate_date_range(date_range)
+    # Explicit bounds win; the preset fills only a bound not given.
+    start_date, end_date = metrics.resolve_date_range(date_range, start_date, end_date)
 
     data = await metrics.get_request_metrics(
         session=session,
@@ -899,5 +898,7 @@ async def get_metrics_requests(
             "jurisdiction": jurisdiction,
             "action": action,
             "date_range": date_range,
+            "start_date": start_date,
+            "end_date": end_date,
         },
     )
