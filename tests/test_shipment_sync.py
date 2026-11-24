@@ -1434,3 +1434,63 @@ def test_main_rebuilds_links_without_a_key(sessions, monkeypatch):
     assert shipment_sync.main(["--rebuild-links"], sessions=sessions) == 0
     with sessions() as session:
         assert session.query(models.PackageShipment).count() == 1
+
+
+# --- unexpected JSON shapes ----------------------------------------------------
+
+
+@pytest.mark.parametrize("code", [[], {}, 7, None, True])
+def test_error_code_of_any_shape_is_other_or_none(code):
+    """A non-string error code is "other" (None for none), not a TypeError."""
+    body = json.dumps({"error": {"code": code}}).encode()
+    client = EasyPost(KEY, urlopen=failing_urlopen(404, body), sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError) as raised:
+        client.get("trackers/trk_00000001")
+    expected = "GET tracker: HTTP 404" + ("" if code is None else " other")
+    assert str(raised.value) == expected
+
+
+@pytest.mark.parametrize("body", [b"[]", b"null", b"7", b'"text"'])
+def test_response_that_is_not_an_object_is_an_api_error(body):
+    """A JSON body that is not an object is retried, then an ApiError."""
+    client = EasyPost(
+        KEY, urlopen=lambda request, timeout: io.BytesIO(body), sleep=lambda _: None
+    )
+    with pytest.raises(shipment_sync.ApiError, match="reading response"):
+        client.get("shipments")
+
+
+@pytest.mark.parametrize("value", ["nan", "-5", "inf", "soon"])
+def test_odd_retry_after_falls_back_to_backoff(value):
+    """A Retry-After that is not a finite, non-negative number is ignored."""
+    headers = email.message.Message()
+    headers["Retry-After"] = value
+    error = urllib.error.HTTPError("u", 429, "busy", headers, io.BytesIO(b""))
+    assert easypost_client.retry_after(error) is None
+
+
+def test_odd_error_code_does_not_stop_the_polling(sessions):
+    """A tracker answering with a list for its error code is a failed poll;
+    the next tracker is still polled."""
+    with sessions() as session:
+        first = old_label(session, 50, [(48, "in_transit")])
+        second = old_label(session, 49, [(48, "in_transit")])
+        session.commit()
+        first_tracker, second_tracker = first.tracker_id, second.tracker_id
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        if request.full_url.endswith(first_tracker):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                404,
+                "error",
+                email.message.Message(),
+                io.BytesIO(b'{"error": {"code": []}}'),
+            )
+        if request.full_url.endswith(second_tracker):
+            return io.BytesIO(json.dumps({"status": "delivered"}).encode())
+        return io.BytesIO(b'{"shipments": [], "has_more": false}')
+
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    summary = shipment_sync.run(client, sessions, now=NOW)
+    assert (summary.polled, summary.poll_failures) == (1, 1)

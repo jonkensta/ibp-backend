@@ -10,6 +10,7 @@ import base64
 import http.client
 import json
 import logging
+import math
 import time
 import urllib.error
 import urllib.parse
@@ -69,10 +70,12 @@ class EasyPost:  # pylint: disable=too-few-public-methods
         self.requests = 0
 
     def get(self, path: str, params: Optional[dict[str, Any]] = None) -> dict:
-        """GET ``path`` and return its JSON, retrying transient failures.
+        """GET ``path`` and return its JSON object, retrying transient
+        failures; anything else that fails raises ``ApiError``.
 
-        Warnings and errors name the request by ``operation`` only, never
-        its id or query string.
+        A body that is not a JSON object is retried like one that is not
+        JSON. Warnings and errors name the request by ``operation`` only,
+        never its id or query string.
         """
         what = operation(path)
         url = f"{API}/{path}"
@@ -92,7 +95,10 @@ class EasyPost:  # pylint: disable=too-few-public-methods
             self.requests += 1
             try:
                 with self._urlopen(request, timeout=60) as response:
-                    return json.load(response)
+                    data = json.load(response)
+                if not isinstance(data, dict):
+                    raise ValueError("not a JSON object")
+                return data
             except urllib.error.HTTPError as error:
                 if error.code not in RETRY_STATUSES or attempt == RETRIES - 1:
                     code = error_code(error)
@@ -184,13 +190,19 @@ def error_code(error: urllib.error.HTTPError) -> Optional[str]:
     code = detail.get("code") if isinstance(detail, dict) else None
     if code is None:
         return None
-    return code if code in KNOWN_ERROR_CODES else "other"
+    # A list or object can't even be looked up in a set.
+    return code if isinstance(code, str) and code in KNOWN_ERROR_CODES else "other"
 
 
 def retry_after(error: urllib.error.HTTPError) -> Optional[float]:
-    """The seconds a ``Retry-After`` header asks for (capped at 60), if any."""
+    """The seconds a ``Retry-After`` header asks for (capped at 60), if any:
+    a finite, non-negative number (``nan`` or ``-1`` would make the sleep
+    fail)."""
     value = error.headers.get("Retry-After") if error.headers else None
     try:
-        return min(float(value), 60.0) if value else None
-    except ValueError:
+        seconds = float(value) if value else None
+    except (TypeError, ValueError):
         return None
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(seconds, 60.0)
