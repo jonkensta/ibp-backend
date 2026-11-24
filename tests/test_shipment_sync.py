@@ -1137,7 +1137,8 @@ def test_page_not_of_easyposts_shape_is_an_api_error(page):
     )
     with pytest.raises(shipment_sync.ApiError) as raised:
         list(shipment_sync.list_window(client, ago(2), NOW))
-    assert str(raised.value) == "GET shipments: page not of EasyPost's shape"
+    assert str(raised.value).startswith("GET shipments: ")
+    assert "Sentinel" not in str(raised.value)
 
 
 def test_stored_id_of_another_shape_is_not_logged(sessions, logs):
@@ -2012,3 +2013,64 @@ def test_listed_tracker_status_must_be_easyposts(sessions):
     odd = shipment(1, ago(3), tracker_status="Sentinel")
     summary = sync(FakeEasyPost([odd]), sessions)
     assert (summary.seen, summary.skipped) == (0, 1)
+
+
+# --- a listing ends only when EasyPost says so ---------------------------------
+
+
+def paged(pages):
+    """An opener answering successive listing requests with ``pages``."""
+    answers = list(pages)
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        return io.BytesIO(json.dumps(answers.pop(0)).encode())
+
+    return urlopen
+
+
+@pytest.mark.parametrize(
+    "pages, message",
+    [
+        # has_more missing on a page with shipments.
+        ([{"shipments": [shipment(1, ago(1))]}], "page not of EasyPost's shape"),
+        # An empty page that says more follow.
+        ([{"shipments": [], "has_more": True}], "can't be paged on"),
+        # A continuation whose last shipment repeats the previous page's.
+        (
+            [
+                {"shipments": [shipment(2, ago(1))], "has_more": True},
+                {"shipments": [shipment(2, ago(1))], "has_more": True},
+            ],
+            "paging made no progress",
+        ),
+    ],
+)
+def test_listing_that_cannot_be_trusted_to_be_complete_fails(pages, message):
+    """A page that would end the listing early, or never end it, is an
+    ApiError, not the end."""
+    client = EasyPost(KEY, urlopen=paged(pages), sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError, match=message):
+        list(shipment_sync.list_window(client, ago(2), NOW))
+
+
+def test_listing_has_a_page_limit(monkeypatch):
+    """A window that keeps saying more follow fails after MAX_PAGES."""
+    monkeypatch.setattr(shipment_sync, "MAX_PAGES", 3)
+    pages = [
+        {"shipments": [shipment(n, ago(1))], "has_more": True} for n in range(1, 5)
+    ]
+    client = EasyPost(KEY, urlopen=paged(pages), sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError, match="more than 3 pages in a window"):
+        list(shipment_sync.list_window(client, ago(2), NOW))
+
+
+def test_truncated_backfill_fails(sessions, logs):
+    """A --since backfill whose page drops has_more exits 1 without
+    rebuilding links instead of ending early."""
+    seed_stale_link(sessions)
+    pages = [{"shipments": [shipment(1, ago(1))]}] + [
+        {"shipments": [], "has_more": False}
+    ] * 50
+    assert run_since(sessions, logs, paged(pages)) == 1
+    assert "page not of EasyPost's shape" in logs.text
+    assert_incomplete(sessions, logs)

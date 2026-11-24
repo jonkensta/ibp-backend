@@ -26,8 +26,11 @@ counted as "skipped", and the run then exits 1. A polled tracker must
 answer with its own id and one of EasyPost's statuses, else it is a failed
 poll and nothing stored changes. Stored evidence never goes backwards: an
 answer without a tracker, tracker status or refund status keeps the stored
-one, and events are only ever added. A listing page without its list of shipments or a
-boolean `has_more` fails the run rather than ending the listing early. Only
+one, and events are only ever added. Every listing page must have its list of
+shipments and a boolean `has_more`; a page saying more follow must have a
+last shipment to page on, other than the previous page's; and a month's
+window may have at most 500 pages. Anything else fails the run rather than
+ending (or never ending) the listing as if it were complete. Only
 checked ids reach a log line.
 
 Exit status: 0 ok, 1 an EasyPost or database error (or a tracker it could

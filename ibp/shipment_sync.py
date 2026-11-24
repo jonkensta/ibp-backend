@@ -77,6 +77,8 @@ RESUME_OVERLAP = datetime.timedelta(days=1)
 DELIVERED_SETTLED = datetime.timedelta(days=60)
 MAX_POLL_AGE = datetime.timedelta(days=90)
 PAGE_SIZE = 100
+# Pages of one listing window at most (a window is at most a month).
+MAX_PAGES = 500
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # Tracker statuses that mean the label's trip is over and came back.
 RETURNED = frozenset({"return_to_sender"})
@@ -145,9 +147,11 @@ def list_window(
 
     The end is pushed a second later so a label bought on a boundary second
     is listed by one window or both (the caller keys on the shipment id).
-    A page without a ``shipments`` list or a boolean ``has_more``, or whose
-    last shipment has no id of EasyPost's shape to page on, raises
-    ``ApiError``.
+    Each page must have a ``shipments`` list and a boolean ``has_more``. A
+    page saying more follow must have shipments, its last with an id of
+    EasyPost's shape other than the previous page's last, and a window may
+    have at most ``MAX_PAGES`` pages; anything else raises ``ApiError``
+    rather than ending (or never ending) the listing as if complete.
     """
     params: dict[str, Any] = {
         "page_size": PAGE_SIZE,
@@ -157,21 +161,23 @@ def list_window(
             TIMESTAMP_FORMAT
         ),
     }
-    while True:
+    for _ in range(MAX_PAGES):
         data = client.get("shipments", params)
-        batch, has_more = data.get("shipments"), data.get("has_more", False)
-        # A page without its list, or with has_more not a boolean, would
-        # otherwise end the listing early as if it were complete.
+        batch, has_more = data.get("shipments"), data.get("has_more")
         if not isinstance(batch, list) or not isinstance(has_more, bool):
             raise ApiError("GET shipments: page not of EasyPost's shape")
-        if batch:
-            yield batch
-        if not batch or not has_more:
+        if not has_more:
+            if batch:
+                yield batch
             return
-        last = batch[-1].get("id") if isinstance(batch[-1], dict) else None
+        last = batch[-1].get("id") if batch and isinstance(batch[-1], dict) else None
         if not isinstance(last, str) or not SHIPMENT_ID.fullmatch(last):
-            raise ApiError("GET shipments: page not of EasyPost's shape")
+            raise ApiError("GET shipments: page says more follow but can't be paged on")
+        if last == params.get("before_id"):
+            raise ApiError("GET shipments: paging made no progress")
+        yield batch
         params["before_id"] = last
+    raise ApiError(f"GET shipments: more than {MAX_PAGES} pages in a window")
 
 
 # --- storing -----------------------------------------------------------------
