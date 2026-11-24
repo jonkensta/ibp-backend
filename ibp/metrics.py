@@ -9,7 +9,7 @@ from sqlalchemy import String, and_, case, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from . import models, schemas
+from . import clock, models, schemas
 
 
 def get_month_key(date_column, dialect: str):
@@ -29,11 +29,14 @@ def get_month_key(date_column, dialect: str):
 def calculate_date_range(
     date_range: Optional[str],
 ) -> tuple[Optional[date], Optional[date]]:
-    """Calculate start and end dates from preset."""
+    """Calculate start and end dates from preset.
+
+    The range ends today in the configured time zone (``clock.today``).
+    """
     if not date_range or date_range == "all":
         return None, None
 
-    end_date = datetime.now().date()
+    end_date = clock.today()
 
     if date_range == "6months":
         start_date = end_date - timedelta(days=180)
