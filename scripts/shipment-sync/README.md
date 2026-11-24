@@ -22,8 +22,11 @@ No names or addresses are logged or stored. A listed label not of
 EasyPost's shape (an id other than `shp_` and hex digits, a tracker id
 other than `trk_` and hex digits, a tracking code other than 8 to 40
 letters and digits, or a field of the wrong type) is not stored and is
-counted as "skipped", and the run then exits 1; a tracker of the wrong
-shape is a failed poll. A listing page without its list of shipments or a
+counted as "skipped", and the run then exits 1. A polled tracker must
+answer with its own id and one of EasyPost's statuses, else it is a failed
+poll and nothing stored changes. Stored evidence never goes backwards: an
+answer without a tracker, tracker status or refund status keeps the stored
+one, and events are only ever added. A listing page without its list of shipments or a
 boolean `has_more` fails the run rather than ending the listing early. Only
 checked ids reach a log line.
 

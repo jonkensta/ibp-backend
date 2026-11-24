@@ -24,6 +24,23 @@ TRACKER_ID = re.compile(r"trk_[0-9a-f]{8,64}")
 TRACKING_CODE = re.compile(r"[A-Za-z0-9]{8,40}")
 
 
+# EasyPost's tracker statuses.
+TRACKER_STATUSES = frozenset(
+    {
+        "unknown",
+        "pre_transit",
+        "in_transit",
+        "out_for_delivery",
+        "delivered",
+        "available_for_pickup",
+        "return_to_sender",
+        "failure",
+        "cancelled",
+        "error",
+    }
+)
+
+
 class Malformed(ValueError):
     """A listed shipment or tracker isn't of the shape EasyPost documents.
 
@@ -47,6 +64,14 @@ def mapping(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise Malformed(f"{field} is not an object")
     return value
+
+
+def tracker_status(value: Any) -> Optional[str]:
+    """A tracker status, which must be one of EasyPost's when given."""
+    status = as_text(value, "tracker status")
+    if status is not None and status not in TRACKER_STATUSES:
+        raise Malformed("tracker status is not one of EasyPost's")
+    return status
 
 
 def checked(value: Any, pattern: re.Pattern, field: str) -> Optional[str]:
@@ -366,6 +391,6 @@ def read_label(
         request_index=request.index if request else None,
         inmate_number=number,
         refund_status=as_text(shipment.get("refund_status"), "refund_status"),
-        tracker_status=as_text(tracker.get("status"), "tracker status"),
+        tracker_status=tracker_status(tracker.get("status")),
         events=parse_events(tracker),
     )

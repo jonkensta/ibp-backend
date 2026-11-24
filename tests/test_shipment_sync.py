@@ -1104,7 +1104,9 @@ def test_malformed_tracker_is_a_poll_failure_and_never_logged(sessions, logs):
         session.commit()
         tracker_id = label.tracker_id
     fake = FakeEasyPost(
-        trackers={tracker_id: {"status": [SENTINEL], "tracking_details": []}}
+        trackers={
+            tracker_id: {"id": tracker_id, "status": [SENTINEL], "tracking_details": []}
+        }
     )
     with logs.at_level(logging.INFO):
         summary = sync(fake, sessions)
@@ -1605,7 +1607,9 @@ def test_odd_error_code_does_not_stop_the_polling(sessions):
                 io.BytesIO(b'{"error": {"code": []}}'),
             )
         if request.full_url.endswith(second_tracker):
-            return io.BytesIO(json.dumps({"status": "delivered"}).encode())
+            return io.BytesIO(
+                json.dumps({"id": second_tracker, "status": "delivered"}).encode()
+            )
         return io.BytesIO(b'{"shipments": [], "has_more": false}')
 
     client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
@@ -1934,3 +1938,77 @@ def test_since_run_with_a_label_it_cannot_store_rebuilds_no_links(
     assert run_since(sessions, logs, fake) == 1
     assert "shipment sync failed: OperationalError: SQLITE_ERROR" in logs.text
     assert_incomplete(sessions, logs)
+
+
+# --- a tracker answer never takes evidence away --------------------------------
+
+
+def scanned_old_box(sessions) -> tuple[str, str]:
+    """A box bought 20 days before NOW whose only scan evidence is its
+    stored in_transit status, linked to a request; its (label, tracker) ids."""
+    with sessions() as session:
+        add_inmate(session, 40000001, "ALPHA")
+        add_request(session, 40000001, 0, ago(25).date().isoformat())
+        box = add_shipment(
+            session,
+            ago(20).strftime("%Y-%m-%dT%H:%M"),
+            kind="bulk",
+            unit_jurisdiction="Texas",
+            unit_name="ALPHA",
+            tracker_status="in_transit",
+            events=((ago(20).strftime("%Y-%m-%dT%H:%M"), "pre_transit"),),
+        )
+        session.commit()
+        return box.easypost_id, box.tracker_id
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        lambda tracker_id: {},
+        lambda tracker_id: {"id": tracker_id},
+        lambda tracker_id: {"id": tracker_id, "status": None},
+        lambda tracker_id: {"id": tracker_id, "status": "Sentinel"},
+        lambda tracker_id: {"id": "trk_99999999", "status": "unknown"},
+    ],
+)
+def test_unusable_tracker_answer_changes_nothing(sessions, answer):
+    """An empty or wrong tracker answer is a failed poll: the stored status
+    stays, and so does the bulk link it is the evidence for."""
+    easypost_id, tracker_id = scanned_old_box(sessions)
+    assert shipment_sync.relink(sessions, NOW) == 1
+    fake = FakeEasyPost(trackers={tracker_id: answer(tracker_id)})
+    summary = sync(fake, sessions)
+    assert (summary.polled, summary.poll_failures) == (0, 1)
+    row = stored(sessions, easypost_id)
+    assert row.tracker_status == "in_transit"
+    assert len(row.events) == 1
+    assert summary.links == 1
+
+
+def test_listing_without_tracker_status_keeps_the_stored_one(sessions):
+    """A listed label whose tracker gives no status (or no tracker) keeps
+    the status and tracker stored for it, and every event."""
+    first = shipment(
+        1, ago(3), [event(ago(3), "pre_transit"), event(ago(2), "in_transit")]
+    )
+    sync(FakeEasyPost([first]), sessions)
+    bare = shipment(1, ago(3), [], tracker_status=None)
+    bare["tracker"] = {"id": "trk_00000001", "status": None, "tracking_details": []}
+    sync(FakeEasyPost([bare]), sessions)
+    row = stored(sessions, "shp_00000001")
+    assert (row.tracker_id, row.tracker_status) == ("trk_00000001", "in_transit")
+    assert len(row.events) == 2
+    no_tracker = {**shipment(1, ago(3)), "tracker": None}
+    sync(FakeEasyPost([no_tracker]), sessions)
+    row = stored(sessions, "shp_00000001")
+    assert (row.tracker_id, row.tracker_status) == ("trk_00000001", "in_transit")
+    assert len(row.events) == 2
+
+
+def test_listed_tracker_status_must_be_easyposts(sessions):
+    """A listed label whose tracker status isn't one of EasyPost's is
+    skipped, not stored."""
+    odd = shipment(1, ago(3), tracker_status="Sentinel")
+    summary = sync(FakeEasyPost([odd]), sessions)
+    assert (summary.seen, summary.skipped) == (0, 1)

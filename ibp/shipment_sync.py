@@ -59,8 +59,8 @@ from .label_reading import (  # pylint: disable=unused-import
     normalize,
     parse_events,
     parse_reference,
-    as_text,
     read_label,
+    tracker_status,
 )
 from .shipment_links import StaleLinks, never_mailed, rebuild_links
 from .unit_matching import UnitMatcher
@@ -216,13 +216,20 @@ def add_events(shipment: models.Shipment, events: Iterable[EventValues]) -> int:
     return added
 
 
+# Columns a later answer without a value doesn't clear: the tracker (and
+# its status, the evidence a box was scanned) and the refund status.
+KEPT_WHEN_MISSING = frozenset({"tracker_id", "tracker_status", "refund_status"})
+
+
 def store_label(
     session: Session, label: Label, now: datetime.datetime, summary: Summary
 ) -> None:
     """Insert or update a label and add its new events.
 
-    ``synced_at`` is set only when the sync changes the row or adds an
-    event, so an identical run writes nothing.
+    Stored evidence never goes backwards: a value the listing leaves out
+    (``KEPT_WHEN_MISSING``) doesn't clear one already stored, and events are
+    only ever added. ``synced_at`` is set only when the sync changes the
+    row or adds an event, so an identical run writes nothing.
     """
     shipment = session.scalar(
         sa.select(models.Shipment)
@@ -238,6 +245,8 @@ def store_label(
     else:
         changed = False
         for name, value in columns.items():
+            if value is None and name in KEPT_WHEN_MISSING:
+                continue
             if getattr(shipment, name) != value:
                 setattr(shipment, name, value)
                 changed = True
@@ -254,9 +263,18 @@ def apply_tracker(
     now: datetime.datetime,
     summary: Summary,
 ) -> None:
-    """Update a stored label from its tracker, fetched on its own; raise
-    ``Malformed``, changing nothing, for a tracker not of EasyPost's shape."""
-    status = as_text(tracker.get("status"), "tracker status")
+    """Update a stored label from its tracker, fetched on its own.
+
+    The answer must be the tracker asked for (its ``id``) with one of
+    EasyPost's statuses; anything else raises ``Malformed`` and changes
+    nothing, so an empty or partial answer can't clear the stored status
+    (a box's evidence of being scanned). Events are only ever added.
+    """
+    if tracker.get("id") != shipment.tracker_id:
+        raise Malformed("tracker answer is not the tracker asked for")
+    status = tracker_status(tracker.get("status"))
+    if status is None:
+        raise Malformed("tracker answer has no status")
     events = parse_events(tracker)
     changed = status != shipment.tracker_status
     shipment.tracker_status = status
