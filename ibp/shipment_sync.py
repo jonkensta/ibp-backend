@@ -250,8 +250,12 @@ def store_label(
         .options(selectinload(models.Shipment.events))
     )
     columns = label.columns()
-    scanned = scanned_status(label.tracker_status) or any(
-        scanned_status(event.status) for event in label.events
+    # Scan evidence old or new: the stored row's (flag, status, events) is
+    # taken before the incoming values replace any of it.
+    scanned = (
+        (shipment is not None and is_scanned(shipment))
+        or scanned_status(label.tracker_status)
+        or any(scanned_status(event.status) for event in label.events)
     )
     if shipment is None:
         shipment = models.Shipment(
@@ -268,9 +272,7 @@ def store_label(
             if getattr(shipment, name) != value:
                 setattr(shipment, name, value)
                 changed = True
-        # The stored evidence counts too, before the new values replace it
-        # (a row from before the flag was kept).
-        if (scanned or is_scanned(shipment)) and not shipment.ever_scanned:
+        if scanned and not shipment.ever_scanned:
             shipment.ever_scanned = True  # and never set back
             changed = True
         summary.updated += changed
@@ -299,13 +301,15 @@ def apply_tracker(
     if status is None:
         raise Malformed("tracker answer has no status")
     events = parse_events(tracker)
-    changed = False
-    # The stored evidence counts too, before the new status replaces it.
-    if not shipment.ever_scanned and (
+    # Scan evidence old or new, the stored row's taken before the new
+    # status replaces it.
+    scanned = (
         is_scanned(shipment)
         or scanned_status(status)
         or any(scanned_status(e.status) for e in events)
-    ):
+    )
+    changed = False
+    if scanned and not shipment.ever_scanned:
         shipment.ever_scanned = True  # and never set back
         changed = True
     changed = changed or status != shipment.tracker_status

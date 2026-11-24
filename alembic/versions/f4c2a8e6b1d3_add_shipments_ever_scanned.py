@@ -45,9 +45,11 @@ def upgrade() -> None:
     The column is added only if it is missing (one already there must be a
     NOT NULL boolean), then set for every label the stored data shows USPS
     handled: a tracker status or any event status that is not in
-    ``UNSCANNED``. That data is all there is to it, so replaying this
-    revision fully restores the column (``db_bootstrap`` does when it is
-    missing at head); it only ever sets the flag, never clears it.
+    ``UNSCANNED``. It only ever sets the flag, never clears it. Once the
+    sync keeps the flag, it can hold a scan no stored status or event shows
+    any more, so this backfill can't rebuild a lost column: at head with
+    the column missing and labels stored, ``db_bootstrap`` refuses to start
+    instead of replaying it.
     """
     column = ever_scanned_column()
     found = existing_columns().get(column.name)

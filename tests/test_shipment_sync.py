@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from alembic import command
 
 from ibp import (
     db_bootstrap,
@@ -2334,3 +2335,57 @@ def test_scanned_label_with_a_refund_request_still_counts_as_mailed(sessions):
         assert not shipment_links.never_mailed(row)
         assert not is_finished(row, NOW)
     assert summary.links == 1
+
+
+def test_relisting_a_row_never_backfilled_keeps_its_scan(sessions):
+    """A stored box with ever_scanned false whose only scan evidence is its
+    stored in_transit status (a row never backfilled), listed again as
+    pre_transit, gets the flag from that evidence and keeps its link."""
+    seed_box_request(sessions)
+    with sessions() as session:
+        add_shipment(
+            session,
+            ago(20).strftime("%Y-%m-%dT%H:%M"),
+            kind="bulk",
+            unit_jurisdiction="Texas",
+            unit_name="ALPHA",
+            tracker_status="in_transit",
+            ever_scanned=False,
+            easypost_id="shp_00000001",
+            tracker_id="trk_00000001",
+            events=((ago(20).strftime("%Y-%m-%dT%H:%M"), "pre_transit"),),
+        )
+        session.commit()
+    summary = sync(
+        FakeEasyPost([box_listing("pre_transit", [event(ago(20), "pre_transit")])]),
+        sessions,
+    )
+    row = stored(sessions, "shp_00000001")
+    assert (row.tracker_status, row.ever_scanned) == ("pre_transit", True)
+    assert summary.links == 1
+
+
+def test_lost_flag_after_a_relisting_refuses_startup_instead_of_dropping_links(
+    sessions, monkeypatch, tmp_path
+):
+    """The reviewer's sequence: scanned, re-listed as pre_transit, then the
+    column lost at head. Bootstrap refuses rather than recreate the flag
+    false, so the link it is the evidence for is never rebuilt away."""
+    seed_box_request(sessions)
+    sync(
+        FakeEasyPost([box_listing("in_transit", [event(ago(20), "pre_transit")])]),
+        sessions,
+    )
+    sync(
+        FakeEasyPost([box_listing("pre_transit", [event(ago(20), "pre_transit")])]),
+        sessions,
+    )
+    assert bulk_links(sessions) == 1
+    url = str(sessions.kw["bind"].url)
+    command.stamp(db_bootstrap.build_alembic_config(url), "head")
+    with sessions() as session:
+        session.execute(sa.text("ALTER TABLE shipments DROP COLUMN ever_scanned"))
+        session.commit()
+    monkeypatch.setattr(db_bootstrap, "get_sync_database_url", lambda: url)
+    with pytest.raises(RuntimeError, match="ever_scanned is missing at head"):
+        db_bootstrap.bootstrap()
