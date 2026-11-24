@@ -716,10 +716,10 @@ def poll_unfinished(
             apply_tracker(shipment, tracker, now, summary)
 
 
-def relink(sessions: sessionmaker) -> int:
+def relink(sessions: sessionmaker, now: Optional[datetime.datetime] = None) -> int:
     """Rebuild the request links in one transaction; return how many."""
     with sessions() as session, session.begin():
-        return rebuild_links(session)
+        return rebuild_links(session, now)
 
 
 def listing_start(
@@ -767,7 +767,7 @@ def run(
     summary = Summary()
     listed = sync_listed(client, sessions, start, now, summary)
     poll_unfinished(client, sessions, listed, now, summary)
-    summary.links = relink(sessions)
+    summary.links = relink(sessions, now)
     return summary
 
 

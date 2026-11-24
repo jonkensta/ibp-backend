@@ -14,12 +14,14 @@ each named by the link's ``basis``:
   before it. Texas and Federal numbers look alike, so the label's
   destination unit decides the jurisdiction; with no destination, a number
   that both jurisdictions could match links to neither.
-- ``unit_session``: a session is every mailed bulk box to one unit on one
-  local date. A Filled request whose inmate's unit (as it is now) ships by
-  box or tub links to every box of the first session to that unit at least
-  ``BULK_LEAD`` (a day) after the request's processed date, so a request
-  processed on a session's date waits for the next one, if that session is
-  within ``BULK_LINK_WINDOW`` of it.
+- ``unit_session``: a session is every bulk box to one unit on one local
+  date that USPS has scanned, or that was bought less than ``FRESH_BOX``
+  (7 days) ago and so may not have its first scan yet. A Filled request
+  whose inmate's unit (as it is now) ships by box or tub links to every box
+  of the first session to that unit at least ``BULK_LEAD`` (a day) after the
+  request's processed date, so a request processed on a session's date
+  waits for the next one, if that session is within ``BULK_LINK_WINDOW`` of
+  it.
 
 A label that was never mailed (``never_mailed``) gets no links. Nothing
 here works out delivery: the stored events are left for that.
@@ -28,6 +30,7 @@ here works out delivery: the stored events are left for that.
 import bisect
 import datetime
 from collections import defaultdict
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
@@ -46,8 +49,10 @@ BULK_LINK_WINDOW = datetime.timedelta(days=28)
 BULK_LEAD = datetime.timedelta(days=1)
 # Unit shipping methods that send requests in bulk boxes (not Individual).
 BOX_METHODS = frozenset({"Box", "Federal Tub"})
-# Statuses that mean USPS has not handled a package.
-PRE_SCAN = frozenset({"unknown", "pre_transit"})
+# Statuses that are no evidence USPS has handled a package.
+UNSCANNED = frozenset({"unknown", "pre_transit", "error", "cancelled"})
+# An unscanned bulk box bought this recently still counts toward a session.
+FRESH_BOX = datetime.timedelta(days=7)
 # A refund asked for (and, at USPS, granted unless the label was used).
 REFUND_REQUESTED = frozenset({"submitted", "refunded"})
 
@@ -55,12 +60,12 @@ LinkKey = tuple[str, int, int, int]
 
 
 def is_scanned(shipment: models.Shipment) -> bool:
-    """Whether USPS ever handled the label (any status past pre-transit).
+    """Whether USPS ever handled the label: any status but ``UNSCANNED``.
 
     The shipment's events must be loaded.
     """
     statuses = [shipment.tracker_status] + [e.status for e in shipment.events]
-    return any(status and status not in PRE_SCAN for status in statuses)
+    return any(status and status not in UNSCANNED for status in statuses)
 
 
 def never_mailed(shipment: models.Shipment) -> bool:
@@ -142,9 +147,13 @@ def _inmate_number_links(
 
 
 def _bulk_sessions(
-    shipments: list[models.Shipment],
+    shipments: list[models.Shipment], now: datetime.datetime
 ) -> dict[tuple[str, str], dict[datetime.date, list[int]]]:
-    """Group bulk boxes by unit, then by local date: unit -> date -> box ids."""
+    """Group bulk boxes by unit, then by local date: unit -> date -> box ids.
+
+    Only boxes USPS has scanned, or bought less than ``FRESH_BOX`` ago,
+    count: an older box never scanned was likely never mailed.
+    """
     sessions: dict[tuple[str, str], dict[datetime.date, list[int]]] = defaultdict(
         lambda: defaultdict(list)
     )
@@ -153,6 +162,7 @@ def _bulk_sessions(
             shipment.kind == "bulk"
             and shipment.unit_jurisdiction is not None
             and shipment.unit_name is not None
+            and (is_scanned(shipment) or now - shipment.purchased_at < FRESH_BOX)
         ):
             unit = (shipment.unit_jurisdiction, shipment.unit_name)
             sessions[unit][local_date(shipment.purchased_at)].append(shipment.id)
@@ -192,9 +202,12 @@ def _unit_requests(
 
 
 def _unit_session_links(
-    session: Session, shipments: list[models.Shipment], links: dict[LinkKey, str]
+    session: Session,
+    shipments: list[models.Shipment],
+    links: dict[LinkKey, str],
+    now: datetime.datetime,
 ) -> None:
-    for unit, by_date in sorted(_bulk_sessions(shipments).items()):
+    for unit, by_date in sorted(_bulk_sessions(shipments, now).items()):
         row = session.get(models.Unit, unit)
         if row is None or row.shipping_method not in BOX_METHODS:
             continue
@@ -209,11 +222,14 @@ def _unit_session_links(
                 links[(jurisdiction, inmate_id, index, shipment_id)] = "unit_session"
 
 
-def rebuild_links(session: Session) -> int:
+def rebuild_links(session: Session, now: Optional[datetime.datetime] = None) -> int:
     """Delete and rebuild every ``package_shipments`` row; return how many.
 
-    Runs in the caller's transaction.
+    Runs in the caller's transaction. ``now`` (the current time by default)
+    decides which unscanned boxes are still fresh.
     """
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
     session.execute(sa.delete(models.PackageShipment))
     shipments = [
         shipment
@@ -227,7 +243,7 @@ def rebuild_links(session: Session) -> int:
     links: dict[LinkKey, str] = {}
     _reference_links(session, shipments, links)
     _inmate_number_links(session, shipments, links)
-    _unit_session_links(session, shipments, links)
+    _unit_session_links(session, shipments, links, now)
     session.add_all(
         models.PackageShipment(
             inmate_jurisdiction=jurisdiction,

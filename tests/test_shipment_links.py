@@ -5,7 +5,7 @@
 import pytest
 
 from ibp import models
-from ibp.shipment_links import local_date, never_mailed, rebuild_links
+from ibp.shipment_links import is_scanned, local_date, never_mailed, rebuild_links
 
 from .shipment_helpers import (
     add_inmate,
@@ -275,6 +275,48 @@ def test_unmailed_box_is_not_a_session(session):
     assert rebuild(session) == {
         ("Texas", 11111111, 0, mailed.easypost_id, "unit_session"),
     }
+
+
+def test_old_unscanned_box_is_not_a_session(session):
+    """A box USPS never scanned doesn't make a session once it is a week
+    old; until then it does, since its first scan may not be in yet."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-03-01")
+    unscanned = box(
+        session, "2026-03-05T15:00", events=(("2026-03-05T15:01", "pre_transit"),)
+    )
+    mailed = box(session, "2026-03-07T15:00")
+    session.commit()
+    expected = ("Texas", 11111111, 0, unscanned.easypost_id, "unit_session")
+    rebuild_links(session, now=utc("2026-03-12T14:59"))
+    assert expected in links(session)
+    rebuild_links(session, now=utc("2026-03-12T15:00"))
+    assert links(session) == {
+        ("Texas", 11111111, 0, mailed.easypost_id, "unit_session"),
+    }
+
+
+@pytest.mark.parametrize(
+    "statuses, scanned",
+    [
+        ((), False),
+        (("pre_transit",), False),
+        (("pre_transit", "error"), False),
+        (("cancelled",), False),
+        (("unknown", "in_transit"), True),
+        (("error", "delivered"), True),
+    ],
+)
+def test_is_scanned_ignores_error_and_cancelled(session, statuses, scanned):
+    """``error`` and ``cancelled`` are no sign that USPS handled a package."""
+    label = individual(
+        session,
+        tracker_status=statuses[-1] if statuses else None,
+        events=tuple(
+            (f"2026-03-1{n}T15:00", status) for n, status in enumerate(statuses)
+        ),
+    )
+    assert is_scanned(label) is scanned
 
 
 def test_rebuild_is_deterministic_and_idempotent(session):
