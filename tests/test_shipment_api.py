@@ -1,6 +1,6 @@
 """GET /requests/{code}/shipments: a request's linked labels and events."""
 
-from ibp.shipment_links import rebuild_links
+from ibp import models
 
 from .shipment_helpers import add_inmate, add_request, add_shipment, add_unit
 
@@ -9,7 +9,8 @@ NUMBER = 12345678
 
 def seed(api_db) -> tuple[str, str]:
     """A request linked to an individual label and to a bulk box; returns
-    their tracking codes."""
+    their tracking codes. The links are written directly (the link rules
+    give a request with its own label no box)."""
     with api_db() as session:
         add_unit(session, "ALPHA")
         add_inmate(session, NUMBER, "ALPHA")
@@ -35,8 +36,17 @@ def seed(api_db) -> tuple[str, str]:
             tracker_status="in_transit",
             events=(("2026-03-03T09:00", "in_transit"),),
         )
-        session.commit()
-        rebuild_links(session)
+        session.flush()
+        for shipment, basis in ((label, "inmate_number"), (box, "unit_session")):
+            session.add(
+                models.PackageShipment(
+                    inmate_jurisdiction="Texas",
+                    inmate_id=NUMBER,
+                    request_index=0,
+                    shipment_id=shipment.id,
+                    basis=basis,
+                )
+            )
         session.commit()
         return label.tracking_code, box.tracking_code
 

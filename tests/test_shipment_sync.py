@@ -385,6 +385,8 @@ def test_second_identical_run_changes_nothing(sessions):
     with sessions() as session:
         add_inmate(session, 40000001, "ALPHA")
         add_request(session, 40000001, 0, "2026-03-01")
+        add_inmate(session, 40000002, "ALPHA")
+        add_request(session, 40000002, 0, "2026-03-01")
         session.commit()
     fake = FakeEasyPost(
         [
@@ -395,7 +397,8 @@ def test_second_identical_run_changes_nothing(sessions):
         ]
     )
     first = sync(fake, sessions)
-    assert first.links == 2  # the label by inmate number, the box by session
+    # one inmate's label by number, the other inmate's request by session
+    assert first.links == 2
     before = snapshot(sessions)
 
     again = sync(fake, sessions, now=NOW + datetime.timedelta(hours=1))
