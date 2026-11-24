@@ -10,7 +10,7 @@ import ibp.models
 from ibp import db_bootstrap
 
 from .conftest import (
-    DROP_REQUEST_UNIT_NAME,
+    DROP_REQUEST_UNIT_COLUMNS,
     DROP_SHIPMENT_TABLES,
     SHIPMENT_TABLES,
     TOPLEVEL,
@@ -175,7 +175,7 @@ def test_bootstrap_adopts_pre_shipments_create_all_schema(tmp_path: Path, monkey
     try:
         ibp.models.Base.metadata.create_all(engine)
         with engine.begin() as connection:
-            for statement in [*DROP_SHIPMENT_TABLES, DROP_REQUEST_UNIT_NAME]:
+            for statement in [*DROP_SHIPMENT_TABLES, *DROP_REQUEST_UNIT_COLUMNS]:
                 connection.execute(sqlalchemy.text(statement))
         insert_rows(engine, ROWS)
         bootstrap(monkeypatch, url)

@@ -56,7 +56,8 @@ PRE_RACE_SEX_WORDS_REVISION = "c4e7a2f9d1b3"
 # Last revision before the shipments, tracking_events and package_shipments
 # tables were added; it is the race and sex data migration.
 PRE_SHIPMENTS_REVISION = "d2a6f8c3e1b7"
-# Last revision before requests.unit_name was added; it adds the shipments
+# Last revision before requests.unit_name and unit_recorded were added; it
+# adds the shipments
 # tables.
 PRE_REQUEST_UNIT_REVISION = "a3c8e6f2d9b4"
 
@@ -136,11 +137,13 @@ def adopt_create_all_schema(
     """
     if "shipments" in tables:
         # Schema was created by Base.metadata.create_all from the current
-        # models (with requests.unit_name) or from pre-unit_name ones. Adopt
+        # models (with requests.unit_recorded) or from older ones. Adopt
         # it before the race and sex data migration and run that, then stamp
         # the schema migrations after it that create_all already built, and
         # replay the rest.
-        built = "head" if "requests.unit_name" in columns else PRE_REQUEST_UNIT_REVISION
+        built = (
+            "head" if "requests.unit_recorded" in columns else PRE_REQUEST_UNIT_REVISION
+        )
         logger.info(
             "Existing schema without alembic_version detected; stamping %s, "
             "upgrading to %s, then stamping %s and upgrading to head.",

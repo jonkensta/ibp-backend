@@ -25,10 +25,10 @@ def seeded(api_db):
 
 
 def stored_units(api_db) -> list:
-    """Each stored request's unit_name, by index."""
+    """Each stored request's unit_name, by index, or ``"not recorded"``."""
     with api_db() as session:
         return [
-            request.unit_name
+            request.unit_name if request.unit_recorded else "not recorded"
             for request in session.query(models.Request).order_by(models.Request.index)
         ]
 
@@ -37,18 +37,18 @@ def test_filled_request_records_the_inmates_unit(client, seeded):
     """A new Filled request records the unit; the API doesn't expose it."""
     response = client.post(REQUESTS_URL, json={**BODY, "action": "Filled"})
     assert response.status_code == 200
-    assert "unit_name" not in response.json()
+    assert not {"unit_name", "unit_recorded"} & set(response.json())
     assert stored_units(seeded) == ["ALPHA"]
 
 
 def test_tossed_request_records_no_unit(client, seeded):
     """A new Tossed request has no unit."""
     client.post(REQUESTS_URL, json={**BODY, "action": "Tossed"})
-    assert stored_units(seeded) == [None]
+    assert stored_units(seeded) == ["not recorded"]
 
 
 def test_inmate_without_a_unit_records_none(client, seeded):
-    """An inmate with no unit gives a Filled request none."""
+    """An inmate with no unit gives a Filled request none, recorded as such."""
     with seeded.begin() as session:
         add_inmate(session, 54321)
     client.post("/inmates/Texas/54321/requests", json={**BODY, "action": "Filled"})
@@ -65,8 +65,9 @@ def test_transfer_keeps_the_recorded_unit(client, seeded):
     assert stored_units(seeded) == ["ALPHA", "BETA"]
 
 
-def request(action=None, unit_name=None) -> models.Request:
-    """An unsaved request with ``action`` and ``unit_name``."""
+def request(action=None, unit_name=None, recorded=False) -> models.Request:
+    """An unsaved request with ``action``, ``unit_name`` and
+    ``unit_recorded``."""
     date = datetime.date(2026, 10, 2)
     return models.Request(
         inmate_jurisdiction="Texas",
@@ -76,25 +77,29 @@ def request(action=None, unit_name=None) -> models.Request:
         date_postmarked=date,
         action=action,
         unit_name=unit_name,
+        unit_recorded=recorded,
     )
 
 
 @pytest.mark.parametrize(
-    "before, recorded, action, after",
+    "before, recorded, action, current, after",
     [
-        # Becoming Filled records the current unit.
-        (None, None, "Filled", "BETA"),
-        ("Tossed", None, "Filled", "BETA"),
-        # Already Filled: the recorded unit stays, even if none was recorded.
-        ("Filled", "ALPHA", "Filled", "ALPHA"),
-        ("Filled", None, "Filled", None),
+        # Becoming Filled records the current unit, even an unknown one.
+        (None, (None, False), "Filled", "BETA", ("BETA", True)),
+        ("Tossed", (None, False), "Filled", "BETA", ("BETA", True)),
+        (None, (None, False), "Filled", None, (None, True)),
+        # Already Filled: what was recorded stays, or that nothing was.
+        ("Filled", ("ALPHA", True), "Filled", "BETA", ("ALPHA", True)),
+        ("Filled", (None, True), "Filled", "BETA", (None, True)),
+        ("Filled", (None, False), "Filled", "BETA", (None, False)),
         # Tossed has no unit.
-        ("Filled", "ALPHA", "Tossed", None),
-        (None, None, "Tossed", None),
+        ("Filled", ("ALPHA", True), "Tossed", "BETA", (None, False)),
+        (None, (None, False), "Tossed", "BETA", (None, False)),
     ],
 )
-def test_set_action(before, recorded, action, after):
-    """``set_action`` records, keeps or clears the unit (current unit BETA)."""
-    changed = request(before, recorded)
-    changed.set_action(action, "BETA")
-    assert (changed.action, changed.unit_name) == (action, after)
+def test_set_action(before, recorded, action, current, after):
+    """``set_action`` records, keeps or clears the unit."""
+    changed = request(before, *recorded)
+    changed.set_action(action, current)
+    assert changed.action == action
+    assert (changed.unit_name, changed.unit_recorded) == after

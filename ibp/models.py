@@ -7,6 +7,7 @@ import sqlalchemy
 import sqlalchemy.orm
 import sqlalchemy.types
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     Enum,
@@ -248,10 +249,16 @@ class Request(HasInmateIndex, Base):
 
     # The inmate's unit (in ``inmate_jurisdiction``) when the request was
     # filled: where the person was when the package was prepared, kept after
-    # a transfer. Kept up by ``set_action``; NULL for a Tossed request and
-    # for every request filled before the column was added. No foreign key:
-    # a unit renamed or removed later just matches nothing.
+    # a transfer. ``unit_recorded`` says whether it was recorded at all, as
+    # the unit can be NULL (the inmate's unit was unknown then). Both are
+    # kept up by ``set_action``: recorded for a Filled request, NULL and
+    # false for a Tossed one, and false (nothing known) for every request
+    # filled before the columns were added. No foreign key: a unit renamed
+    # or removed later just matches nothing.
     unit_name: Mapped[Optional[str]] = mapped_column(String)
+    unit_recorded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=sqlalchemy.false()
+    )
 
     # Incremented on every add, edit or delete of the request's items, in the
     # same transaction (see ibp/package_api.py).
@@ -268,17 +275,21 @@ class Request(HasInmateIndex, Base):
     )
 
     def set_action(self, action: str, inmate_unit_name: Optional[str]) -> None:
-        """Set the action, keeping ``unit_name`` in step with it.
+        """Set the action, keeping ``unit_name`` and ``unit_recorded`` in
+        step with it.
 
         ``inmate_unit_name`` is the inmate's current unit. A request that
-        becomes Filled (a new one, or one that was Tossed) records it; one
-        already Filled keeps the unit it recorded, so an edit after a
-        transfer doesn't move it; a Tossed one has no unit.
+        becomes Filled (a new one, or one that was Tossed) records it, even
+        when it is None; one already Filled keeps what it recorded (or that
+        nothing was), so an edit after a transfer doesn't move it; a Tossed
+        one has no unit and records none.
         """
         if action != "Filled":
             self.unit_name = None
+            self.unit_recorded = False
         elif self.action != "Filled":
             self.unit_name = inmate_unit_name
+            self.unit_recorded = True
         self.action = action
 
 

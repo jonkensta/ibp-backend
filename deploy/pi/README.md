@@ -94,10 +94,21 @@ missing file:
 
 The links between requests and labels (`package_shipments`) are stored, and
 the delivery chart reads them as stored. After an upgrade to a release that
-changes the link rules (`ibp/shipment_links.py`), rebuild them before
+changes only the link rules (`ibp/shipment_links.py`), rebuild them before
 trusting the chart, rather than waiting for the next nightly sync:
 
     ~/.local/bin/ibp-shipment-sync --rebuild-links
+
+A release that changes unit matching (`ibp/unit_places.py`, `UnitMatcher`
+in `ibp/shipment_sync.py`) needs every stored label matched again instead,
+which also rebuilds the links. Stop the daily timer, re-run the sync from
+the first label's date until it exits 0 (a run that fails part-way says the
+re-evaluation is incomplete and leaves the links as they were), then start
+the timer again (`scripts/shipment-sync/README.md`):
+
+    sudo systemctl stop ibp-shipment-sync.timer
+    ~/.local/bin/ibp-shipment-sync --since 2025-11-01   # repeat until it exits 0
+    sudo systemctl start ibp-shipment-sync.timer
 
 Roll back by setting the previous tag and running `docker compose up -d`
 again. If the new release ran a database migration, the old backend can't

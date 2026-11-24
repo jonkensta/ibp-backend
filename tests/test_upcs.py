@@ -11,7 +11,7 @@ from alembic import command
 
 from ibp import books, db_bootstrap, models, upcs
 
-from .conftest import DROP_REQUEST_UNIT_NAME, SHIPMENT_TABLES
+from .conftest import DROP_REQUEST_UNIT_COLUMNS, SHIPMENT_TABLES
 
 HOBBIT = "9780547928227"
 CRIME = "9780140449136"
@@ -317,7 +317,8 @@ def test_bootstrap_adopts_pre_upcs_create_all_schema(tmp_path, monkeypatch):
     models.Base.metadata.create_all(engine, tables=tables)
     with engine.begin() as connection:
         # Added after this schema's era.
-        connection.execute(sqlalchemy.text(DROP_REQUEST_UNIT_NAME))
+        for statement in DROP_REQUEST_UNIT_COLUMNS:
+            connection.execute(sqlalchemy.text(statement))
         for table in ["package_items", "registrations"]:
             connection.execute(
                 sqlalchemy.text(

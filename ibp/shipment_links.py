@@ -28,19 +28,25 @@ each named by the link's ``basis``:
   request processed on a session's date waits for the next one, if that
   session is within ``BULK_LINK_WINDOW`` of it. A request's unit is the one
   it recorded when it was filled (``requests.unit_name``), so a transfer
-  afterwards doesn't move it; a request filled before that was recorded
-  (NULL) uses its inmate's unit as it is now. The unit's shipping method is
-  not consulted: boxes do go to units marked Individual, and a package with
-  its own label is already linked to it.
+  afterwards doesn't move it; one that recorded no unit (the inmate's was
+  unknown then) links to no box. A request filled before units were
+  recorded (``unit_recorded`` false) uses its inmate's unit as it is now.
+  The unit's shipping method is not consulted: boxes do go to units marked
+  Individual, and a package with its own label is already linked to it.
 
 A label that was never mailed (``never_mailed``) gets no links. Nothing
 here works out delivery: the stored events are left for that.
+
+``rebuild_links`` does all its reading first (``compute_links``: no write,
+so on SQLite no write lock, and every place's candidate requests in one
+query), then replaces the rows in two statements (``write_links``), so the
+write lock a volunteer saving a request could wait on is held only briefly.
 """
 
 import bisect
 import datetime
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, cast
 from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
@@ -183,19 +189,23 @@ def _bulk_sessions(
     return sessions
 
 
-def _place_requests(
-    session: Session,
-    units: frozenset[UnitKey],
-    first: datetime.date,
-    last: datetime.date,
-) -> list[sa.Row]:
-    """Filled requests to a place's ``units`` that a session from ``first``
-    to ``last`` could link: (jurisdiction, inmate id, index, processed date).
+def request_unit() -> sa.ColumnElement:
+    """A request's unit for linking: the one it recorded when filled
+    (possibly none, which matches no unit) if it recorded one, else its
+    inmate's current unit (a request filled before units were recorded).
+    The query must join the request's inmate."""
+    return sa.case(
+        (models.Request.unit_recorded, models.Request.unit_name),
+        else_=models.Inmate.unit_name,
+    )
 
-    A request's unit is the one it recorded, else its inmate's current one.
-    """
-    (jurisdiction,) = {unit[0] for unit in units}
-    unit_names = sorted(unit[1] for unit in units)
+
+def _session_requests(
+    session: Session, first: datetime.date, last: datetime.date
+) -> list[sa.Row]:
+    """Every Filled request some session from ``first`` to ``last`` could
+    link, in one query: (jurisdiction, inmate id, index, processed date,
+    unit name as ``request_unit``)."""
     return list(
         session.execute(
             sa.select(
@@ -203,6 +213,7 @@ def _place_requests(
                 models.Request.inmate_id,
                 models.Request.index,
                 models.Request.date_processed,
+                request_unit(),
             )
             .join(
                 models.Inmate,
@@ -212,10 +223,6 @@ def _place_requests(
                 ),
             )
             .where(
-                models.Inmate.jurisdiction == jurisdiction,
-                sa.func.coalesce(models.Request.unit_name, models.Inmate.unit_name).in_(
-                    unit_names
-                ),
                 models.Request.action == "Filled",
                 models.Request.date_processed >= first - BULK_LINK_WINDOW,
                 models.Request.date_processed <= last - BULK_LEAD,
@@ -224,38 +231,55 @@ def _place_requests(
     )
 
 
+def _first_session(
+    dates: list[datetime.date], processed: datetime.date
+) -> Optional[datetime.date]:
+    """The first of a place's sorted session ``dates`` a request processed
+    on ``processed`` links to, or None."""
+    position = bisect.bisect_left(dates, processed + BULK_LEAD)
+    if position == len(dates) or dates[position] - processed > BULK_LINK_WINDOW:
+        return None
+    return dates[position]
+
+
 def _unit_session_links(
     session: Session,
     shipments: list[models.Shipment],
     links: dict[LinkKey, str],
     now: datetime.datetime,
 ) -> None:
+    places = Places(session.scalars(sa.select(models.Unit)).all())
+    sessions = _bulk_sessions(shipments, places, now)
+    if not sessions:
+        return
+    dates = {place: sorted(by_date) for place, by_date in sessions.items()}
     # Requests already linked to a label of their own did not ride in a box.
     labelled = {key[:3] for key in links}
-    places = Places(session.scalars(sa.select(models.Unit)).all())
-    for place, by_date in sorted(_bulk_sessions(shipments, places, now).items()):
-        dates = sorted(by_date)
-        for jurisdiction, inmate_id, index, processed in _place_requests(
-            session, places.members(place), dates[0], dates[-1]
-        ):
-            if (jurisdiction, inmate_id, index) in labelled:
-                continue
-            position = bisect.bisect_left(dates, processed + BULK_LEAD)
-            if position == len(dates) or dates[position] - processed > BULK_LINK_WINDOW:
-                continue
-            for shipment_id in by_date[dates[position]]:
-                links[(jurisdiction, inmate_id, index, shipment_id)] = "unit_session"
+    for row in _session_requests(
+        session,
+        min(place_dates[0] for place_dates in dates.values()),
+        max(place_dates[-1] for place_dates in dates.values()),
+    ):
+        key = (row[0], row[1], row[2])  # Row.index is a tuple method
+        place = places.representative((row[0], row[4]))
+        if place not in sessions or key in labelled:
+            continue
+        date = _first_session(dates[place], row[3])
+        for shipment_id in sessions[place].get(date, []) if date else []:
+            links[(*key, shipment_id)] = "unit_session"
 
 
-def rebuild_links(session: Session, now: Optional[datetime.datetime] = None) -> int:
-    """Delete and rebuild every ``package_shipments`` row; return how many.
+def compute_links(
+    session: Session, now: Optional[datetime.datetime] = None
+) -> dict[LinkKey, str]:
+    """Every link the stored data gives, as (request key, label id) ->
+    basis. Reads only: on SQLite it takes no write lock.
 
-    Runs in the caller's transaction. ``now`` (the current time by default)
-    decides which unscanned boxes are still fresh.
+    ``now`` (the current time by default) decides which unscanned boxes are
+    still fresh.
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
-    session.execute(sa.delete(models.PackageShipment))
     shipments = [
         shipment
         for shipment in session.scalars(
@@ -269,17 +293,103 @@ def rebuild_links(session: Session, now: Optional[datetime.datetime] = None) -> 
     _reference_links(session, shipments, links)
     _inmate_number_links(session, shipments, links)
     _unit_session_links(session, shipments, links, now)
-    session.add_all(
-        models.PackageShipment(
-            inmate_jurisdiction=jurisdiction,
-            inmate_id=inmate_id,
-            request_index=index,
-            shipment_id=shipment_id,
-            basis=basis,
-        )
-        for (jurisdiction, inmate_id, index, shipment_id), basis in sorted(
-            links.items()
+    return links
+
+
+# The computed links, staged in a temporary table (private to the
+# connection, so filling it takes no lock on the database) and copied from
+# there into package_shipments.
+_STAGED = sa.Table(
+    "staged_package_shipments",
+    sa.MetaData(),
+    sa.Column("inmate_jurisdiction", sa.String, nullable=False),
+    sa.Column("inmate_id", sa.Integer, nullable=False),
+    sa.Column("request_index", sa.Integer, nullable=False),
+    sa.Column("shipment_id", sa.Integer, nullable=False),
+    sa.Column("basis", sa.String, nullable=False),
+    prefixes=["TEMPORARY"],
+)
+
+
+def _copy_staged(session: Session) -> int:
+    """Insert the staged links whose request and label still exist; return
+    how many."""
+    staged = _STAGED.c
+    request = models.Request.__table__.c
+    copied = session.execute(  # an INSERT's result is a CursorResult
+        sa.insert(models.PackageShipment).from_select(
+            [
+                "inmate_jurisdiction",
+                "inmate_id",
+                "request_index",
+                "shipment_id",
+                "basis",
+            ],
+            sa.select(
+                staged.inmate_jurisdiction,
+                staged.inmate_id,
+                staged.request_index,
+                staged.shipment_id,
+                staged.basis,
+            )
+            .join(
+                models.Request.__table__,
+                sa.and_(
+                    request.inmate_jurisdiction == staged.inmate_jurisdiction,
+                    request.inmate_id == staged.inmate_id,
+                    request.index == staged.request_index,
+                ),
+            )
+            .join(
+                models.Shipment.__table__,
+                models.Shipment.__table__.c.id == staged.shipment_id,
+            ),
         )
     )
-    session.flush()
-    return len(links)
+    return cast(sa.CursorResult, copied).rowcount
+
+
+def write_links(session: Session, links: dict[LinkKey, str]) -> int:
+    """Replace every ``package_shipments`` row with ``links``; return how
+    many were written.
+
+    The links are staged first, then ``package_shipments`` is emptied and
+    filled from the staged rows, so the write lock (SQLite's, from the
+    delete to the caller's commit) is held only for those two statements.
+    A link whose request or label was deleted after ``compute_links`` read
+    it is dropped: the copy only takes links whose parents still exist,
+    checked under that lock.
+    """
+    connection = session.connection()
+    _STAGED.create(connection, checkfirst=True)
+    session.execute(sa.delete(_STAGED))
+    if links:
+        session.execute(
+            sa.insert(_STAGED),
+            [
+                {
+                    "inmate_jurisdiction": jurisdiction,
+                    "inmate_id": inmate_id,
+                    "request_index": index,
+                    "shipment_id": shipment_id,
+                    "basis": basis,
+                }
+                for (jurisdiction, inmate_id, index, shipment_id), basis in sorted(
+                    links.items()
+                )
+            ],
+        )
+    session.execute(sa.delete(models.PackageShipment))
+    written = _copy_staged(session)
+    session.execute(sa.delete(_STAGED))
+    return written
+
+
+def rebuild_links(session: Session, now: Optional[datetime.datetime] = None) -> int:
+    """Rebuild every ``package_shipments`` row; return how many.
+
+    Runs in the caller's transaction, all reading first (``compute_links``)
+    and the writes last (``write_links``), so the caller's commit should
+    follow at once. ``now`` is as for ``compute_links``.
+    """
+    return write_links(session, compute_links(session, now))

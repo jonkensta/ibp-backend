@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 
-from ibp import db_bootstrap, models, shipment_links, shipment_sync
+from ibp import db_bootstrap, easypost_client, models, shipment_links, shipment_sync
 from ibp.labels import RequestKey
 from ibp.shipment_sync import (
     EasyPost,
@@ -402,6 +402,199 @@ def test_unit_matching_by_display_name(coded_matcher, address, unit):
     assert coded_matcher.by_address(address) == unit
 
 
+def test_since_run_fetches_stored_labels_the_listing_misses(sessions):
+    """A label bought on or after --since from a shipment created before it
+    isn't listed (the listing goes by creation time), so it is fetched by id
+    and its unit matched again; labels the listing returned aren't."""
+    with sessions() as session:
+        add_shipment(session, "2026-01-01T01:00", kind="bulk")
+        session.commit()
+        add_unit(session, "GAMMA CODE", street1="Gamma Unit", zipcode="77002")
+        session.commit()
+    sync(FakeEasyPost([shipment(2, ago(3))]), sessions)  # a newer stored label
+    straddling = shipment(
+        1,
+        utc("2025-12-31T23:00"),
+        name="ATTN: MAILROOM STAFF",
+        street1="300 New Rd",
+        street2="GAMMA UNIT",
+        zip="77002",
+    )
+    with sessions() as session:
+        stored_id = session.scalars(
+            sa.select(models.Shipment.easypost_id).where(
+                models.Shipment.easypost_id != "shp_0002"
+            )
+        ).one()
+        straddling["id"] = stored_id
+        straddling["postage_label"]["created_at"] = "2026-01-01T01:00:00Z"
+    fake = FakeEasyPost([straddling, shipment(2, ago(3))])
+    summary = sync(fake, sessions, since=datetime.date(2026, 1, 1))
+    assert summary.fetched_by_id == 1
+    assert [path for path, _ in fake.calls if path.startswith("shipments/")] == [
+        f"shipments/{stored_id}"
+    ]
+    assert stored(sessions, stored_id).unit_name == "GAMMA CODE"
+    assert "1 fetched by id" in summary.line()
+
+
+def seed_stale_link(sessions) -> None:
+    """A stored label bought since 2026-01-01 that EasyPost no longer has,
+    and a link a rebuild would remove."""
+    with sessions() as session:
+        add_inmate(session, 40000001, "ALPHA")
+        add_request(session, 40000001, 0, "2026-01-02")
+        label = add_shipment(session, "2026-01-05T15:00", kind="other")
+        session.flush()
+        session.add(
+            models.PackageShipment(
+                inmate_jurisdiction="Texas",
+                inmate_id=40000001,
+                request_index=0,
+                shipment_id=label.id,
+                basis="reference",
+            )
+        )
+        session.commit()
+
+
+@pytest.mark.parametrize("failures", [[], [500] * easypost_client.RETRIES])
+def test_incomplete_since_run_fails_without_rebuilding_links(sessions, logs, failures):
+    """A --since run that fails part-way (listing, or fetching a stored
+    label by id) exits 1, says to re-run it, and leaves the links alone."""
+    seed_stale_link(sessions)
+    fake = FakeEasyPost(failures=failures)
+    client = EasyPost(KEY, urlopen=fake, sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        assert (
+            shipment_sync.main(
+                ["--since", "2026-01-01"], sessions=sessions, client=client
+            )
+            == 1
+        )
+    assert (
+        "re-evaluation since 2026-01-01 is incomplete and the links were not "
+        "rebuilt; re-run with --since 2026-01-01"
+    ) in logs.text
+    with sessions() as session:
+        assert session.query(models.PackageShipment).count() == 1
+
+
+def test_failed_daily_run_says_nothing_of_a_re_evaluation(sessions, logs):
+    """Without --since, a failure is just the failure line."""
+    client = EasyPost(
+        KEY,
+        urlopen=FakeEasyPost(failures=[500] * easypost_client.RETRIES),
+        sleep=lambda _: None,
+    )
+    with logs.at_level(logging.INFO):
+        assert shipment_sync.main([], sessions=sessions, client=client) == 1
+    assert "shipment sync failed" in logs.text
+    assert "re-evaluation" not in logs.text
+
+
+def test_street_without_a_number_is_not_a_name(api_db):
+    """A unit whose only line is a street with no house number has no
+    display name, so a label on that street elsewhere doesn't match it."""
+    with api_db() as session:
+        matcher = UnitMatcher(
+            [add_unit(session, "ROADSIDE", street1="Highway 190", zipcode="77000")]
+        )
+    assert matcher.by_address({"street1": "HIGHWAY 190", "zip": "77999"}) is None
+    assert matcher.by_address({"street1": "Roadside", "zip": "77999"}) == (
+        "Texas",
+        "ROADSIDE",
+    )
+
+
+def test_same_named_units_at_different_streets_stay_ambiguous(api_db):
+    """Two units with one display name and ZIP at different streets aren't
+    one place, so the name alone doesn't tell them apart."""
+    with api_db() as session:
+        matcher = UnitMatcher(
+            [
+                add_unit(session, "FIRST", street1="Twin Unit", street2="100 First Rd"),
+                add_unit(
+                    session, "SECOND", street1="Twin Unit", street2="200 Second Rd"
+                ),
+            ]
+        )
+    assert matcher.by_address({"street1": "TWIN UNIT", "zip": "77000"}) is None
+
+
+@pytest.fixture
+def evidence_matcher(api_db):
+    """A Texas unit, a Federal unit elsewhere, and units with malformed or
+    empty ZIPs (invented names and addresses)."""
+    with api_db() as session:
+        units = [
+            add_unit(
+                session,
+                "ALPHA CODE",
+                street1="Alpha Unit",
+                street2="100 Example Rd",
+                zipcode="77000",
+            ),
+            add_unit(
+                session,
+                "DELTA CODE",
+                jurisdiction="Federal",
+                street1="Delta Unit",
+                street2="5 Federal Way",
+                zipcode="77600",
+                shipping_method="Federal Tub",
+            ),
+            add_unit(session, "BADZIP", street1="300 Odd Rd", zipcode="77-000"),
+            add_unit(session, "NOZIP", street1="400 Blank Rd", zipcode=""),
+            add_unit(session, "Doubled", street1="6 Texas Way", zipcode=""),
+            add_unit(
+                session,
+                "Doubled",
+                jurisdiction="Federal",
+                street1="6 Federal Way",
+                zipcode="77600",
+                shipping_method="Federal Tub",
+            ),
+        ]
+        return UnitMatcher(units)
+
+
+@pytest.mark.parametrize(
+    "address, unit",
+    [
+        # The street and ZIP say one unit, a name line another: unknown.
+        (
+            {"company": "DELTA UNIT", "street1": "100 EXAMPLE RD", "zip": "77000"},
+            None,
+        ),
+        # Name and address agreeing, or a name with no address match, stand.
+        (
+            {"street1": "100 EXAMPLE RD", "street2": "ALPHA UNIT", "zip": "77000"},
+            ("Texas", "ALPHA CODE"),
+        ),
+        (
+            {"company": "DELTA UNIT", "street1": "1 Nowhere Rd", "zip": "77000"},
+            ("Federal", "DELTA CODE"),
+        ),
+        # Only a well-formed ZIP counts, on either side.
+        ({"street1": "100 EXAMPLE RD", "zip": "77-000"}, None),
+        ({"street1": "100 EXAMPLE RD", "zip": "77000-1234"}, ("Texas", "ALPHA CODE")),
+        ({"street1": "300 ODD RD", "zip": "77000"}, None),
+        ({"street1": "300 ODD RD", "zip": "77-000"}, None),
+        # Empty ZIPs never equal each other.
+        ({"street1": "400 BLANK RD", "zip": ""}, None),
+        ({"street1": "DOUBLED", "zip": ""}, None),
+        # A name in both jurisdictions, the label's ZIP matching neither.
+        ({"street1": "DOUBLED", "zip": "77000"}, None),
+        ({"street1": "DOUBLED", "zip": "77600"}, ("Federal", "Doubled")),
+    ],
+)
+def test_unit_matching_weighs_name_against_address(evidence_matcher, address, unit):
+    """A name pointing away from the street and ZIP gives no unit, and only
+    valid ZIPs are compared."""
+    assert evidence_matcher.by_address(address) == unit
+
+
 def test_relisting_updates_a_stored_labels_unit(sessions):
     """A label stored before its unit could be told gets the unit when it is
     listed again (as ``--since`` lists every label back to its date)."""
@@ -706,12 +899,22 @@ def failing_urlopen(status: int, body: bytes):
             "GET shipments: HTTP 422 ADDRESS.VERIFY.FAILURE",
         ),
         (f"<html>{SENTINEL}</html>".encode(), "GET shipments: HTTP 422"),
-        (json.dumps({"error": {"code": SENTINEL}}).encode(), "GET shipments: HTTP 422"),
+        (
+            json.dumps({"error": {"code": SENTINEL}}).encode(),
+            "GET shipments: HTTP 422 other",
+        ),
+        # A code that looks like one but isn't known is not logged.
+        (
+            json.dumps({"error": {"code": "Sentinel.Personname"}}).encode(),
+            "GET shipments: HTTP 422 other",
+        ),
+        (json.dumps({"error": {"code": 7}}).encode(), "GET shipments: HTTP 422 other"),
         (json.dumps([SENTINEL]).encode(), "GET shipments: HTTP 422"),
     ],
 )
 def test_http_error_keeps_only_status_and_code(body, message):
-    """An EasyPost error is its status and error code, never its body."""
+    """An EasyPost error is its status and a known error code, never its
+    body or an unknown code."""
     client = EasyPost(KEY, urlopen=failing_urlopen(422, body), sleep=lambda _: None)
     with pytest.raises(shipment_sync.ApiError) as raised:
         client.get("shipments")
@@ -720,12 +923,25 @@ def test_http_error_keeps_only_status_and_code(body, message):
 
 def test_failed_run_logs_no_easypost_body(sessions, logs):
     """A run failing on an EasyPost error logs no part of its body."""
-    body = json.dumps({"error": {"code": "BAD", "message": SENTINEL}}).encode()
+    body = json.dumps({"error": {"code": SENTINEL, "message": SENTINEL}}).encode()
     client = EasyPost(KEY, urlopen=failing_urlopen(400, body), sleep=lambda _: None)
     with logs.at_level(logging.INFO):
         assert shipment_sync.main([], sessions=sessions, client=client) == 1
-    assert "HTTP 400 BAD" in logs.text
+    assert "shipment sync failed: GET shipments: HTTP 400 other" in logs.text
     assert "Sentinel" not in logs.text and "Personname" not in logs.text
+
+
+def sqlite_error(*statements: str) -> sqlite3.Error:
+    """The error SQLite raises running ``statements``, carrying its code."""
+    connection = sqlite3.connect(":memory:")
+    try:
+        for statement in statements:
+            connection.execute(statement)
+    except sqlite3.Error as error:
+        return error
+    finally:
+        connection.close()
+    raise AssertionError("no error")
 
 
 @pytest.mark.parametrize(
@@ -735,17 +951,29 @@ def test_failed_run_logs_no_easypost_body(sessions, logs):
             sa.exc.IntegrityError(
                 f"INSERT INTO shipments (reference) VALUES ('{SENTINEL}')",
                 {"reference": SENTINEL},
-                sqlite3.IntegrityError(
-                    "UNIQUE constraint failed: shipments.easypost_id"
+                sqlite_error(
+                    "CREATE TABLE t (x UNIQUE)",
+                    "INSERT INTO t VALUES (1)",
+                    "INSERT INTO t VALUES (1)",
                 ),
             ),
-            "IntegrityError: UNIQUE constraint failed: shipments.easypost_id",
+            "IntegrityError: SQLITE_CONSTRAINT_UNIQUE",
         ),
+        # The driver's message itself can name a value.
         (
             sa.exc.OperationalError(
-                "SELECT 1", (SENTINEL,), sqlite3.OperationalError("database is locked")
+                "SELECT 1",
+                (SENTINEL,),
+                sqlite_error('SELECT * FROM "Sentinel Q. Personname"'),
             ),
-            "OperationalError: database is locked",
+            "OperationalError: SQLITE_ERROR",
+        ),
+        # A driver error without SQLite's code is its class alone.
+        (
+            sa.exc.OperationalError(
+                "SELECT 1", (), sqlite3.OperationalError(f"locked by {SENTINEL}")
+            ),
+            "OperationalError",
         ),
         (
             sa.exc.StatementError(
@@ -759,8 +987,8 @@ def test_failed_run_logs_no_easypost_body(sessions, logs):
 def test_database_failure_logs_no_statement_or_values(
     sessions, logs, monkeypatch, error, logged
 ):
-    """A database error is logged as its class (and the driver's message),
-    without the statement or its parameters."""
+    """A database error is logged as its class (and SQLite's error code
+    name), without the statement, its parameters or the driver's message."""
 
     def fail(*args, **kwargs):
         raise error
@@ -830,6 +1058,46 @@ def test_interrupt_and_exit_are_not_caught(sessions, monkeypatch, error):
     monkeypatch.setattr(shipment_sync, "relink", stop)
     with pytest.raises(error):
         shipment_sync.main(["--rebuild-links"], sessions=sessions)
+
+
+def test_request_failures_name_the_operation_only(logs):
+    """Retry warnings and errors name a fixed operation, not the request's
+    id or query string."""
+    client = EasyPost(KEY, urlopen=failing_urlopen(503, b""), sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        with pytest.raises(shipment_sync.ApiError) as raised:
+            client.get("trackers/trk_Sentinel")
+        with pytest.raises(shipment_sync.ApiError):
+            client.get("shipments", {"start_datetime": "Sentinel"})
+    assert str(raised.value) == "GET tracker: HTTP 503"
+    assert "GET tracker: HTTP 503, retrying" in logs.text
+    assert "GET shipments: HTTP 503, retrying" in logs.text
+    assert "Sentinel" not in logs.text and "trk_" not in logs.text
+
+
+@pytest.mark.parametrize(
+    "reason, logged",
+    [
+        (f"cannot reach {SENTINEL}", "URLError"),
+        (
+            ConnectionRefusedError(111, f"refused by {SENTINEL}"),
+            "ConnectionRefusedError",
+        ),
+    ],
+)
+def test_network_error_is_its_reasons_class(logs, reason, logged):
+    """A network error is logged as its reason's class, not its text."""
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        raise urllib.error.URLError(reason)
+
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        with pytest.raises(shipment_sync.ApiError) as raised:
+            client.get("shipments")
+    assert str(raised.value) == f"GET shipments: {logged}"
+    assert f"GET shipments: {logged}, retrying" in logs.text
+    assert "Sentinel" not in logs.text
 
 
 def test_job_engine_hides_parameters(monkeypatch, tmp_path):
@@ -922,7 +1190,7 @@ def test_client_paces_requests():
     client = EasyPost(KEY, urlopen=fake, sleep=sleeps.append)
     for _ in range(3):
         client.get("shipments", {"start_datetime": "a", "end_datetime": "b"})
-    assert sleeps == [shipment_sync.PACE_SECONDS] * 2
+    assert sleeps == [easypost_client.PACE_SECONDS] * 2
 
 
 def test_paging_across_more_than_one_page(sessions, monkeypatch):
@@ -1073,6 +1341,21 @@ def test_failed_tracker_poll_is_counted_and_others_continue(sessions):
     assert (summary.polled, summary.poll_failures) == (0, 1)
 
 
+def test_unfetched_tracker_warning_names_no_tracker_id(sessions, logs):
+    """The warning for a tracker not fetched names the label's opaque
+    EasyPost id and the operation, not the tracker's path."""
+    with sessions() as session:
+        label = old_label(session, 50, [(48, "in_transit")])
+        session.commit()
+        easypost_id, tracker_id = label.easypost_id, label.tracker_id
+    with logs.at_level(logging.INFO):
+        sync(FakeEasyPost(), sessions)
+    assert f"tracker for {easypost_id} not fetched: GET tracker: HTTP 404" in (
+        logs.text
+    )
+    assert tracker_id not in logs.text
+
+
 # --- the command line ----------------------------------------------------------
 
 
@@ -1117,7 +1400,8 @@ def test_main_logs_a_summary_line(sessions, logs):
     with logs.at_level(logging.INFO, logger="ibp.shipment_sync"):
         assert shipment_sync.main([], sessions=sessions, client=client) == 0
     assert (
-        "shipment sync: 1 labels seen, 1 new, 0 updated, 1 events added, "
+        "shipment sync: 1 labels seen, 1 new, 0 updated, 0 fetched by id, "
+        "1 events added, "
         "0 trackers polled (0 failed), 0 links built"
     ) in logs.text
     assert NAME not in logs.text and STREET not in logs.text
