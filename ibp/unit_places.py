@@ -260,13 +260,39 @@ _UNIT_MARKER = re.compile(
 )
 
 
+def _canonical(tokens: list[str]) -> list[str]:
+    """Spell multi-word names one way: an interstate (``I.H.``, ``I-45``,
+    ``Interstate``) as ``IH``, ``Martin Luther King`` as ``MLK``; drop
+    ``Jr``."""
+    found: list[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        following = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if token == "I" and following == "H":
+            found.append("IH")
+            i += 2
+            continue
+        if tokens[i : i + 3] == ["MARTIN", "LUTHER", "KING"]:
+            found.append("MLK")
+            i += 3
+            continue
+        if token == "INTERSTATE" or (token == "I" and following.isdigit()):
+            found.append("IH")
+        elif token != "JR":
+            found.append(token)
+        i += 1
+    return found
+
+
 def street_tokens(line: Optional[str]) -> Optional[list[str]]:
     """A street line's words in one spelling, house number first, or None
     if it doesn't start with a house number followed by a street.
 
     The line is uppercased and its punctuation dropped, a trailing unit
     marker removed only when a street remains before it, and each word put
-    in one spelling (``_STREET_WORDS``). A line with no word but numbers
+    in one spelling (``_STREET_WORDS``, ``_canonical``). A line with no
+    word but numbers
     after its house number (``100``, ``100 #4``) is no street.
     """
     if leading_number(line) is None:
@@ -275,8 +301,12 @@ def street_tokens(line: Optional[str]) -> Optional[list[str]]:
     stripped = _UNIT_MARKER.sub("", text)
     if len(words(stripped)) >= 2:
         text = stripped
-    tokens = [_STREET_WORDS.get(token, token) for token in words(text)]
-    if not tokens[0].isdigit() or all(token.isdigit() for token in tokens[1:]):
+    tokens = _canonical([_STREET_WORDS.get(token, token) for token in words(text)])
+    if (
+        not tokens
+        or not tokens[0].isdigit()
+        or all(token.isdigit() for token in tokens[1:])
+    ):
         return None  # no street word after the number
     return tokens
 

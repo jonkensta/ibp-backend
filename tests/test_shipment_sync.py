@@ -1842,10 +1842,11 @@ def street_matcher(api_db):
 @pytest.mark.parametrize(
     "address, destination",
     [
-        # The same number on another street contradicts the name.
+        # The named unit's number on a street that isn't provably its own,
+        # with no other unit at that number: the name stands.
         (
             {"company": "RIVER UNIT", "street1": "100 OAK LN", "zip": "77000"},
-            (None, True),
+            (("Texas", "RIVER"), False),
         ),
         # Without a name, another street at the number is no evidence.
         ({"street1": "100 OAK LN", "zip": "77000"}, (None, False)),
@@ -1863,10 +1864,10 @@ def street_matcher(api_db):
             (("Texas", "LONE"), False),
         ),
         ({"street1": "100 FM 1 SPUR", "zip": "77100"}, (("Texas", "LONE"), False)),
-        # Can't tell, and the number is two places': conflict.
+        # Can't tell, at a number two places share: the name decides.
         (
             {"company": "PAIR A UNIT", "street1": "200 FM 2 SPUR", "zip": "77200"},
-            (None, True),
+            (("Texas", "PAIR A"), False),
         ),
         ({"street1": "200 FM 2 SPUR", "zip": "77200"}, (None, False)),
     ],
@@ -1879,13 +1880,27 @@ def test_street_line_confirms_or_contradicts_the_name(
     assert tuple(street_matcher.locate(address)) == destination
 
 
-@pytest.mark.parametrize("ours, theirs", RESPELLED)
+# Our street and USPS's where normalisation can't prove them the same (a
+# renamed street, another suffix), from real rows in made-up form.
+DRIFTED = [
+    ("1400 Industrial Blvd", "1400 E MLK JR INDUSTRIAL BLVD"),
+    ("8602 Peach Street", "8602 PEACH AVE"),
+    ("295 I.H. 45 North", "295 IH 45 N"),
+    ("23001 IH 35", "23001 INTERSTATE 35"),
+]
+
+
+@pytest.mark.parametrize(
+    "ours, theirs, provable",
+    [*((o, t, True) for o, t in RESPELLED), *((o, t, False) for o, t in DRIFTED)],
+)
 @pytest.mark.parametrize("street_line", ["street2", "street1"])
-def test_real_shapes_still_resolve(api_db, ours, theirs, street_line):
+def test_real_shapes_still_resolve(api_db, ours, theirs, provable, street_line):
     """Units keyed by a short code with the display name in street1 and the
     street in street2 (or the street alone in street1), and labels in the
     verified shape (USPS street in street1, name in street2) and the
-    unverified one (name in street1, our street in street2), all resolve."""
+    unverified one (name in street1, a street in street2), all resolve; a
+    label with no name does too when its street is provably ours."""
     with api_db() as session:
         if street_line == "street2":
             row = add_unit(
@@ -1904,8 +1919,12 @@ def test_real_shapes_still_resolve(api_db, ours, theirs, street_line):
     name = "SAMPLE UNIT" if street_line == "street2" else "SHORT"
     verified = {"street1": theirs, "street2": name, "zip": "77300-1234"}
     unverified = {"street1": name, "street2": ours, "zip": "77300"}
+    unverified_usps = {"street1": name, "street2": theirs, "zip": "77300"}
     street_only = {"street1": theirs, "zip": "77300"}
-    for address in (verified, unverified, street_only):
+    shapes = [verified, unverified, unverified_usps] + (
+        [street_only] if provable else []
+    )
+    for address in shapes:
         assert tuple(matcher.locate(address)) == (("Texas", "SHORT"), False), address
 
 
@@ -2074,3 +2093,126 @@ def test_truncated_backfill_fails(sessions, logs):
     assert run_since(sessions, logs, paged(pages)) == 1
     assert "page not of EasyPost's shape" in logs.text
     assert_incomplete(sessions, logs)
+
+
+def test_street_of_another_unit_contradicts_the_name(api_db):
+    """A label naming River Unit (at 100 Main Street) on 100 Oak Lane, where
+    another unit is, conflicts: positive evidence for another place."""
+    with api_db() as session:
+        matcher = UnitMatcher(
+            [
+                add_unit(
+                    session,
+                    "RIVER",
+                    street1="River Unit",
+                    street2="100 Main Street",
+                    zipcode="77000",
+                ),
+                add_unit(
+                    session,
+                    "OAK",
+                    street1="Oak Unit",
+                    street2="100 Oak Lane",
+                    zipcode="77000",
+                ),
+            ]
+        )
+    address = {"company": "RIVER UNIT", "street1": "100 OAK LN", "zip": "77000"}
+    assert tuple(matcher.locate(address)) == (None, True)
+    address = {"street1": "100 OAK LN", "street2": "OAK UNIT", "zip": "77000"}
+    assert tuple(matcher.locate(address)) == (("Texas", "OAK"), False)
+
+
+@pytest.fixture
+def drifted_matcher(api_db):
+    """Units in the shapes of real rows whose labels USPS spells otherwise
+    (invented names, numbers and ZIPs)."""
+    with api_db() as session:
+        units = [
+            # Two codes, one place; the street was renamed since.
+            add_unit(
+                session,
+                "GSC",
+                street1="Gregory S. Sample Unit",
+                street2="1400 Industrial Blvd",
+                zipcode="78000",
+            ),
+            add_unit(
+                session,
+                "GSC WORK",
+                street1="Gregory S. Sample Unit",
+                street2="1400 Industrial Blvd ",
+                zipcode="78000",
+            ),
+            add_unit(
+                session,
+                "HOLLY",
+                street1="Holly Unit",
+                street2="295 I.H. 45 North",
+                zipcode="77300",
+            ),
+            # Two differently named units at one address.
+            add_unit(
+                session,
+                "MONT",
+                street1="Montfort Unit",
+                street2="8602 Peach Street",
+                zipcode="79400",
+            ),
+            add_unit(
+                session,
+                "WTH",
+                street1="West Sample Hospital",
+                street2="8602 Peach Street",
+                zipcode="79400",
+            ),
+            add_unit(
+                session,
+                "KYLO",
+                street1="Kylo Unit",
+                street2="23001 IH 35",
+                zipcode="78600",
+            ),
+        ]
+        return UnitMatcher(units)
+
+
+@pytest.mark.parametrize(
+    "name, street, zipcode, unit",
+    [
+        ("GREGORY S SAMPLE UNIT", "1400 E MLK JR INDUSTRIAL BLVD", "78000", "GSC"),
+        ("HOLLY UNIT", "295 IH 45 N", "77300", "HOLLY"),
+        ("MONTFORT UNIT", "8602 PEACH AVE", "79400", "MONT"),
+        ("WEST SAMPLE HOSPITAL", "8602 PEACH AVE", "79400", "WTH"),
+        ("KYLO UNIT", "23001 INTERSTATE 35", "78600", "KYLO"),
+    ],
+)
+@pytest.mark.parametrize("shape", ["verified", "unverified", "company"])
+def test_named_unit_stands_through_spelling_drift(
+    drifted_matcher, name, street, zipcode, unit, shape
+):
+    """A label naming a unit at its house number and ZIP resolves to it even
+    when USPS's street isn't provably ours, if no other place has that
+    street; the two codes of one place give its representative."""
+    address = {
+        "verified": {"street1": street, "street2": name, "zip": f"{zipcode}-1234"},
+        "unverified": {"street1": name, "street2": street, "zip": zipcode},
+        "company": {"company": name, "street1": street, "zip": zipcode},
+    }[shape]
+    assert tuple(drifted_matcher.locate(address)) == (("Texas", unit), False)
+
+
+@pytest.mark.parametrize(
+    "ours, theirs",
+    [
+        ("295 I.H. 45 North", "295 IH 45 N"),
+        ("23001 IH 35", "23001 INTERSTATE 35"),
+        ("23001 I-35", "23001 IH 35"),
+        ("1400 Martin Luther King Jr Blvd", "1400 MLK BLVD"),
+    ],
+)
+def test_interstate_and_mlk_are_spelled_one_way(ours, theirs):
+    """Cheap, safe respellings the normaliser knows."""
+    from ibp.unit_places import same_street  # pylint: disable=import-outside-toplevel
+
+    assert same_street(ours, theirs) is True
