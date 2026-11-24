@@ -478,7 +478,7 @@ def test_endpoint_empty(client, api_db):  # pylint: disable=unused-argument
     assert response.json()["data"] == []
 
 
-def run_loader(api_db, start=None, end=None):
+def run_loader(api_db, start=None, end=None, method=DeliveryMethodEnum.ALL):
     """Run ``load_rows`` on the test database; return its result and every
     statement it sent, with its parameters."""
     with api_db() as session:
@@ -493,16 +493,27 @@ def run_loader(api_db, start=None, end=None):
         sa.event.listen(engine.sync_engine, "before_cursor_execute", record)
         try:
             async with AsyncSession(engine) as session:
-                return await load_rows(session, start, end)
+                return await load_rows(session, start, end, method)
         finally:
             await engine.dispose()
 
     return asyncio.run(run()), statements
 
 
-def event_queries(statements):
-    """The statements after the first (the events queries)."""
-    return statements[1:]
+def test_loader_reads_everything_in_one_statement(api_db):
+    """Requests, links and the delivered and returned events (no other
+    status) come from one statement, each once."""
+    seed(api_db)
+
+    (requests, links, events), statements = run_loader(api_db)
+
+    assert len(statements) == 1
+    assert "package_shipments" in statements[0][0]
+    assert "tracking_events" in statements[0][0]
+    assert len(requests) == 4  # the Tossed request is left out
+    assert len(links) == len({(link.key, link.shipment_id) for link in links}) == 4
+    assert sorted(e.status for e in events) == ["delivered"] * 3
+    assert {e.shipment_id for e in events} < {link.shipment_id for link in links}
 
 
 def test_loader_fetches_events_only_for_cohort_labels(api_db):
@@ -512,17 +523,23 @@ def test_loader_fetches_events_only_for_cohort_labels(api_db):
     (requests, links, events), statements = run_loader(
         api_db, datetime.date(2026, 1, 1), datetime.date(2026, 1, 31)
     )
+    (_, february_links, february_events), _ = run_loader(
+        api_db, datetime.date(2026, 2, 1), datetime.date(2026, 2, 28)
+    )
 
     assert [r.key for r in requests] == [("Texas", NUMBER, 1)]
-    (label,) = {link.shipment_id for link in links}
-    (query,) = event_queries(statements)
-    assert label in query[1]
-    assert set(query[1]) - {"delivered", "return_to_sender"} == {label}
-    assert events == []  # the January label is still in the mail
+    assert len(links) == 1
+    # The February labels' deliveries are not read for January.
+    assert events == []
+    assert len(statements) == 1
+    assert len(february_events) == 3
+    assert {e.shipment_id for e in february_events} <= {
+        link.shipment_id for link in february_links
+    }
 
 
-def test_loader_fetches_no_events_for_an_empty_cohort(api_db):
-    """No request in the range means no events query at all."""
+def test_loader_fetches_nothing_for_an_empty_cohort(api_db):
+    """No request in the range: one statement, nothing back."""
     seed(api_db)
 
     (requests, links, events), statements = run_loader(
@@ -533,18 +550,87 @@ def test_loader_fetches_no_events_for_an_empty_cohort(api_db):
     assert len(statements) == 1
 
 
-def test_loader_reads_the_links_once(api_db, monkeypatch):
-    """The events come from the first query's labels, in chunks, and the
-    link table is never read again."""
+@pytest.mark.parametrize(
+    "method, bases, delivered",
+    [
+        (DeliveryMethodEnum.BULK, {"unit_session"}, 2),
+        (DeliveryMethodEnum.INDIVIDUAL, {"reference", "inmate_number"}, 1),
+    ],
+)
+def test_loader_filters_links_by_method(api_db, method, bases, delivered):
+    """Only the method's links and their labels' events are fetched; every
+    Filled request still is."""
     seed(api_db)
-    monkeypatch.setattr(delivery_latency, "EVENT_CHUNK", 1)
 
-    (_, links, events), statements = run_loader(api_db)
+    (requests, links, events), _ = run_loader(api_db, method=method)
 
-    labels = {link.shipment_id for link in links}
-    assert "package_shipments" in statements[0][0]
-    assert len(event_queries(statements)) == len(labels) == 4
-    for statement, _ in event_queries(statements):
-        assert "package_shipments" not in statement
-    assert sorted(e.status for e in events) == ["delivered"] * 3
-    assert {e.shipment_id for e in events} < labels
+    assert len(requests) == 4
+    assert {link.basis for link in links} == bases
+    assert len(events) == delivered
+    assert {e.shipment_id for e in events} <= {link.shipment_id for link in links}
+
+
+def test_loader_reads_one_snapshot(api_db):
+    """Events committed by another connection while the loader runs show up
+    entirely or not at all, never for some labels only."""
+    count = 501  # more labels than one events batch of the old loader
+    with api_db() as session:
+        add_inmate(session, NUMBER, None)
+        labels = []
+        for index in range(count):
+            add_request(session, NUMBER, index, "2026-03-01")
+            labels.append(
+                add_shipment(
+                    session,
+                    "2026-03-02T18:00",
+                    events=(("2026-03-03T18:00", "in_transit"),),
+                )
+            )
+        session.flush()
+        for index, label in enumerate(labels):
+            session.add(
+                models.PackageShipment(
+                    inmate_jurisdiction="Texas",
+                    inmate_id=NUMBER,
+                    request_index=index,
+                    shipment_id=label.id,
+                    basis="reference",
+                )
+            )
+        first, last = labels[0].id, labels[-1].id
+        session.commit()
+        path = session.get_bind().url.database
+
+    committed = []
+
+    def deliver_first_and_last(_conn, _cursor, statement, *_args):
+        """After the first read of the events, deliver two labels."""
+        if committed or "tracking_events" not in statement:
+            return
+        with api_db() as writer:
+            for shipment_id in (first, last):
+                writer.add(
+                    models.TrackingEvent(
+                        shipment_id=shipment_id,
+                        occurred_at=utc("2026-03-05T18:00"),
+                        status="delivered",
+                    )
+                )
+            writer.commit()
+        committed.append(True)
+
+    async def run():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+        sa.event.listen(
+            engine.sync_engine, "after_cursor_execute", deliver_first_and_last
+        )
+        try:
+            async with AsyncSession(engine) as session:
+                return await delivery_latency.get_delivery_latency(session)
+        finally:
+            await engine.dispose()
+
+    (month,) = asyncio.run(run())
+
+    assert committed
+    assert (month.linked, month.delivered) in {(count, 0), (count, 2)}
