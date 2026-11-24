@@ -44,8 +44,6 @@ DELIVERED = "delivered"
 RETURN_TO_SENDER = "return_to_sender"
 # A latency over this many days, like a negative one, means a bad postmark.
 MAX_LATENCY_DAYS = 365
-# Labels per events query, well under SQLite's bound-variable limit.
-EVENT_CHUNK = 500
 
 # The link bases each method counts.
 METHOD_BASES: dict[schemas.DeliveryMethodEnum, frozenset[str]] = {
@@ -280,15 +278,19 @@ async def load_rows(
     session: AsyncSession,
     start_date: Optional[datetime.date] = None,
     end_date: Optional[datetime.date] = None,
+    method: schemas.DeliveryMethodEnum = schemas.DeliveryMethodEnum.ALL,
 ) -> tuple[list[FilledRequest], list[Link], list[Event]]:
-    """Fetch the Filled requests postmarked in the range, their links and the
-    linked labels' delivered and returned events.
+    """Fetch the Filled requests postmarked in the range, their links of the
+    method and those labels' delivered and returned events.
 
-    The links are read once: the events are fetched for the labels of the
-    links read, so a link rebuild running meanwhile cannot drop a delivery,
-    and only the labels of the requests in the range are looked at.
+    One statement, so one consistent read: a sync or link rebuild committing
+    meanwhile shows up entirely or not at all. Every Filled request in the
+    range is returned, linked or not; only links whose basis ``method``
+    counts, and only their labels' events, are fetched. The rows are a
+    request per link per event, deduplicated here.
     """
-    request, link, shipment = models.Request, models.PackageShipment, models.Shipment
+    request, link = models.Request, models.PackageShipment
+    shipment, event = models.Shipment, models.TrackingEvent
     query = (
         sa.select(
             request.inmate_jurisdiction,
@@ -299,6 +301,9 @@ async def load_rows(
             link.shipment_id,
             link.basis,
             shipment.purchased_at,
+            event.id.label("event_id"),
+            event.occurred_at,
+            event.status,
         )
         .select_from(request)
         .outerjoin(
@@ -307,9 +312,17 @@ async def load_rows(
                 link.inmate_jurisdiction == request.inmate_jurisdiction,
                 link.inmate_id == request.inmate_id,
                 link.request_index == request.index,
+                link.basis.in_(sorted(METHOD_BASES[method])),
             ),
         )
         .outerjoin(shipment, shipment.id == link.shipment_id)
+        .outerjoin(
+            event,
+            sa.and_(
+                event.shipment_id == shipment.id,
+                event.status.in_((DELIVERED, RETURN_TO_SENDER)),
+            ),
+        )
         .where(request.action == "Filled")
     )
     if start_date:
@@ -318,35 +331,21 @@ async def load_rows(
         query = query.where(request.date_postmarked <= end_date)
 
     requests: dict[RequestKey, FilledRequest] = {}
-    links: list[Link] = []
+    links: dict[tuple[RequestKey, int], Link] = {}
+    events: dict[int, Event] = {}
     for row in (await session.execute(query)).all():
         key = (row.inmate_jurisdiction, row.inmate_id, row.request_index)
         if key not in requests:
             requests[key] = FilledRequest(key, row.date_postmarked, row.date_processed)
-        if row.shipment_id is not None and row.purchased_at is not None:
-            links.append(Link(key, row.shipment_id, row.basis, row.purchased_at))
-
-    events = await load_events(session, {link.shipment_id for link in links})
-    return list(requests.values()), links, events
-
-
-async def load_events(
-    session: AsyncSession, shipment_ids: Iterable[int]
-) -> list[Event]:
-    """The delivered and returned events of the given labels, fetched
-    ``EVENT_CHUNK`` labels at a time (none for no labels)."""
-    ids = sorted(shipment_ids)
-    event = models.TrackingEvent
-    events: list[Event] = []
-    for start in range(0, len(ids), EVENT_CHUNK):
-        rows = await session.execute(
-            sa.select(event.shipment_id, event.occurred_at, event.status).where(
-                event.status.in_((DELIVERED, RETURN_TO_SENDER)),
-                event.shipment_id.in_(ids[start : start + EVENT_CHUNK]),
+        if row.shipment_id is None or row.purchased_at is None:
+            continue
+        if (key, row.shipment_id) not in links:
+            links[(key, row.shipment_id)] = Link(
+                key, row.shipment_id, row.basis, row.purchased_at
             )
-        )
-        events.extend(Event(*row) for row in rows.all())
-    return events
+        if row.event_id is not None and row.event_id not in events:
+            events[row.event_id] = Event(row.shipment_id, row.occurred_at, row.status)
+    return list(requests.values()), list(links.values()), list(events.values())
 
 
 async def get_delivery_latency(
@@ -356,5 +355,5 @@ async def get_delivery_latency(
     end_date: Optional[datetime.date] = None,
 ) -> list[schemas.DeliveryLatencyMonth]:
     """The latency metric for Filled requests postmarked in the range."""
-    requests, links, events = await load_rows(session, start_date, end_date)
+    requests, links, events = await load_rows(session, start_date, end_date, method)
     return summarize(requests, links, events, method)
