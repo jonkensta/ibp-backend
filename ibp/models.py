@@ -248,8 +248,8 @@ class Request(HasInmateIndex, Base):
 
     # The inmate's unit (in ``inmate_jurisdiction``) when the request was
     # filled: where the person was when the package was prepared, kept after
-    # a transfer. NULL for every request filled before the column was
-    # added. No foreign key:
+    # a transfer. Kept up by ``set_action``; NULL for a Tossed request and
+    # for every request filled before the column was added. No foreign key:
     # a unit renamed or removed later just matches nothing.
     unit_name: Mapped[Optional[str]] = mapped_column(String)
 
@@ -266,6 +266,20 @@ class Request(HasInmateIndex, Base):
         cascade="all, delete-orphan",
         collection_class=list,
     )
+
+    def set_action(self, action: str, inmate_unit_name: Optional[str]) -> None:
+        """Set the action, keeping ``unit_name`` in step with it.
+
+        ``inmate_unit_name`` is the inmate's current unit. A request that
+        becomes Filled (a new one, or one that was Tossed) records it; one
+        already Filled keeps the unit it recorded, so an edit after a
+        transfer doesn't move it; a Tossed one has no unit.
+        """
+        if action != "Filled":
+            self.unit_name = None
+        elif self.action != "Filled":
+            self.unit_name = inmate_unit_name
+        self.action = action
 
 
 # The columns of a request's key, as referenced by package items and
