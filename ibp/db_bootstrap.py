@@ -11,6 +11,10 @@ entrypoint).  It inspects the configured database and does the right thing:
   any later data-only migrations (they are safe to run on any data).
 - Otherwise: run ``alembic upgrade head`` to apply any pending migrations.
 
+Then the schema is checked to have every column of the models: one a
+half-run migration left missing at a recorded revision is restored by
+replaying that revision (``check_columns``); any other is an error.
+
 Finally, the single ``shipping_settings`` row is seeded with the production
 defaults if it is missing (``create_all`` builds the table but, unlike the
 migration, does not seed it).
@@ -248,6 +252,50 @@ def adopt_create_all_schema(
         command.upgrade(config, "head")
 
 
+# Columns a revision adds that a run interrupted partway (SQLite DDL isn't
+# transactional under alembic) can leave missing at a recorded revision
+# that expects them, with the revision to replay from to restore them.
+REPAIRABLE_COLUMNS = {
+    "requests.unit_name": PRE_REQUEST_UNIT_REVISION,
+    "requests.unit_recorded": PRE_REQUEST_UNIT_REVISION,
+}
+
+
+def missing_columns(url: str) -> set[str]:
+    """Columns of the current models the database lacks (``table.column``)."""
+    _, columns = inspect_database(url)
+    expected = {
+        f"{table.name}.{column.name}"
+        for table in models.Base.metadata.sorted_tables
+        for column in table.columns
+    }
+    return expected - columns
+
+
+def check_columns(config: Config, url: str) -> None:
+    """Make sure the upgraded schema has every column of the models.
+
+    A column a half-run upgrade or downgrade left missing is restored by
+    replaying its revision, whose upgrade adds only what is missing; any
+    other missing column fails the bootstrap loudly.
+    """
+    missing = missing_columns(url)
+    if missing and missing <= REPAIRABLE_COLUMNS.keys():
+        (revision,) = {REPAIRABLE_COLUMNS[column] for column in missing}
+        logger.warning(
+            "Schema at head lacks %s; replaying from %s to restore it.",
+            ", ".join(sorted(missing)),
+            revision,
+        )
+        command.stamp(config, revision)
+        command.upgrade(config, "head")
+        missing = missing_columns(url)
+    if missing:
+        raise RuntimeError(
+            "schema at head lacks columns: " + ", ".join(sorted(missing))
+        )
+
+
 def bootstrap() -> None:
     """Bring the database schema up to date."""
     url = get_sync_database_url()
@@ -263,6 +311,7 @@ def bootstrap() -> None:
         logger.info("alembic_version table present; running alembic upgrade to head.")
         command.upgrade(config, "head")
 
+    check_columns(config, url)
     seed_shipping_settings(url)
     logger.info("Database schema bootstrap complete.")
 

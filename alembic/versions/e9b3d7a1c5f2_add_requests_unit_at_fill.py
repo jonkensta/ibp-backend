@@ -40,6 +40,13 @@ def check_existing(found: dict, column: sa.Column) -> None:
         )
 
 
+def existing_columns() -> set[str]:
+    """The columns ``requests`` has now (none known in offline mode)."""
+    if context.is_offline_mode():
+        return set()
+    return {found['name'] for found in sa.inspect(op.get_bind()).get_columns('requests')}
+
+
 def upgrade() -> None:
     """Upgrade schema.
 
@@ -74,9 +81,13 @@ def downgrade() -> None:
     On SQLite the columns are dropped with a native ``ALTER TABLE ... DROP
     COLUMN``, not batch mode: rebuilding ``requests`` would drop the table,
     and with foreign keys on, that deletes every ``package_shipments`` row
-    (``ON DELETE CASCADE``).
+    (``ON DELETE CASCADE``). Each is dropped only if it is there, so a
+    downgrade interrupted after dropping one can be run again.
     """
+    existing = existing_columns()
     for column in reversed(new_columns()):
+        if existing and column.name not in existing:
+            continue
         if op.get_context().dialect.name == 'sqlite':
             op.execute(f'ALTER TABLE requests DROP COLUMN {column.name}')
         else:
