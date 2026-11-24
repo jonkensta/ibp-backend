@@ -62,7 +62,13 @@ from .label_reading import (  # pylint: disable=unused-import
     read_label,
     tracker_status,
 )
-from .shipment_links import StaleLinks, never_mailed, rebuild_links
+from .shipment_links import (
+    StaleLinks,
+    is_scanned,
+    never_mailed,
+    rebuild_links,
+    scanned_status,
+)
 from .unit_matching import UnitMatcher
 
 logger = logging.getLogger(__name__)
@@ -233,8 +239,9 @@ def store_label(
     """Insert or update a label and add its new events.
 
     Stored evidence never goes backwards: a value the listing leaves out
-    (``KEPT_WHEN_MISSING``) doesn't clear one already stored, and events are
-    only ever added. ``synced_at`` is set only when the sync changes the
+    (``KEPT_WHEN_MISSING``) doesn't clear one already stored, events are
+    only ever added, and ``ever_scanned`` is set by a scanned status or
+    event and never cleared. ``synced_at`` is set only when the sync changes the
     row or adds an event, so an identical run writes nothing.
     """
     shipment = session.scalar(
@@ -243,8 +250,13 @@ def store_label(
         .options(selectinload(models.Shipment.events))
     )
     columns = label.columns()
+    scanned = scanned_status(label.tracker_status) or any(
+        scanned_status(event.status) for event in label.events
+    )
     if shipment is None:
-        shipment = models.Shipment(**columns, synced_at=now, events=[])
+        shipment = models.Shipment(
+            **columns, ever_scanned=scanned, synced_at=now, events=[]
+        )
         session.add(shipment)
         summary.new += 1
         changed = True
@@ -256,6 +268,11 @@ def store_label(
             if getattr(shipment, name) != value:
                 setattr(shipment, name, value)
                 changed = True
+        # The stored evidence counts too, before the new values replace it
+        # (a row from before the flag was kept).
+        if (scanned or is_scanned(shipment)) and not shipment.ever_scanned:
+            shipment.ever_scanned = True  # and never set back
+            changed = True
         summary.updated += changed
     added = add_events(shipment, label.events)
     summary.events_added += added
@@ -282,7 +299,16 @@ def apply_tracker(
     if status is None:
         raise Malformed("tracker answer has no status")
     events = parse_events(tracker)
-    changed = status != shipment.tracker_status
+    changed = False
+    # The stored evidence counts too, before the new status replaces it.
+    if not shipment.ever_scanned and (
+        is_scanned(shipment)
+        or scanned_status(status)
+        or any(scanned_status(e.status) for e in events)
+    ):
+        shipment.ever_scanned = True  # and never set back
+        changed = True
+    changed = changed or status != shipment.tracker_status
     shipment.tracker_status = status
     added = add_events(shipment, events)
     summary.updated += changed

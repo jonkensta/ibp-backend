@@ -2216,3 +2216,121 @@ def test_interstate_and_mlk_are_spelled_one_way(ours, theirs):
     from ibp.unit_places import same_street  # pylint: disable=import-outside-toplevel
 
     assert same_street(ours, theirs) is True
+
+
+# --- a scan, once seen, is never undone ----------------------------------------
+
+
+def box_listing(status, events, refund_status=None):
+    """The listed form of one bulk box to ALPHA bought 20 days before NOW."""
+    box = shipment(
+        1,
+        ago(20),
+        events,
+        name="ATTN: MAILROOM STAFF",
+        tracker_status=status,
+        refund_status=refund_status,
+    )
+    return box
+
+
+def seed_box_request(sessions) -> None:
+    """A Filled request at ALPHA a few days before the box."""
+    with sessions() as session:
+        add_inmate(session, 40000001, "ALPHA")
+        add_request(session, 40000001, 0, ago(25).date().isoformat())
+        session.commit()
+
+
+def bulk_links(sessions) -> int:
+    """How many unit_session links are stored."""
+    with sessions() as session:
+        return (
+            session.query(models.PackageShipment)
+            .filter_by(basis="unit_session")
+            .count()
+        )
+
+
+def test_relisting_with_pre_transit_keeps_the_scan(sessions):
+    """A box whose only scan evidence was its in_transit status, listed
+    again as pre_transit, keeps ever_scanned and its bulk link."""
+    seed_box_request(sessions)
+    sync(
+        FakeEasyPost([box_listing("in_transit", [event(ago(20), "pre_transit")])]),
+        sessions,
+    )
+    assert stored(sessions, "shp_00000001").ever_scanned
+    assert bulk_links(sessions) == 1
+    summary = sync(
+        FakeEasyPost([box_listing("pre_transit", [event(ago(20), "pre_transit")])]),
+        sessions,
+    )
+    row = stored(sessions, "shp_00000001")
+    assert (row.tracker_status, row.ever_scanned) == ("pre_transit", True)
+    assert summary.links == bulk_links(sessions) == 1
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_poll_returning_error_keeps_the_scan(sessions, flag):
+    """Polling an older box's tracker and getting error keeps the scan and
+    the bulk link, whether the flag was already set or (a row from before
+    it) only its stored in_transit status showed the scan."""
+    with sessions() as session:
+        add_inmate(session, 40000001, "ALPHA")
+        add_request(session, 40000001, 0, ago(45).date().isoformat())
+        box = add_shipment(
+            session,
+            ago(40).strftime("%Y-%m-%dT%H:%M"),
+            kind="bulk",
+            unit_jurisdiction="Texas",
+            unit_name="ALPHA",
+            tracker_status="in_transit",
+            ever_scanned=flag,
+            events=((ago(40).strftime("%Y-%m-%dT%H:%M"), "pre_transit"),),
+        )
+        session.commit()
+        easypost_id, tracker_id = box.easypost_id, box.tracker_id
+    fake = FakeEasyPost(trackers={tracker_id: {"id": tracker_id, "status": "error"}})
+    summary = sync(fake, sessions)
+    assert (summary.polled, summary.poll_failures) == (1, 0)
+    row = stored(sessions, easypost_id)
+    assert (row.tracker_status, row.ever_scanned) == ("error", True)
+    assert summary.links == 1
+
+
+def test_fresh_unscanned_box_stays_unscanned_and_counts_while_fresh(sessions):
+    """A box USPS hasn't scanned yet keeps ever_scanned false and still
+    counts toward a session for its first 7 days, and no longer after."""
+    with sessions() as session:
+        add_inmate(session, 40000001, "ALPHA")
+        add_request(session, 40000001, 0, ago(6).date().isoformat())
+        session.commit()
+    box = shipment(
+        1, ago(3), [event(ago(3), "pre_transit")], name="ATTN: MAILROOM STAFF"
+    )
+    summary = sync(FakeEasyPost([box]), sessions)
+    assert not stored(sessions, "shp_00000001").ever_scanned
+    assert summary.links == 1
+    assert shipment_sync.relink(sessions, NOW + 5 * DAY) == 0
+
+
+def test_scanned_label_with_a_refund_request_still_counts_as_mailed(sessions):
+    """A box scanned before a refund was asked for travelled: it stays
+    mailed (its link kept) and isn't finished early by the refund."""
+    seed_box_request(sessions)
+    sync(
+        FakeEasyPost([box_listing("in_transit", [event(ago(20), "pre_transit")])]),
+        sessions,
+    )
+    later = box_listing("pre_transit", [event(ago(20), "pre_transit")], "submitted")
+    summary = sync(FakeEasyPost([later]), sessions)
+    with sessions() as session:
+        row = session.scalars(
+            sa.select(models.Shipment).options(
+                sa.orm.selectinload(models.Shipment.events)
+            )
+        ).one()
+        assert not shipment_links.never_mailed(row)
+        assert not is_finished(row, NOW)
+    assert summary.links == 1

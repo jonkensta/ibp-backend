@@ -525,6 +525,16 @@ class Shipment(Base):
 
     refund_status: Mapped[Optional[str]] = mapped_column(String(20))
     tracker_status: Mapped[Optional[str]] = mapped_column(String(30))
+    # Whether USPS was ever seen handling the label (a scanned tracker status
+    # or event, see ``shipment_links.UNSCANNED``). Only ever set, never
+    # cleared: a later status (``pre_transit`` again, ``error``) or a refund
+    # request doesn't undo a scan.
+    ever_scanned: Mapped[bool] = mapped_column(
+        sqlalchemy.Boolean,
+        nullable=False,
+        default=False,
+        server_default=sqlalchemy.false(),
+    )
     synced_at: Mapped[datetime.datetime] = mapped_column(TZDateTime(), nullable=False)
 
     events: Mapped[list["TrackingEvent"]] = relationship(

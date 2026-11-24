@@ -215,9 +215,12 @@ are in [`scripts/shipment-sync/`](scripts/shipment-sync/README.md).
   code, tracker id, purchase time (UTC), weight (oz), postage (cents),
   service, the `reference` if it is one of the tags below, `kind`
   (`individual`, `bulk` or `other`), the unit it went to when that can be
-  told (see below), the request its tag names, the 8-digit inmate number from the addressee
-  line, refund status, current tracker status and when a sync last changed
-  it. No recipient name or street address is stored.
+  told (see below), the request its tag names, the 8-digit inmate number
+  from the addressee line, refund status, current tracker status,
+  `ever_scanned` (USPS was seen handling it: set by any status or event not
+  `unknown`, `pre_transit`, `error` or `cancelled`, and never cleared, so a
+  later status or a refund request doesn't undo a scan) and when a sync last
+  changed it. No recipient name or street address is stored.
 - `tracking_events`: every event as EasyPost lists it (time in UTC, the
   carrier's local time, status, detail, message, city, state, ZIP), returns,
   refusals and repeated deliveries included. A re-sync adds only events not
@@ -293,8 +296,9 @@ requested) that USPS never scanned, since it was never mailed:
   (local). The destination unit's jurisdiction tells Texas and Federal
   numbers apart; with no destination, a number both have links to neither.
 - `unit_session`: all mailed bulk boxes to one place on one local date are a
-  session; a box counts only once USPS has scanned it, or while it is under 7
-  days old (time for its first scan). A place is a unit, or the units that
+  session; a box counts only once USPS has ever scanned it (`ever_scanned`,
+  or its current status or events), or while it is under 7 days old (time
+  for its first scan). A place is a unit, or the units that
   are one place (above): a box stored under any of them serves the inmates
   under every one. A Filled request with no label of its own links to every
   box of the first session to its unit's place on a date after its

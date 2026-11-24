@@ -2,6 +2,7 @@
 
 import importlib.machinery
 import importlib.util
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -178,3 +179,81 @@ def test_runbook_waits_for_activating_runs_and_installs_the_wrapper_first(readme
     ]
     assert -1 not in positions, dict(zip(steps, positions))
     assert positions == sorted(positions)
+
+
+RUNBOOKS = ["deploy/pi/README.md", "scripts/shipment-sync/README.md"]
+TOPLEVEL = Path(__file__).resolve().parent.parent
+
+
+def code_blocks(readme: str) -> list[str]:
+    """The indented code blocks of a Markdown file, dedented."""
+    blocks, current = [], []
+    for line in (TOPLEVEL / readme).read_text().splitlines():
+        if line.startswith("    "):
+            current.append(line[4:])
+        elif line.strip() and current:
+            blocks.append("\n".join(current))
+            current = []
+    if current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def backfill_steps(readme: str) -> str:
+    """Steps 6 and 7 of the re-evaluation block."""
+    (block,) = [b for b in code_blocks(readme) if "# 6. Re-evaluate" in b]
+    return block[block.index("# 6. Re-evaluate") :]
+
+
+@pytest.mark.parametrize("readme", RUNBOOKS)
+def test_runbook_code_is_valid_shell(readme):
+    """Every code block in the runbooks parses as shell."""
+    for block in code_blocks(readme):
+        script = block.replace("<", "_").replace(">", "_")
+        result = subprocess.run(
+            ["bash", "-n"], input=script, text=True, capture_output=True, check=False
+        )
+        assert result.returncode == 0, (block, result.stderr)
+
+
+@pytest.mark.parametrize("readme", RUNBOOKS)
+@pytest.mark.parametrize(
+    "statuses, started",
+    [([1, 75], False), ([1, 2], False), ([1, 1, 0], True), ([0], True)],
+)
+def test_timer_starts_only_after_a_complete_backfill(
+    tmp_path, readme, statuses, started
+):
+    """Run steps 6 and 7 with a stand-in sync exiting with ``statuses`` in
+    turn: the timer is started only if the last run exited 0, and otherwise
+    a line says it is still stopped."""
+    answers = tmp_path / "answers"
+    answers.write_text("\n".join(map(str, statuses)) + "\n")
+    calls = tmp_path / "calls"
+    sync = tmp_path / "ibp-shipment-sync"
+    sync.write_text(
+        "#!/bin/bash\n"
+        f'status=$(head -n1 "{answers}"); sed -i 1d "{answers}"; exit "$status"\n'
+    )
+    sync.chmod(0o755)
+    script = (
+        f'sudo() {{ echo "$*" >> "{calls}"; }}\nsleep() {{ :; }}\n'
+        + backfill_steps(readme).replace("~/.local/bin/ibp-shipment-sync", str(sync))
+    )
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False
+    )
+    ran = calls.read_text() if calls.exists() else ""
+    assert ("systemctl start ibp-shipment-sync.timer" in ran) is started
+    assert ("TIMER STILL STOPPED" in result.stdout) is not started
+
+
+@pytest.mark.parametrize("readme", RUNBOOKS)
+def test_no_runbook_starts_the_timer_unconditionally(readme):
+    """Every line starting or enabling the timer does so only on success."""
+    for block in code_blocks(readme):
+        for line in block.splitlines():
+            if "ibp-shipment-sync.timer" in line and (
+                "systemctl start" in line or "systemctl enable" in line
+            ):
+                assert line.lstrip().startswith("if "), line

@@ -15,8 +15,9 @@ each named by the link's ``basis``:
   destination unit decides the jurisdiction; with no destination, a number
   that both jurisdictions could match links to neither.
 - ``unit_session``: a session is every bulk box to one place on one local
-  date that USPS has scanned, or that was bought less than ``FRESH_BOX``
-  (7 days) ago and so may not have its first scan yet. A place is a unit,
+  date that USPS has ever scanned (``is_scanned``), or that was bought less
+  than ``FRESH_BOX`` (7 days) ago and so may not have its first scan yet.
+  A place is a unit,
   or the units that are one facility under several provider codes
   (``ibp.unit_places.Places``: same jurisdiction, display name and 5-digit
   ZIP): a box stored under any of them serves the inmates under every one,
@@ -34,7 +35,9 @@ each named by the link's ``basis``:
   The unit's shipping method is not consulted: boxes do go to units marked
   Individual, and a package with its own label is already linked to it.
 
-A label that was never mailed (``never_mailed``) gets no links. Nothing
+A label that was never mailed (``never_mailed``: refund asked for and
+never scanned, by its permanent ``ever_scanned`` flag or its current
+evidence) gets no links. Nothing
 here works out delivery: the stored events are left for that.
 
 ``rebuild_links`` does all its reading first (``compute_links``: no write,
@@ -77,13 +80,21 @@ REFUND_REQUESTED = frozenset({"submitted", "refunded"})
 LinkKey = tuple[str, int, int, int]
 
 
+def scanned_status(status: Optional[str]) -> bool:
+    """Whether a tracker or event status shows USPS handled a package: any
+    status but none or ``UNSCANNED``."""
+    return bool(status) and status not in UNSCANNED
+
+
 def is_scanned(shipment: models.Shipment) -> bool:
-    """Whether USPS ever handled the label: any status but ``UNSCANNED``.
+    """Whether USPS ever handled the label: its permanent ``ever_scanned``
+    flag, or a scanned current status or stored event (for a row the flag
+    hasn't caught up with). A later unscanned status never undoes a scan.
 
     The shipment's events must be loaded.
     """
     statuses = [shipment.tracker_status] + [e.status for e in shipment.events]
-    return any(status and status not in UNSCANNED for status in statuses)
+    return bool(shipment.ever_scanned) or any(map(scanned_status, statuses))
 
 
 def never_mailed(shipment: models.Shipment) -> bool:
