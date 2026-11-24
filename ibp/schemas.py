@@ -269,7 +269,7 @@ class InmateSearchResults(BaseModel):
     ``stale_inmates`` holds the name-search matches left out of ``inmates``
     because their data is old and their provider, asked just now, would have
     returned them but did not (most likely released). See
-    ``api.stale_inmate_clause``.
+    ``inmate_search.stale_inmate_clause``.
     """
 
     inmates: list[InmateSearchResult]
