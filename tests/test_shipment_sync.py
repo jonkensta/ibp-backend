@@ -35,6 +35,7 @@ from ibp.shipment_sync import (
 )
 
 from .easypost_fake import NAME, STREET, FakeEasyPost, event, shipment
+from .test_unit_places import RESPELLED
 from .shipment_helpers import add_inmate, add_request, add_shipment, add_unit, utc
 
 NOW = utc("2026-03-10T12:00")
@@ -1789,3 +1790,115 @@ def test_since_run_with_a_failed_tracker_poll_rebuilds_no_links(sessions, logs):
     assert run_since(sessions, logs, FakeEasyPost(), since=since) == 1
     assert "shipment sync failed: 1 trackers not fetched" in logs.text
     assert_incomplete(sessions, logs, since=since)
+
+
+# --- street lines as address evidence ------------------------------------------
+
+
+@pytest.fixture
+def street_matcher(api_db):
+    """River Unit at 100 Main Street; FM units at 100 FM 1 in another ZIP,
+    one alone and two sharing the number (invented)."""
+    with api_db() as session:
+        return UnitMatcher(
+            [
+                add_unit(
+                    session,
+                    "RIVER",
+                    street1="River Unit",
+                    street2="100 Main Street",
+                    zipcode="77000",
+                ),
+                add_unit(
+                    session,
+                    "LONE",
+                    street1="Lone Unit",
+                    street2="100 FM 1",
+                    zipcode="77100",
+                ),
+                add_unit(
+                    session,
+                    "PAIR A",
+                    street1="Pair A Unit",
+                    street2="200 FM 2",
+                    zipcode="77200",
+                ),
+                add_unit(
+                    session,
+                    "PAIR B",
+                    street1="Pair B Unit",
+                    street2="200 FM 2 Annex",
+                    zipcode="77200",
+                ),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "address, destination",
+    [
+        # The same number on another street contradicts the name.
+        (
+            {"company": "RIVER UNIT", "street1": "100 OAK LN", "zip": "77000"},
+            (None, True),
+        ),
+        # Without a name, another street at the number is no evidence.
+        ({"street1": "100 OAK LN", "zip": "77000"}, (None, False)),
+        # The same street, in USPS spelling, confirms it.
+        (
+            {"street1": "100 MAIN ST", "street2": "RIVER UNIT", "zip": "77000"},
+            (("Texas", "RIVER"), False),
+        ),
+        ({"street1": "100 MAIN ST", "zip": "77000"}, (("Texas", "RIVER"), False)),
+        # A name with no street line stands.
+        ({"company": "RIVER UNIT", "zip": "77000"}, (("Texas", "RIVER"), False)),
+        # Can't tell, and the number is the unit's alone: the name stands.
+        (
+            {"company": "LONE UNIT", "street1": "100 FM 1 SPUR", "zip": "77100"},
+            (("Texas", "LONE"), False),
+        ),
+        ({"street1": "100 FM 1 SPUR", "zip": "77100"}, (("Texas", "LONE"), False)),
+        # Can't tell, and the number is two places': conflict.
+        (
+            {"company": "PAIR A UNIT", "street1": "200 FM 2 SPUR", "zip": "77200"},
+            (None, True),
+        ),
+        ({"street1": "200 FM 2 SPUR", "zip": "77200"}, (None, False)),
+    ],
+)
+def test_street_line_confirms_or_contradicts_the_name(
+    street_matcher, address, destination
+):
+    """The label's street line is compared with the named unit's at the
+    same number, not just the number."""
+    assert tuple(street_matcher.locate(address)) == destination
+
+
+@pytest.mark.parametrize("ours, theirs", RESPELLED)
+@pytest.mark.parametrize("street_line", ["street2", "street1"])
+def test_real_shapes_still_resolve(api_db, ours, theirs, street_line):
+    """Units keyed by a short code with the display name in street1 and the
+    street in street2 (or the street alone in street1), and labels in the
+    verified shape (USPS street in street1, name in street2) and the
+    unverified one (name in street1, our street in street2), all resolve."""
+    with api_db() as session:
+        if street_line == "street2":
+            row = add_unit(
+                session, "SHORT", street1="Sample Unit", street2=ours, zipcode="77300"
+            )
+        else:
+            row = add_unit(session, "SHORT", street1=ours, zipcode="77300")
+        decoy = add_unit(
+            session,
+            "DECOY",
+            street1="Decoy Unit",
+            street2="5 Other Rd",
+            zipcode="77300",
+        )
+        matcher = UnitMatcher([row, decoy])
+    name = "SAMPLE UNIT" if street_line == "street2" else "SHORT"
+    verified = {"street1": theirs, "street2": name, "zip": "77300-1234"}
+    unverified = {"street1": name, "street2": ours, "zip": "77300"}
+    street_only = {"street1": theirs, "zip": "77300"}
+    for address in (verified, unverified, street_only):
+        assert tuple(matcher.locate(address)) == (("Texas", "SHORT"), False), address

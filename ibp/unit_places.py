@@ -23,7 +23,7 @@ alphabetically first unit, its representative.
 import re
 from collections import defaultdict
 from collections.abc import Iterable
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from . import models
 
@@ -211,20 +211,6 @@ def display_name(unit: models.Unit) -> Optional[str]:
     return None
 
 
-def line_numbers(lines: Iterable[Optional[str]]) -> set[tuple[str, str]]:
-    """The house numbers and P.O. box numbers address lines start with,
-    tagged by kind (``("house", "264")``, ``("box", "9000")``)."""
-    numbers = set()
-    for line in lines:
-        house = leading_number(line)
-        if house is not None:
-            numbers.add(("house", house))
-        box = po_box(line)
-        if box:
-            numbers.add(("box", box))
-    return numbers
-
-
 # Spellings of one word in a street line, as their canonical form.
 _STREET_WORDS = {
     "NORTH": "N",
@@ -249,6 +235,9 @@ _STREET_WORDS = {
     "CIRCLE": "CIR",
     "TRAIL": "TRL",
     "PLACE": "PL",
+    "BYPASS": "BYP",
+    "EXPRESSWAY": "EXPY",
+    "TERRACE": "TER",
     "FIRST": "1ST",
     "SECOND": "2ND",
     "THIRD": "3RD",
@@ -302,6 +291,94 @@ def delivery_line(line: Optional[str]) -> Optional[tuple[str, str]]:
         return ("box", box)
     tokens = street_tokens(line)
     return ("street", " ".join(tokens)) if tokens else None
+
+
+# A street's directionals and its type suffix, which USPS spells, adds or
+# drops (``264 FM 3478`` comes back ``264 FM 3478 RD``).
+_DIRECTIONALS = frozenset({"N", "S", "E", "W", "NE", "NW", "SE", "SW"})
+_SUFFIXES = frozenset(
+    {
+        "ST",
+        "RD",
+        "AVE",
+        "BLVD",
+        "DR",
+        "LN",
+        "PKWY",
+        "FWY",
+        "CT",
+        "CIR",
+        "TRL",
+        "PL",
+        "WAY",
+        "BYP",
+        "EXPY",
+        "PIKE",
+        "TER",
+    }
+)
+
+
+class StreetParts(NamedTuple):
+    """A street line split up: house number, leading directional, the
+    street's own words, type suffix and trailing directional."""
+
+    number: str
+    lead: Optional[str]
+    core: tuple[str, ...]
+    suffix: Optional[str]
+    trail: Optional[str]
+
+
+def street_parts(tokens: list[str]) -> StreetParts:
+    """Split ``street_tokens`` output; the street's own words are never
+    taken away (a one-word street keeps its word)."""
+    rest = list(tokens[1:])
+    lead = rest.pop(0) if len(rest) > 1 and rest[0] in _DIRECTIONALS else None
+    trail = rest.pop() if len(rest) > 1 and rest[-1] in _DIRECTIONALS else None
+    suffix = rest.pop() if len(rest) > 1 and rest[-1] in _SUFFIXES else None
+    return StreetParts(tokens[0], lead, tuple(rest), suffix, trail)
+
+
+def _within(short: tuple[str, ...], long: tuple[str, ...]) -> bool:
+    """Whether ``short`` is a run of consecutive words of ``long``."""
+    return any(
+        long[i : i + len(short)] == short for i in range(len(long) - len(short) + 1)
+    )
+
+
+def same_street(first: Optional[str], second: Optional[str]) -> Optional[bool]:
+    """Whether two street lines are the same house number on the same
+    street: True if normalisation shows they are, False if it shows they
+    are not, None if it can't tell.
+
+    Lines are compared by ``street_parts``. Different numbers, or street
+    words neither contained in the other, are different. The same street
+    words are the same street unless both lines give a directional or
+    suffix and they differ (``100 Main St`` / ``100 Main Ave``); one line
+    adding or dropping one is the same (``264 FM 3478`` / ``264 FM 3478
+    RD``, ``810 FM 2821`` / ``810 FM 2821 RD W``). Street words one line
+    has more of (``FM 1`` / ``FM 1 SPUR``) can't be told: None. So can a
+    line that isn't a street.
+    """
+    first_tokens, second_tokens = street_tokens(first), street_tokens(second)
+    if not first_tokens or not second_tokens:
+        return None
+    one, other = street_parts(first_tokens), street_parts(second_tokens)
+    if one.number != other.number:
+        return False
+    if one.core != other.core:
+        if _within(one.core, other.core) or _within(other.core, one.core):
+            return None
+        return False
+    for mine, theirs in (
+        (one.lead, other.lead),
+        (one.suffix, other.suffix),
+        (one.trail, other.trail),
+    ):
+        if mine and theirs and mine != theirs:
+            return False
+    return True
 
 
 def delivery_lines(unit: models.Unit) -> set[tuple[str, str]]:

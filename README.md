@@ -235,14 +235,25 @@ or company, letters and digits only, any case) that is a unit's key name
 the unit's street1 and street2 that is plainly a facility's name: it has a
 word such as Unit, Jail, Camp, Center or FCI, and isn't a street number, a
 P.O. box or a street such as `FM 686`, `Prison Road` or `IH 45`; a unit
-with no such line has no display name), whatever the ZIP. By address: the
-house number or P.O. box number, with the ZIP, of a unit's street line.
-Only a well-formed ZIP or ZIP+4 counts (`77-000` or an empty ZIP is none),
-on both sides. A name units in several places have is narrowed by the
-label's ZIP; if that leaves no place or several, the label has no unit.
-If the address finds units and the name's place is not among them, the
-evidence conflicts: the label has no unit, and an untagged one is `other`
-(below). Without a name, the address must find units of one place.
+with no such line has no display name), whatever the ZIP. By address,
+with the ZIP: a P.O. box number confirms the units with that box, and a
+street line is compared with the street line of each unit at its house
+number. The same street, allowing USPS's respelling (`264 FM 3478` /
+`264 FM 3478 RD`, `1916 North Hwy. 36 Bypass` / `1916 N HIGHWAY 36 BYP`),
+confirms the unit; a different street (`100 Oak Lane` against `100 Main
+Street`) rules it out; a line normalisation can't decide on (`100 FM 1` /
+`100 FM 1 SPUR`) is undecided. Only a well-formed ZIP or ZIP+4 counts
+(`77-000` or an empty ZIP is none), on both sides. A name units in several
+places have is narrowed by the label's ZIP; if that leaves no place or
+several, the label has no unit. A name stands if the label has no street
+line, if its street confirms the named unit, or if it can't be told from
+the named unit's and that number and ZIP are the named place's alone.
+The evidence conflicts if the street confirms another unit, is a different
+street than the named unit's at the same number, or can't be told from a
+unit's at a number other places share: the label then has no unit, and an
+untagged one is `other` (below). Without a name, the confirmed units (or,
+at a number and ZIP of one place only, the undecided ones) must be of one
+place (`UnitMatcher.locate`).
 
 Units with the same jurisdiction, display name and 5-digit ZIP that also
 share a delivery line are one place (one facility under several provider

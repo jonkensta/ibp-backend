@@ -203,3 +203,38 @@ def test_streets_named_like_markers_are_different_places(first, second):
         ]
     )
     assert places.one_place([("Texas", "ONE"), ("Texas", "TWO")]) is None
+
+
+# The real pairs of our street line and USPS's spelling of it (made-up units
+# use the same shapes).
+RESPELLED = [
+    ("264 FM 3478", "264 FM 3478 RD"),
+    ("1098 S. Highway 2037", "1098 S HIGHWAY 2037"),
+    ("1401 State School Road", "1401 STATE SCHOOL RD"),
+    ("3872 FM 350 South", "3872 FM 350 S"),
+    ("810 FM 2821", "810 FM 2821 RD W"),
+    ("1916 North Hwy. 36 Bypass", "1916 N HIGHWAY 36 BYP"),
+]
+
+
+@pytest.mark.parametrize(
+    "ours, theirs, same",
+    [
+        *((ours, theirs, True) for ours, theirs in RESPELLED),
+        ("100 Main Street", "100 Oak Lane", False),
+        ("100 Main St", "100 Main Ave", False),
+        ("100 N Main St", "100 S Main St", False),
+        ("100 Main St", "101 Main St", False),
+        ("100 Main St N", "100 MAIN ST S", False),
+        ("100 FM 1", "100 FM 1 SPUR", None),
+        ("100 Main St", "PO Box 100", None),
+        ("100 Main St", None, None),
+    ],
+)
+def test_same_street(ours, theirs, same):
+    """USPS's respelling is the same street; another street, number,
+    directional or suffix is not; more street words can't be told."""
+    from ibp.unit_places import same_street  # pylint: disable=import-outside-toplevel
+
+    assert same_street(ours, theirs) is same
+    assert same_street(theirs, ours) is same
