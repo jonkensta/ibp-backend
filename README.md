@@ -215,9 +215,7 @@ are in [`scripts/shipment-sync/`](scripts/shipment-sync/README.md).
   code, tracker id, purchase time (UTC), weight (oz), postage (cents),
   service, the `reference` if it is one of the tags below, `kind`
   (`individual`, `bulk` or `other`), the unit it went to when that can be
-  told (from the tag; else an address line that is one unit's name, letters
-  and digits only; else the house number and ZIP of one unit's street line),
-  the request its tag names, the 8-digit inmate number from the addressee
+  told (see below), the request its tag names, the 8-digit inmate number from the addressee
   line, refund status, current tracker status and when a sync last changed
   it. No recipient name or street address is stored.
 - `tracking_events`: every event as EasyPost lists it (time in UTC, the
@@ -228,6 +226,21 @@ are in [`scripts/shipment-sync/`](scripts/shipment-sync/README.md).
 - `package_shipments`: links a request to each label it could have shipped
   under, with a `basis`. Derived and rebuilt from scratch after every sync, or
   alone with `--rebuild-links`.
+
+A label's unit comes from its tag; else from an address line (street1,
+street2 or company, letters and digits only, any case) that is a unit's key
+name (the provider's code, e.g. `PLANE JAIL`) or its display name (the
+first of the unit's street1 and street2 that doesn't start with a digit and
+isn't a P.O. box, e.g. `Plane Unit`), whatever the ZIP; else from the house
+number and ZIP of a unit's street line. Units with the same jurisdiction,
+display name and 5-digit ZIP are one place (one facility under several
+provider codes); units at one street address with different display names
+are not. A label whose candidates are more than one place is narrowed by
+ZIP, and is left without a unit if that leaves no place or several; a label
+to one place stores its representative, the alphabetically first unit name
+(`ibp/unit_places.py`). Stored labels are matched again only when listed
+again: the daily run relists 35 days, and `--since YYYY-MM-DD` relists
+everything back to that date, updating `unit_name` on labels already stored.
 
 A label's EasyPost `reference` carries a tag from the shipping apps:
 `ibp1:req:<request code>` (an individual package, e.g.
@@ -246,12 +259,17 @@ requested) that USPS never scanned, since it was never mailed:
   Filled request processed on or up to 60 days before its purchase date
   (local). The destination unit's jurisdiction tells Texas and Federal
   numbers apart; with no destination, a number both have links to neither.
-- `unit_session`: all mailed bulk boxes to one unit on one local date are a
+- `unit_session`: all mailed bulk boxes to one place on one local date are a
   session; a box counts only once USPS has scanned it, or while it is under 7
-  days old (time for its first scan). A Filled request with no label of its
-  own links to every box of the first session to its inmate's unit (as it is
-  now) on a date after its processed date (a request processed on a
-  session's date waits for the next one), if within 28 days. The unit's
+  days old (time for its first scan). A place is a unit, or the units that
+  are one place (above): a box stored under any of them serves the inmates
+  under every one. A Filled request with no label of its own links to every
+  box of the first session to its unit's place on a date after its
+  processed date (a request processed on a session's date waits for the
+  next one), if within 28 days. A request's unit is the one its inmate was
+  at when it was filled (`requests.unit_name`, recorded since that column
+  was added), so a transfer afterwards doesn't move it; an older request,
+  with none recorded, uses its inmate's unit as it is now. The unit's
   shipping method is not consulted: boxes do go to units marked Individual.
 
 `GET /requests/{code}/shipments` lists a request's linked labels with their

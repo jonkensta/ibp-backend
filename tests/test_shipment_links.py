@@ -267,6 +267,90 @@ def test_box_to_a_unit_marked_individual_still_links(session):
     }
 
 
+def seed_transfer(session, recorded):
+    """Inmate 11111111, filled at ALPHA and since moved to BETA, with the
+    request recording ``recorded``; a box to each unit after the fill."""
+    add_unit(session, "ALPHA")
+    add_unit(session, "BETA", street1="200 Other Way")
+    add_inmate(session, 11111111, "BETA")
+    add_request(session, 11111111, 0, "2026-03-01").unit_name = recorded
+    old = box(session, "2026-03-05T15:00", unit="ALPHA")
+    new = box(session, "2026-03-05T16:00", unit="BETA")
+    session.commit()
+    return old, new
+
+
+def test_transferred_inmate_links_to_the_recorded_unit(session):
+    """A request that recorded its unit links to that unit's box, not to
+    the box of the unit its inmate is at now."""
+    old, _ = seed_transfer(session, "ALPHA")
+    assert rebuild(session) == {
+        ("Texas", 11111111, 0, old.easypost_id, "unit_session"),
+    }
+
+
+def test_request_without_a_recorded_unit_follows_the_inmate(session):
+    """A request with no recorded unit (filled before it was recorded) uses
+    the inmate's unit as it is now."""
+    _, new = seed_transfer(session, None)
+    assert rebuild(session) == {
+        ("Texas", 11111111, 0, new.easypost_id, "unit_session"),
+    }
+
+
+def test_recorded_unit_that_no_longer_exists_links_nothing(session):
+    """A recorded unit IBP no longer has matches no box, and the request
+    doesn't fall back to the inmate's current unit."""
+    seed_transfer(session, "GONE")
+    box(session, "2026-03-05T17:00", unit="GONE")
+    session.commit()
+    assert not rebuild(session)
+
+
+def seed_one_place(session):
+    """Units MAIN and CAMP, one place under two codes, and NEIGHBOR, another
+    unit at the same street address; an inmate at each."""
+    add_unit(session, "MAIN", street1="Main Unit", street2="9 Prison Road")
+    add_unit(session, "CAMP", street1="MAIN UNIT", street2="9 Prison Rd.")
+    add_unit(session, "NEIGHBOR", street1="Neighbor Unit", street2="9 Prison Road")
+    add_inmate(session, 11111111, "MAIN")
+    add_inmate(session, 22222222, "CAMP")
+    add_inmate(session, 33333333, "NEIGHBOR")
+    for inmate_id in (11111111, 22222222, 33333333):
+        add_request(session, inmate_id, 0, "2026-03-01")
+
+
+def test_box_to_one_place_serves_every_code(session):
+    """A box stored under a place's representative links requests of inmates
+    under either code, but not those of the other unit at its address."""
+    seed_one_place(session)
+    sent = box(session, "2026-03-05T15:00", unit="CAMP")
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", 11111111, 0, sent.easypost_id, "unit_session"),
+        ("Texas", 22222222, 0, sent.easypost_id, "unit_session"),
+    }
+
+
+def test_boxes_under_two_codes_of_one_place_are_one_session(session):
+    """Boxes stored under different codes of one place on one date are one
+    session; a request recording one code links to both."""
+    seed_one_place(session)
+    add_request(session, 33333333, 1, "2026-03-01").unit_name = "MAIN"
+    first = box(session, "2026-03-05T15:00", unit="CAMP")
+    second = box(session, "2026-03-05T16:00", unit="MAIN")
+    session.commit()
+    assert rebuild(session) == {
+        (*request, shipment.easypost_id, "unit_session")
+        for request in (
+            ("Texas", 11111111, 0),
+            ("Texas", 22222222, 0),
+            ("Texas", 33333333, 1),
+        )
+        for shipment in (first, second)
+    }
+
+
 def test_request_with_its_own_label_gets_no_bulk_link(session):
     """A request linked to an individual label didn't ride in a box."""
     seed_box_unit(session)

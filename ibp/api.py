@@ -470,10 +470,11 @@ async def add_request(
     single ``UPDATE ... RETURNING``, so indexes are never reused and two
     stations adding at once get distinct ones. It is the first statement of
     the transaction, so on SQLite it takes the write lock straight away and a
-    concurrent add waits for it instead of failing.
+    concurrent add waits for it instead of failing. A Filled request records
+    the inmate's unit as it is now (``models.Request.set_action``).
     """
     async with session.begin():
-        next_index = (
+        allocated = (
             await session.execute(
                 sqlalchemy.update(models.Inmate)
                 .where(
@@ -481,22 +482,28 @@ async def add_request(
                     models.Inmate.id == inmate_id,
                 )
                 .values(next_request_index=models.Inmate.next_request_index + 1)
-                .returning(models.Inmate.next_request_index - 1)
+                .returning(
+                    models.Inmate.next_request_index - 1, models.Inmate.unit_name
+                )
                 .execution_options(synchronize_session=False)
             )
-        ).scalar_one_or_none()
+        ).one_or_none()
 
-        if next_index is None:
+        if allocated is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Inmate not found."
             )
 
+        next_index, unit_name = allocated
+        values = request_data.model_dump()
+        action = values.pop("action")
         request = models.Request(
-            **request_data.model_dump(),
+            **values,
             inmate_jurisdiction=jurisdiction,
             inmate_id=inmate_id,
             index=next_index,
         )
+        request.set_action(action.value, unit_name)
         session.add(request)
 
     await session.refresh(request)

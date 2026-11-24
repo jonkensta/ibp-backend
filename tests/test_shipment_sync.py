@@ -10,11 +10,12 @@ import json
 import logging
 import sqlite3
 import urllib.error
+from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 
-from ibp import db_bootstrap, models, shipment_sync
+from ibp import db_bootstrap, models, shipment_links, shipment_sync
 from ibp.labels import RequestKey
 from ibp.shipment_sync import (
     EasyPost,
@@ -276,6 +277,154 @@ def matcher(api_db):
 def test_unit_matching_by_address(matcher, address, unit):
     """A label's lines name a unit, or its house number and ZIP find one."""
     assert matcher.by_address(address) == unit
+
+
+@pytest.fixture
+def coded_matcher(api_db):
+    """Units keyed by provider codes that differ from the names labels print
+    (invented codes, names and addresses)."""
+    with api_db() as session:
+        units = [
+            # Two units at one address, told apart by display name only.
+            add_unit(
+                session,
+                "PLAIN JAIL",
+                street1="Plain Unit",
+                street2="904 FM 686",
+                zipcode="77535",
+            ),
+            add_unit(
+                session,
+                "SANTA BABY BOND",
+                street1="Santa Baby Bonding Unit",
+                street2="904 FM 686",
+                zipcode="77535",
+            ),
+            # A P.O. box for the street.
+            add_unit(
+                session,
+                "BRADLEY",
+                street1="Bradley Unit",
+                street2="P.O. Box 9000",
+                zipcode="75600",
+            ),
+            add_unit(
+                session, "MURRAYS", street1="Murrays Unit", street2="1916 N Hwy 36"
+            ),
+            # One place under two codes (the street spelled two ways), and a
+            # different unit at the same street address.
+            add_unit(
+                session,
+                "WAINRIGHT",
+                street1="J. Doe Wainright Unit",
+                street2="2665 Prison Road #1",
+                zipcode="75851",
+            ),
+            add_unit(
+                session,
+                "J. DOE WAINRIGHT",
+                street1="J. Doe Wainright Unit",
+                street2="2665 Prison Rd. #1",
+                zipcode="75851-1234",
+            ),
+            add_unit(
+                session,
+                "EASTMAN",
+                street1="Eastman Unit",
+                street2="2665 Prison Road #1",
+                zipcode="75851",
+            ),
+            # One display name in two towns.
+            add_unit(
+                session,
+                "TWINTOWN NORTH",
+                street1="Twin Town Unit",
+                street2="1 North Rd",
+                zipcode="76000",
+            ),
+            add_unit(
+                session,
+                "TWINTOWN SOUTH",
+                street1="Twin Town Unit",
+                street2="1 South Rd",
+                zipcode="76100",
+            ),
+        ]
+        return UnitMatcher(units)
+
+
+@pytest.mark.parametrize(
+    "address, unit",
+    [
+        # The display name, where the key name differs.
+        (
+            {"street1": "904 FM 686", "street2": "PLAIN UNIT", "zip": "77535"},
+            ("Texas", "PLAIN JAIL"),
+        ),
+        (
+            {"street1": "SANTA BABY BONDING UNIT", "zip": "77535"},
+            ("Texas", "SANTA BABY BOND"),
+        ),
+        # The shared address alone is ambiguous.
+        ({"street1": "904 FM 686", "zip": "77535"}, None),
+        # The key name still matches.
+        ({"company": "Plain Jail", "street1": "904 FM 686"}, ("Texas", "PLAIN JAIL")),
+        # A P.O. box unit, by name.
+        (
+            {"street1": "PO BOX 9000", "street2": "BRADLEY UNIT", "zip": "75600"},
+            ("Texas", "BRADLEY"),
+        ),
+        # A unique name in another ZIP than the unit's.
+        (
+            {"street1": "1916 N HWY 36", "street2": "MURRAYS UNIT", "zip": "76528"},
+            ("Texas", "MURRAYS"),
+        ),
+        # One place under two codes: its representative, by name or address.
+        (
+            {"street1": "2665 PRISON RD # 1", "street2": "J DOE WAINRIGHT UNIT"},
+            ("Texas", "J. DOE WAINRIGHT"),
+        ),
+        ({"street1": "Wainright", "zip": "75851"}, ("Texas", "J. DOE WAINRIGHT")),
+        # The different unit at that address is not merged with it.
+        (
+            {"street1": "2665 PRISON RD # 1", "street2": "EASTMAN UNIT"},
+            ("Texas", "EASTMAN"),
+        ),
+        ({"street1": "2665 PRISON RD # 1", "zip": "75851"}, None),
+        # A display name in two towns: the ZIP decides, or nothing does.
+        ({"street1": "TWIN TOWN UNIT", "zip": "76100"}, ("Texas", "TWINTOWN SOUTH")),
+        ({"street1": "TWIN TOWN UNIT", "zip": "76200"}, None),
+    ],
+)
+def test_unit_matching_by_display_name(coded_matcher, address, unit):
+    """A label's lines match a unit's key name or display name; units that
+    are one place give their representative."""
+    assert coded_matcher.by_address(address) == unit
+
+
+def test_relisting_updates_a_stored_labels_unit(sessions):
+    """A label stored before its unit could be told gets the unit when it is
+    listed again (as ``--since`` lists every label back to its date)."""
+    fake = FakeEasyPost(
+        [
+            shipment(
+                1,
+                ago(3),
+                name="ATTN: MAILROOM STAFF",
+                street1="300 New Rd",
+                street2="GAMMA UNIT",
+                zip="77002",
+            )
+        ]
+    )
+    sync(fake, sessions)
+    assert stored(sessions, "shp_0001").unit_name is None
+    with sessions() as session:
+        add_unit(session, "GAMMA CODE", street1="Gamma Unit", zipcode="77002")
+        session.commit()
+    summary = sync(fake, sessions)
+    assert summary.updated == 1
+    assert stored(sessions, "shp_0001").unit_name == "GAMMA CODE"
 
 
 # --- listing -------------------------------------------------------------------
@@ -625,6 +774,62 @@ def test_database_failure_logs_no_statement_or_values(
             assert shipment_sync.main(argv, sessions=sessions, client=client) == 1
         assert f"shipment sync failed: {logged}" in logs.text
         assert "Sentinel" not in logs.text and "Personname" not in logs.text
+
+
+def source_line(module, text: str) -> int:
+    """The number of the line of ``module``'s source holding ``text``."""
+    lines = Path(module.__file__).read_text(encoding="utf-8").splitlines()
+    (number,) = [n for n, line in enumerate(lines, 1) if text in line]
+    return number
+
+
+def assert_one_safe_line(logs, capsys, logged: str) -> None:
+    """The failure is logged as ``logged``, with no traceback or sentinel."""
+    output = capsys.readouterr()
+    assert f"shipment sync failed: {logged}" in logs.text
+    assert all(record.exc_info is None for record in logs.records)
+    for text in (logs.text, output.out, output.err):
+        assert "Sentinel" not in text and "Personname" not in text
+        assert "Traceback" not in text
+
+
+def test_unexpected_error_logs_class_and_place_only(sessions, logs, capsys):
+    """EasyPost data of an unexpected shape fails the run with one line: the
+    error's class and where IBP's code raised it, not its message."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    malformed = shipment(1, now - DAY, parcel={"weight": SENTINEL})
+    client = EasyPost(KEY, urlopen=FakeEasyPost([malformed]), sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        assert shipment_sync.main([], sessions=sessions, client=client) == 1
+    line = source_line(shipment_sync, "weight_oz=float(weight)")
+    assert_one_safe_line(logs, capsys, f"ValueError at ibp/shipment_sync.py:{line}")
+
+
+def test_unexpected_error_rebuilding_links_logs_class_and_place_only(
+    sessions, logs, capsys, monkeypatch
+):
+    """--rebuild-links fails the same way, at the innermost frame in ibp/."""
+
+    def fail(*args, **kwargs):
+        raise KeyError(SENTINEL)
+
+    monkeypatch.setattr(shipment_links, "_unit_session_links", fail)
+    with logs.at_level(logging.INFO):
+        assert shipment_sync.main(["--rebuild-links"], sessions=sessions) == 1
+    line = source_line(shipment_links, "_unit_session_links(session, shipments")
+    assert_one_safe_line(logs, capsys, f"KeyError at ibp/shipment_links.py:{line}")
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+def test_interrupt_and_exit_are_not_caught(sessions, monkeypatch, error):
+    """Ctrl-C and sys.exit still end the run as they would anyway."""
+
+    def stop(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(shipment_sync, "relink", stop)
+    with pytest.raises(error):
+        shipment_sync.main(["--rebuild-links"], sessions=sessions)
 
 
 def test_job_engine_hides_parameters(monkeypatch, tmp_path):

@@ -35,6 +35,7 @@ import os
 import re
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,6 +50,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from . import models
 from .labels import RequestKey, parse_request_code
 from .shipment_links import never_mailed, rebuild_links
+from .unit_places import Places, display_name, squeeze, zip5
 
 logger = logging.getLogger(__name__)
 
@@ -141,16 +143,6 @@ def normalize(text: Optional[str]) -> str:
     return re.sub(r"[^A-Z0-9]+", " ", (text or "").upper()).strip()
 
 
-def zip5(zipcode: Optional[str]) -> str:
-    """The first five digits of a ZIP code."""
-    return re.sub(r"\D", "", zipcode or "")[:5]
-
-
-def squeeze(text: Optional[str]) -> str:
-    """Uppercase letters and digits only (``O'Daniel Unit`` is ``ODANIELUNIT``)."""
-    return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
-
-
 _HOUSE_NUMBER = re.compile(r"\s*(\d+)(?!\d)")
 
 
@@ -164,14 +156,16 @@ class UnitMatcher:
     """Finds the IBP unit a label went to, by its tag, name or address."""
 
     def __init__(self, units: Iterable[models.Unit]):
+        units = list(units)
+        self._places = Places(units)
         self._by_tag: dict[tuple[str, str], tuple[str, str]] = {}
         self._by_name: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
         self._by_number: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
         for unit in units:
             key = (unit.jurisdiction, unit.name)
             self._by_tag[(unit.jurisdiction, unit.name.upper())] = key
-            if squeeze(unit.name):
-                self._by_name[squeeze(unit.name)].append((*key, zip5(unit.zipcode)))
+            for name in {squeeze(unit.name), squeeze(display_name(unit))} - {""}:
+                self._by_name[name].append((*key, zip5(unit.zipcode)))
             for street in (unit.street1, unit.street2):
                 number = house_number(street)
                 if number is not None:
@@ -182,18 +176,23 @@ class UnitMatcher:
         return self._by_tag.get((jurisdiction, name.upper()))
 
     def by_address(self, address: dict[str, Any]) -> Optional[tuple[str, str]]:
-        """The one unit a label's address names or is at, or None.
+        """The one place a label's address names or is at, or None.
 
-        Units store the street in either line (usually the unit's name in
-        ``street1`` and the street in ``street2``), and EasyPost's verified
-        addresses come back in USPS spelling with the name moved to
+        Units store the street in either line (usually the unit's display
+        name in ``street1`` and the street in ``street2``), and EasyPost's
+        verified addresses come back in USPS spelling with the name moved to
         ``street2``, so whole lines are not compared. First, a ``street1``,
-        ``street2`` or ``company`` line that is a unit's name (letters and
-        digits only, any case) names that unit; a name more than one unit has
-        (Texas and Federal) counts only if the ZIP leaves one. Otherwise the
-        house number either street line starts with, with the 5-digit ZIP,
-        must lead one unit's ``street1`` or ``street2``. Units sharing an
-        address are told apart only by name; anything ambiguous is unknown.
+        ``street2`` or ``company`` line that is a unit's key name or display
+        name (``unit_places.display_name``; letters and digits only, any
+        case) names that unit, whatever the ZIP; a name units in more than
+        one place have (Texas and Federal, or one display name in two towns)
+        counts only if the ZIP leaves one place. Otherwise the house number
+        either street line starts with, with the 5-digit ZIP, must lead the
+        ``street1`` or ``street2`` of units in one place. Units in different
+        places at one address are told apart only by name; anything
+        ambiguous is unknown. The unit returned is its place's
+        representative (``unit_places.Places``), so units that are one
+        place give one answer.
         """
         zipcode = zip5(address.get("zip"))
         named = {
@@ -202,18 +201,18 @@ class UnitMatcher:
             for unit in self._by_name.get(squeeze(address.get(field)), [])
         }
         if named:
-            if len(named) > 1:
-                named = {unit for unit in named if unit[2] == zipcode}
-            if len(named) != 1:
-                return None
-            jurisdiction, name, _ = named.pop()
-            return (jurisdiction, name)
+            place = self._places.one_place((j, name) for j, name, _ in named)
+            if place is None:
+                place = self._places.one_place(
+                    (j, name) for j, name, unit_zip in named if unit_zip == zipcode
+                )
+            return place
         at_number: set[tuple[str, str]] = set()
         for field in ("street1", "street2"):
             number = house_number(address.get(field))
             if number is not None:
                 at_number |= self._by_number.get((number, zipcode), set())
-        return at_number.pop() if len(at_number) == 1 else None
+        return self._places.one_place(at_number)
 
 
 class EventValues(NamedTuple):
@@ -860,12 +859,27 @@ def build_sessions() -> sessionmaker:
     )
 
 
+def crash_location(error: BaseException) -> str:
+    """Where ``error`` was raised in IBP's code: the file (as
+    ``ibp/shipment_sync.py``) and line of its traceback's innermost frame
+    inside the ``ibp`` package."""
+    package = Path(__file__).resolve().parent
+    location = "unknown location"
+    for frame, line in traceback.walk_tb(error.__traceback__):
+        path = Path(frame.f_code.co_filename).resolve()
+        if path.is_relative_to(package):
+            location = f"{path.relative_to(package.parent).as_posix()}:{line}"
+    return location
+
+
 def describe_failure(error: Exception) -> str:
     """A failure as safe to log: no SQL statement, parameters or row values.
 
     The run's output goes to Healthchecks. A database error is its class
     name, with the driver's first message line for a DBAPI error (``database
-    is locked``); an ``ApiError`` is already safe.
+    is locked``); an ``ApiError`` is already safe. Anything else (a bug, or
+    EasyPost data of an unexpected shape) is its class name and where IBP's
+    code raised it: its message could hold a value from a label.
     """
     if isinstance(error, sa.exc.DBAPIError):
         lines = str(error.orig).splitlines()
@@ -873,7 +887,9 @@ def describe_failure(error: Exception) -> str:
         return f"{type(error).__name__}: {message}" if message else type(error).__name__
     if isinstance(error, sa.exc.SQLAlchemyError):
         return type(error).__name__
-    return str(error)
+    if isinstance(error, ApiError):
+        return str(error)
+    return f"{type(error).__name__} at {crash_location(error)}"
 
 
 def parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
@@ -907,27 +923,24 @@ def main(
 ) -> int:
     """Run the sync; return 0, 1 if anything failed, 2 without a key.
 
-    ``sessions`` and ``client`` are for tests.
+    Any failure but a missing key is logged as one line (``describe_failure``),
+    never as a traceback. ``sessions`` and ``client`` are for tests.
     """
     args = parse_args(argv)
-    if sessions is None:
-        sessions = build_sessions()
-    if args.rebuild_links:
-        try:
-            logger.info("shipment sync: %d links built", relink(sessions))
-        except sa.exc.SQLAlchemyError as error:
-            logger.error("shipment sync failed: %s", describe_failure(error))
-            return 1
-        return 0
-    if client is None:
-        try:
-            client = EasyPost(read_key(args.key_file))
-        except MissingKey as error:
-            logger.error("%s", error)
-            return 2
     try:
+        if sessions is None:
+            sessions = build_sessions()
+        if args.rebuild_links:
+            logger.info("shipment sync: %d links built", relink(sessions))
+            return 0
+        if client is None:
+            try:
+                client = EasyPost(read_key(args.key_file))
+            except MissingKey as error:
+                logger.error("%s", error)
+                return 2
         summary = run(client, sessions, since=args.since)
-    except (ApiError, sa.exc.SQLAlchemyError) as error:
+    except Exception as error:  # pylint: disable=broad-exception-caught
         logger.error("shipment sync failed: %s", describe_failure(error))
         return 1
     logger.info("%s", summary.line())
