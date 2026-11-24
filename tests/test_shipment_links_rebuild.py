@@ -260,3 +260,180 @@ def test_request_deleted_after_reading_is_left_out(api_db):
         assert write_links(session, computed) == 1
         session.commit()
         assert {key[1] for key in links(session)} == {11111111}
+
+
+def seed_individual_and_box(session) -> None:
+    """Inmate 11111111 at ALPHA with no request yet, an untagged individual
+    label to him and a box to ALPHA, both after the request will be."""
+    add_unit(session, "ALPHA")
+    add_inmate(session, 11111111, "ALPHA")
+    add_shipment(
+        session,
+        "2026-03-05T15:00",
+        kind="individual",
+        inmate_number="11111111",
+        events=DELIVERED,
+    )
+    add_shipment(
+        session,
+        "2026-03-05T16:00",
+        kind="bulk",
+        unit_jurisdiction="Texas",
+        unit_name="ALPHA",
+        events=DELIVERED,
+    )
+    session.commit()
+
+
+def commit_elsewhere(api_db, change) -> None:
+    """Commit ``change(session)`` on another connection."""
+    with api_db() as other:
+        change(other)
+        other.commit()
+
+
+def test_rebuild_recomputes_when_another_commit_lands_mid_read(api_db, monkeypatch):
+    """A Filled request committed between the individual-label lookup and the
+    bulk query would get a bulk link from a mixed state; the attempt is
+    thrown away and the next one published, equal to a clean recompute."""
+    with api_db() as session:
+        seed_individual_and_box(session)
+    real = shipment_links._unit_session_links
+    calls = []
+
+    def interleaved(*args):
+        if not calls:
+            commit_elsewhere(
+                api_db, lambda other: add_request(other, 11111111, 0, "2026-03-01")
+            )
+        calls.append(1)
+        return real(*args)
+
+    monkeypatch.setattr(shipment_links, "_unit_session_links", interleaved)
+    assert shipment_sync.relink(api_db, NOW) == 1
+    assert len(calls) == 2
+    with api_db() as session:
+        published = {
+            (link.inmate_id, link.shipment_id, link.basis)
+            for link in session.query(models.PackageShipment)
+        }
+    monkeypatch.setattr(shipment_links, "_unit_session_links", real)
+    with api_db() as session:
+        clean = compute_links(session, NOW)
+    assert published == {(key[1], key[3], basis) for key, basis in clean.items()}
+    assert {basis for _, _, basis in published} == {"inmate_number"}
+
+
+def test_rebuild_gives_up_when_every_attempt_is_invalidated(
+    api_db, monkeypatch, caplog
+):
+    """When another connection commits during every attempt, nothing is
+    published, the old links stay, and the run fails with one safe line."""
+    with api_db() as session:
+        seed_individual_and_box(session)
+        add_request(session, 11111111, 0, "2026-03-01")
+        session.commit()
+    assert shipment_sync.relink(api_db, NOW) == 1
+    real = shipment_links.compute_links
+    attempts = []
+
+    def always_interleaved(session, now=None):
+        attempts.append(1)
+        found = real(session, now)
+        commit_elsewhere(
+            api_db,
+            lambda other: setattr(
+                other.get(models.Unit, ("Texas", "ALPHA")), "url", f"x{len(attempts)}"
+            ),
+        )
+        return found
+
+    monkeypatch.setattr(shipment_links, "compute_links", always_interleaved)
+    monkeypatch.setattr(shipment_sync.logger, "disabled", False)
+    with caplog.at_level("INFO"):
+        assert shipment_sync.main(["--rebuild-links"], sessions=api_db) == 1
+    assert len(attempts) == shipment_links.REBUILD_ATTEMPTS
+    assert (
+        "links not rebuilt: the data changed during each of 5 attempts; "
+        "the old links are kept"
+    ) in caplog.text
+    with api_db() as session:
+        assert [link.basis for link in session.query(models.PackageShipment)] == [
+            "inmate_number"
+        ]
+
+
+def test_staging_does_not_change_data_version_but_other_commits_do(api_db):
+    """data_version is per connection: the rebuild's own staging and delete
+    leave it alone, another connection's commit changes it."""
+    with api_db() as session:
+        seed_individual_and_box(session)
+    with api_db() as session:
+        before = shipment_links.data_version(session)
+        shipment_links.stage_links(session, {("Texas", 11111111, 0, 1): "reference"})
+        session.execute(sa.delete(models.PackageShipment))
+        assert shipment_links.data_version(session) == before
+        session.rollback()
+        before = shipment_links.data_version(session)
+        commit_elsewhere(
+            api_db, lambda other: add_request(other, 11111111, 5, "2026-03-01")
+        )
+        assert shipment_links.data_version(session) != before
+
+
+def test_clean_rebuild_is_one_attempt(api_db, monkeypatch):
+    """With no other writer, the first attempt is published."""
+    with api_db() as session:
+        seed_mixed(session, 2)
+        session.commit()
+    real = shipment_links.compute_links
+    attempts = []
+
+    def counted(session, now=None):
+        attempts.append(1)
+        return real(session, now)
+
+    monkeypatch.setattr(shipment_links, "compute_links", counted)
+    shipment_sync.relink(api_db, NOW)
+    assert len(attempts) == 1
+
+
+def test_copy_casts_the_jurisdiction_for_postgresql():
+    """On PostgreSQL the staged VARCHAR jurisdiction is cast to the
+    requests' native enum, in the join and in the insert."""
+    from sqlalchemy.dialects import (
+        postgresql,
+    )  # pylint: disable=import-outside-toplevel
+
+    sql = str(
+        shipment_links.copy_staged_statement().compile(dialect=postgresql.dialect())
+    )
+    cast_sql = "CAST(staged_package_shipments.inmate_jurisdiction AS jurisdiction_enum)"
+    assert sql.count(cast_sql) == 2
+    assert f"requests.inmate_jurisdiction = {cast_sql}" in sql
+
+
+def test_other_databases_rebuild_in_one_repeatable_read_transaction(
+    api_db, monkeypatch
+):
+    """Without SQLite's data_version, the reads and the write share one
+    REPEATABLE READ transaction (and are tried once)."""
+    with api_db() as session:
+        seed_individual_and_box(session)
+    with api_db() as session:
+        monkeypatch.setattr(session.get_bind().dialect, "name", "postgresql")
+        asked = []
+        real = session.connection
+
+        def connection(**options):
+            asked.append(options)
+            return real()
+
+        monkeypatch.setattr(session, "connection", connection)
+        monkeypatch.setattr(
+            shipment_links,
+            "data_version",
+            lambda _session: pytest.fail("data_version is SQLite's"),
+        )
+        rebuild_links(session, NOW)
+    assert asked[0] == {"execution_options": {"isolation_level": "REPEATABLE READ"}}

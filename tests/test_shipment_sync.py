@@ -15,7 +15,14 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 
-from ibp import db_bootstrap, easypost_client, models, shipment_links, shipment_sync
+from ibp import (
+    db_bootstrap,
+    easypost_client,
+    label_reading,
+    models,
+    shipment_links,
+    shipment_sync,
+)
 from ibp.labels import RequestKey
 from ibp.shipment_sync import (
     EasyPost,
@@ -423,7 +430,7 @@ def test_since_run_fetches_stored_labels_the_listing_misses(sessions):
     with sessions() as session:
         stored_id = session.scalars(
             sa.select(models.Shipment.easypost_id).where(
-                models.Shipment.easypost_id != "shp_0002"
+                models.Shipment.easypost_id != "shp_00000002"
             )
         ).one()
         straddling["id"] = stored_id
@@ -611,13 +618,13 @@ def test_relisting_updates_a_stored_labels_unit(sessions):
         ]
     )
     sync(fake, sessions)
-    assert stored(sessions, "shp_0001").unit_name is None
+    assert stored(sessions, "shp_00000001").unit_name is None
     with sessions() as session:
         add_unit(session, "GAMMA CODE", street1="Gamma Unit", zipcode="77002")
         session.commit()
     summary = sync(fake, sessions)
     assert summary.updated == 1
-    assert stored(sessions, "shp_0001").unit_name == "GAMMA CODE"
+    assert stored(sessions, "shp_00000001").unit_name == "GAMMA CODE"
 
 
 # --- listing -------------------------------------------------------------------
@@ -653,12 +660,12 @@ def test_first_run_inserts_labels_and_events(sessions):
 
     assert (summary.seen, summary.new, summary.updated) == (4, 4, 0)
     assert summary.events_added == 5
-    row = stored(sessions, "shp_0001")
+    row = stored(sessions, "shp_00000001")
     assert row.kind == "individual"
     assert row.inmate_number == "40000001"
     assert (row.unit_jurisdiction, row.unit_name) == ("Texas", "ALPHA")
     assert row.tracking_code == individual["tracking_code"]
-    assert row.tracker_id == "trk_0001"
+    assert row.tracker_id == "trk_00000001"
     assert row.purchased_at == ago(3) + datetime.timedelta(seconds=4)
     assert (row.weight_oz, row.cost_cents, row.service) == (48.0, 557, "LibraryMail")
     assert (row.reference, row.refund_status, row.tracker_status) == (
@@ -677,11 +684,11 @@ def test_first_run_inserts_labels_and_events(sessions):
         "TX",
         "77000",
     )
-    assert stored(sessions, "shp_0002").kind == "bulk"
-    assert stored(sessions, "shp_0002").unit_name == "BETA"
-    assert stored(sessions, "shp_0003").kind == "other"
-    assert stored(sessions, "shp_0003").unit_name is None
-    tag_row = stored(sessions, "shp_0004")
+    assert stored(sessions, "shp_00000002").kind == "bulk"
+    assert stored(sessions, "shp_00000002").unit_name == "BETA"
+    assert stored(sessions, "shp_00000003").kind == "other"
+    assert stored(sessions, "shp_00000003").unit_name is None
+    tag_row = stored(sessions, "shp_00000004")
     assert (tag_row.kind, tag_row.unit_name) == ("bulk", "BETA")
     assert tag_row.reference == "ibp1:unit:Texas:beta"
 
@@ -715,9 +722,9 @@ def test_reference_that_is_not_a_tag_is_not_stored(sessions):
         ]
     )
     sync(fake, sessions)
-    assert stored(sessions, "shp_0001").reference is None
-    assert stored(sessions, "shp_0002").reference is None
-    assert stored(sessions, "shp_0003").reference == "ibp1:manual"
+    assert stored(sessions, "shp_00000001").reference is None
+    assert stored(sessions, "shp_00000002").reference is None
+    assert stored(sessions, "shp_00000003").reference == "ibp1:manual"
     text = repr(snapshot(sessions)).upper()
     assert "SENTINEL" not in text and "PERSONNAME" not in text
 
@@ -765,7 +772,7 @@ def test_later_run_adds_only_new_events(sessions):
     summary = sync(fake, sessions, now=later)
 
     assert (summary.new, summary.updated, summary.events_added) == (0, 1, 1)
-    row = stored(sessions, "shp_0001")
+    row = stored(sessions, "shp_00000001")
     assert [e.status for e in row.events] == ["pre_transit", "in_transit", "delivered"]
     assert row.tracker_status == "delivered"
     assert row.synced_at == later
@@ -801,7 +808,7 @@ def test_every_event_is_kept_including_returns_and_repeats(sessions):
     sync(fake, sessions)
     sync(fake, sessions)
 
-    returned = stored(sessions, "shp_0001")
+    returned = stored(sessions, "shp_00000001")
     assert [e.status for e in returned.events] == [
         "pre_transit",
         "delivered",
@@ -809,7 +816,7 @@ def test_every_event_is_kept_including_returns_and_repeats(sessions):
         "return_to_sender",
     ]
     assert returned.events[2].city is None
-    twice = stored(sessions, "shp_0002")
+    twice = stored(sessions, "shp_00000002")
     assert [(e.status, e.occurrence) for e in twice.events] == [
         ("delivered", 0),
         ("delivered", 1),
@@ -826,7 +833,7 @@ def test_refunded_never_scanned_label_is_stored_without_links(sessions):
     fake = FakeEasyPost([shipment(1, ago(3), refund_status="refunded")])
     summary = sync(fake, sessions)
     assert summary.new == 1 and summary.links == 0
-    assert stored(sessions, "shp_0001").refund_status == "refunded"
+    assert stored(sessions, "shp_00000001").refund_status == "refunded"
 
 
 def test_tagged_label_links_by_reference(sessions):
@@ -839,7 +846,7 @@ def test_tagged_label_links_by_reference(sessions):
         [shipment(1, ago(3), reference="ibp1:req:TEX-00012345-2", name="Testy Example")]
     )
     summary = sync(fake, sessions)
-    row = stored(sessions, "shp_0001")
+    row = stored(sessions, "shp_00000001")
     assert (
         row.kind,
         row.request_jurisdiction,
@@ -1021,16 +1028,125 @@ def assert_one_safe_line(logs, capsys, logged: str) -> None:
         assert "Traceback" not in text
 
 
-def test_unexpected_error_logs_class_and_place_only(sessions, logs, capsys):
-    """EasyPost data of an unexpected shape fails the run with one line: the
-    error's class and where IBP's code raised it, not its message."""
+def test_unexpected_error_logs_class_and_place_only(
+    sessions, logs, capsys, monkeypatch
+):
+    """A bug fails the run with one line: the error's class and where IBP's
+    code raised it, not its message."""
+
+    def fail(*args, **kwargs):
+        raise ValueError(SENTINEL)
+
+    monkeypatch.setattr(label_reading, "cents", fail)
     now = datetime.datetime.now(datetime.timezone.utc)
-    malformed = shipment(1, now - DAY, parcel={"weight": SENTINEL})
-    client = EasyPost(KEY, urlopen=FakeEasyPost([malformed]), sleep=lambda _: None)
+    client = EasyPost(
+        KEY, urlopen=FakeEasyPost([shipment(1, now - DAY)]), sleep=lambda _: None
+    )
     with logs.at_level(logging.INFO):
         assert shipment_sync.main([], sessions=sessions, client=client) == 1
-    line = source_line(shipment_sync, "weight_oz=float(weight)")
-    assert_one_safe_line(logs, capsys, f"ValueError at ibp/shipment_sync.py:{line}")
+    line = source_line(label_reading, "cost_cents=cents(")
+    assert_one_safe_line(logs, capsys, f"ValueError at ibp/label_reading.py:{line}")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"id": f"shp_{SENTINEL}"},
+        {"id": None},
+        {"id": 7},
+        {"tracking_code": f"9400 {SENTINEL}"},
+        {"tracker": {"id": f"trk_{SENTINEL}", "tracking_details": []}},
+        {"tracker": [SENTINEL]},
+        {"to_address": SENTINEL},
+        {"name": ["#12345678"]},
+        {"parcel": {"weight": SENTINEL}},
+        {"parcel": {"weight": "nan"}},
+        {"reference": {"tag": SENTINEL}},
+        {"postage_label": {"created_at": SENTINEL}},
+        {
+            "tracker": {
+                "id": "trk_00000001",
+                "tracking_details": [{"datetime": SENTINEL}],
+            }
+        },
+        {"tracker": {"id": "trk_00000001", "tracking_details": [SENTINEL]}},
+    ],
+)
+def test_malformed_label_is_skipped_counted_and_never_logged(
+    sessions, logs, capsys, overrides
+):
+    """A listed label not of EasyPost's shape is not stored, is counted as
+    skipped, and none of its values reach the log; the run goes on, and
+    fails at the end (it didn't get every label)."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    fake = FakeEasyPost(
+        [shipment(1, now - 2 * DAY, **overrides), shipment(2, now - DAY)]
+    )
+    client = EasyPost(KEY, urlopen=fake, sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        assert shipment_sync.main([], sessions=sessions, client=client) == 1
+    assert "1 labels seen, 1 new" in logs.text and "1 skipped" in logs.text
+    with sessions() as session:
+        assert [row.easypost_id for row in session.query(models.Shipment)] == [
+            "shp_00000002"
+        ]
+    output = capsys.readouterr()
+    for text in (logs.text, output.out, output.err):
+        assert "Sentinel" not in text and "Personname" not in text
+
+
+def test_malformed_tracker_is_a_poll_failure_and_never_logged(sessions, logs):
+    """A polled tracker not of EasyPost's shape changes nothing and is a
+    failed poll; its values are not logged."""
+    with sessions() as session:
+        label = old_label(session, 50, [(48, "in_transit")])
+        session.commit()
+        tracker_id = label.tracker_id
+    fake = FakeEasyPost(
+        trackers={tracker_id: {"status": [SENTINEL], "tracking_details": []}}
+    )
+    with logs.at_level(logging.INFO):
+        summary = sync(fake, sessions)
+    assert (summary.polled, summary.poll_failures) == (0, 1)
+    assert "tracker status is not text" in logs.text
+    assert "Sentinel" not in logs.text
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        {"shipments": {"0": SENTINEL}, "has_more": False},
+        {"shipments": [{"id": SENTINEL}], "has_more": True},
+        {"shipments": [SENTINEL], "has_more": True},
+        # Either would end the listing early as if it were complete.
+        {"has_more": False},
+        {"shipments": [], "has_more": "true"},
+        {"shipments": [{"id": "shp_00000001"}], "has_more": 1},
+    ],
+)
+def test_page_not_of_easyposts_shape_is_an_api_error(page):
+    """A listing page that is not a list, or can't be paged on, fails the
+    listing as an ApiError naming no value."""
+    client = EasyPost(
+        KEY,
+        urlopen=lambda request, timeout: io.BytesIO(json.dumps(page).encode()),
+        sleep=lambda _: None,
+    )
+    with pytest.raises(shipment_sync.ApiError) as raised:
+        list(shipment_sync.list_window(client, ago(2), NOW))
+    assert str(raised.value) == "GET shipments: page not of EasyPost's shape"
+
+
+def test_stored_id_of_another_shape_is_not_logged(sessions, logs):
+    """A stored label whose id isn't of EasyPost's shape (stored before ids
+    were checked) is not named in a tracker warning."""
+    with sessions() as session:
+        old_label(session, 50, [(48, "in_transit")], easypost_id=f"shp_{SENTINEL}")
+        session.commit()
+    with logs.at_level(logging.INFO):
+        sync(FakeEasyPost(), sessions)
+    assert "tracker for a label with an id of another shape not fetched" in (logs.text)
+    assert "Sentinel" not in logs.text
 
 
 def test_unexpected_error_rebuilding_links_logs_class_and_place_only(
@@ -1203,7 +1319,7 @@ def test_paging_across_more_than_one_page(sessions, monkeypatch):
     assert summary.new == 5
     befores = [params.get("before_id") for path, params in fake.calls]
     # Three pages of the March window, then the (empty) February one.
-    assert befores == [None, "shp_0002", "shp_0004", None]
+    assert befores == [None, "shp_00000002", "shp_00000004", None]
 
 
 def test_backfill_walks_month_windows(sessions):
@@ -1401,7 +1517,7 @@ def test_main_logs_a_summary_line(sessions, logs):
         assert shipment_sync.main([], sessions=sessions, client=client) == 0
     assert (
         "shipment sync: 1 labels seen, 1 new, 0 updated, 0 fetched by id, "
-        "1 events added, "
+        "0 skipped, 1 events added, "
         "0 trackers polled (0 failed), 0 links built"
     ) in logs.text
     assert NAME not in logs.text and STREET not in logs.text
@@ -1434,3 +1550,242 @@ def test_main_rebuilds_links_without_a_key(sessions, monkeypatch):
     assert shipment_sync.main(["--rebuild-links"], sessions=sessions) == 0
     with sessions() as session:
         assert session.query(models.PackageShipment).count() == 1
+
+
+# --- unexpected JSON shapes ----------------------------------------------------
+
+
+@pytest.mark.parametrize("code", [[], {}, 7, None, True])
+def test_error_code_of_any_shape_is_other_or_none(code):
+    """A non-string error code is "other" (None for none), not a TypeError."""
+    body = json.dumps({"error": {"code": code}}).encode()
+    client = EasyPost(KEY, urlopen=failing_urlopen(404, body), sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError) as raised:
+        client.get("trackers/trk_00000001")
+    expected = "GET tracker: HTTP 404" + ("" if code is None else " other")
+    assert str(raised.value) == expected
+
+
+@pytest.mark.parametrize("body", [b"[]", b"null", b"7", b'"text"'])
+def test_response_that_is_not_an_object_is_an_api_error(body):
+    """A JSON body that is not an object is retried, then an ApiError."""
+    client = EasyPost(
+        KEY, urlopen=lambda request, timeout: io.BytesIO(body), sleep=lambda _: None
+    )
+    with pytest.raises(shipment_sync.ApiError, match="reading response"):
+        client.get("shipments")
+
+
+@pytest.mark.parametrize("value", ["nan", "-5", "inf", "soon"])
+def test_odd_retry_after_falls_back_to_backoff(value):
+    """A Retry-After that is not a finite, non-negative number is ignored."""
+    headers = email.message.Message()
+    headers["Retry-After"] = value
+    error = urllib.error.HTTPError("u", 429, "busy", headers, io.BytesIO(b""))
+    assert easypost_client.retry_after(error) is None
+
+
+def test_odd_error_code_does_not_stop_the_polling(sessions):
+    """A tracker answering with a list for its error code is a failed poll;
+    the next tracker is still polled."""
+    with sessions() as session:
+        first = old_label(session, 50, [(48, "in_transit")])
+        second = old_label(session, 49, [(48, "in_transit")])
+        session.commit()
+        first_tracker, second_tracker = first.tracker_id, second.tracker_id
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        if request.full_url.endswith(first_tracker):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                404,
+                "error",
+                email.message.Message(),
+                io.BytesIO(b'{"error": {"code": []}}'),
+            )
+        if request.full_url.endswith(second_tracker):
+            return io.BytesIO(json.dumps({"status": "delivered"}).encode())
+        return io.BytesIO(b'{"shipments": [], "has_more": false}')
+
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    summary = shipment_sync.run(client, sessions, now=NOW)
+    assert (summary.polled, summary.poll_failures) == (1, 1)
+
+
+# --- conflicting destination evidence ------------------------------------------
+
+
+@pytest.fixture
+def conflict_matcher(api_db):
+    """Texas units at a street and at a P.O. box, and a Federal unit
+    elsewhere (invented names and addresses)."""
+    with api_db() as session:
+        return UnitMatcher(
+            [
+                add_unit(session, "ALPHA", street1="100 Example Rd", zipcode="77000"),
+                add_unit(
+                    session,
+                    "BRADLEY",
+                    street1="Bradley Unit",
+                    street2="P.O. Box 9000",
+                    zipcode="75600",
+                ),
+                add_unit(
+                    session,
+                    "DELTA CODE",
+                    jurisdiction="Federal",
+                    street1="Delta Unit",
+                    street2="5 Federal Way",
+                    zipcode="77600",
+                    shipping_method="Federal Tub",
+                ),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "address, destination",
+    [
+        # A Texas street, a Federal name.
+        (
+            {"company": "DELTA UNIT", "street1": "100 EXAMPLE RD", "zip": "77000"},
+            (None, True),
+        ),
+        # A Texas P.O. box, a Federal name.
+        (
+            {"company": "DELTA UNIT", "street1": "PO BOX 9000", "zip": "75600"},
+            (None, True),
+        ),
+        # A P.O. box alone is address evidence.
+        ({"street1": "PO BOX 9000", "zip": "75600"}, (("Texas", "BRADLEY"), False)),
+        ({"street1": "PO BOX 9001", "zip": "75600"}, (None, False)),
+        # No evidence at all is not a conflict.
+        ({"street1": "1 Nowhere Rd", "zip": "77000"}, (None, False)),
+        (
+            {"company": "BRADLEY UNIT", "street1": "PO BOX 9000", "zip": "75600"},
+            (("Texas", "BRADLEY"), False),
+        ),
+    ],
+)
+def test_locate_tells_conflicting_evidence_from_none(
+    conflict_matcher, address, destination
+):
+    """A name contradicted by the street or P.O. box is a conflict, which
+    no evidence is not."""
+    assert tuple(conflict_matcher.locate(address)) == destination
+
+
+def test_label_with_conflicting_destination_links_no_one(sessions):
+    """An untagged label to a Texas street naming a Federal facility is
+    kind other, so its addressee's number links no request in either
+    jurisdiction; listed again with clean evidence it is individual again."""
+    with sessions() as session:
+        add_unit(
+            session,
+            "DELTA CODE",
+            jurisdiction="Federal",
+            street1="Delta Unit",
+            street2="5 Federal Way",
+            zipcode="77600",
+            shipping_method="Federal Tub",
+        )
+        add_inmate(session, 40000001, jurisdiction="Federal")
+        add_request(
+            session, 40000001, 0, ago(5).date().isoformat(), jurisdiction="Federal"
+        )
+        session.commit()
+    conflicting = shipment(1, ago(3), company="DELTA UNIT")
+    summary = sync(FakeEasyPost([conflicting]), sessions)
+    row = stored(sessions, "shp_00000001")
+    assert (row.kind, row.unit_name, row.inmate_number) == ("other", None, "40000001")
+    assert summary.links == 0
+    clean = shipment(1, ago(3))
+    sync(FakeEasyPost([clean]), sessions)
+    row = stored(sessions, "shp_00000001")
+    assert (row.kind, row.unit_name) == ("individual", "ALPHA")
+
+
+# --- a --since run publishes only a complete re-evaluation ---------------------
+
+
+class AnswerById:
+    """A FakeEasyPost whose ``GET shipments/{id}`` answers ``answer``."""
+
+    def __init__(self, fake: FakeEasyPost, answer: dict):
+        self.fake, self.answer = fake, answer
+
+    def __call__(self, request, timeout):
+        if "/v2/shipments/" in request.full_url:
+            return io.BytesIO(json.dumps(self.answer).encode())
+        return self.fake(request, timeout)
+
+
+def stale_link_label(sessions) -> str:
+    """The id of seed_stale_link's label."""
+    seed_stale_link(sessions)
+    with sessions() as session:
+        return session.scalars(sa.select(models.Shipment.easypost_id)).one()
+
+
+def run_since(sessions, logs, urlopen, since="2026-01-01") -> int:
+    """main with --since against ``urlopen``."""
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        return shipment_sync.main(["--since", since], sessions=sessions, client=client)
+
+
+def assert_incomplete(sessions, logs, since="2026-01-01") -> None:
+    """The run said to re-run it and left the one stale link alone."""
+    assert (
+        f"re-evaluation since {since} is incomplete and the links were not "
+        f"rebuilt; re-run with --since {since}"
+    ) in logs.text
+    with sessions() as session:
+        assert session.query(models.PackageShipment).count() == 1
+
+
+@pytest.mark.parametrize(
+    "answer, failure",
+    [
+        (lambda id_: shipment(9, ago(3), selected_rate=None), "answer has no label"),
+        (
+            lambda id_: shipment(9, ago(3), tracking_code=None),
+            "answer has no label",
+        ),
+        (lambda id_: shipment(9, ago(3)), "answer is another shipment"),
+        (
+            lambda id_: {**shipment(9, ago(3)), "id": id_, "tracker": [SENTINEL]},
+            "answer not of EasyPost's shape",
+        ),
+    ],
+)
+def test_since_run_with_an_unusable_answer_by_id_is_incomplete(
+    sessions, logs, answer, failure
+):
+    """A fetch by id answered with no label, another shipment or a shape
+    not EasyPost's doesn't cover the stored label: the run fails without
+    rebuilding the links."""
+    easypost_id = stale_link_label(sessions)
+    urlopen = AnswerById(FakeEasyPost(), answer(easypost_id))
+    assert run_since(sessions, logs, urlopen) == 1
+    assert f"shipment sync failed: GET shipment: {failure}" in logs.text
+    assert "Sentinel" not in logs.text
+    assert_incomplete(sessions, logs)
+
+
+def test_since_run_with_a_failed_tracker_poll_rebuilds_no_links(sessions, logs):
+    """A tracker that can't be fetched in a --since run leaves the links as
+    they were: they are rebuilt only after every step succeeded."""
+    seed_stale_link(sessions)
+    today = datetime.datetime.now(datetime.timezone.utc)
+    with sessions() as session:
+        add_shipment(
+            session,
+            (today - 50 * DAY).strftime("%Y-%m-%dT%H:%M"),
+            events=(((today - 49 * DAY).strftime("%Y-%m-%dT%H:%M"), "in_transit"),),
+        )
+        session.commit()
+    since = (today - 10 * DAY).date().isoformat()
+    assert run_since(sessions, logs, FakeEasyPost(), since=since) == 1
+    assert "shipment sync failed: 1 trackers not fetched" in logs.text
+    assert_incomplete(sessions, logs, since=since)

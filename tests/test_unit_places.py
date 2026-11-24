@@ -117,3 +117,47 @@ def test_units_sharing_a_po_box_are_one_place():
         ("Texas", "SECOND"),
     }
     assert places.members(("Texas", "THIRD")) == {("Texas", "THIRD")}
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("1604 S. First St.", "1604 South First Street"),
+        ("1400 Industrial Blvd ", "1400 Industrial Blvd"),
+        ("2665 Prison Road #1", "2665 Prison Road #1"),
+        ("2665 Prison Road #1", "2665 Prison Rd."),
+        ("11034 Hwy 36", "11034 Hwy 36"),
+        ("11034 Highway 36", "11034 HWY 36"),
+        ("P.O. Box 9000", "PO BOX 9000"),
+    ],
+)
+def test_same_delivery_line_spelled_two_ways_is_one_place(first, second):
+    """Two rows with one name and ZIP whose delivery lines normalise alike
+    are one place."""
+    places = Places(
+        [
+            unit("ONE", "River Valley Unit", first),
+            unit("TWO", "River Valley Unit", second),
+        ]
+    )
+    assert places.members(("Texas", "ONE")) == {("Texas", "ONE"), ("Texas", "TWO")}
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("100 Main Street", "100 Oak Lane"),
+        ("100 N Main St", "100 S Main St"),
+        ("100 Main St", "1000 Main St"),
+        ("P.O. Box 9000", "100 Main St"),
+    ],
+)
+def test_same_number_on_another_street_is_another_place(first, second):
+    """A shared house number on a different street doesn't make one place."""
+    places = Places(
+        [
+            unit("ONE", "River Valley Unit", first),
+            unit("TWO", "River Valley Unit", second),
+        ]
+    )
+    assert places.one_place([("Texas", "ONE"), ("Texas", "TWO")]) is None

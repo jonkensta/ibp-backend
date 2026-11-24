@@ -10,10 +10,12 @@ one has no display name, and is just not matched by one.
 Some rows are one facility under several provider codes (a unit and its
 trusty camp, say). ``Places`` groups them: units are the same place when
 they have the same jurisdiction, the same display name (letters and digits
-only, any case), the same valid 5-digit ZIP, and share a house number or a
-P.O. box number. The rest of the street isn't compared, since rows spell
-one street differently (``1604 S. First St.``, ``1604 South First
-Street``); units with no number at all are never merged, nor are units with
+only, any case), the same valid 5-digit ZIP, and share a delivery line: a
+P.O. box number, or a house number and street that are the same once
+spelling is normalised (``delivery_line``: ``1604 S. First St.`` and
+``1604 South First Street`` are one street, ``100 Main Street`` and ``100
+Oak Lane`` are not). Lines normalisation can't prove the same are different
+places; units with no delivery line are never merged, nor are units with
 different display names at one address. A place is named by its
 alphabetically first unit, its representative.
 """
@@ -209,10 +211,11 @@ def display_name(unit: models.Unit) -> Optional[str]:
     return None
 
 
-def address_numbers(unit: models.Unit) -> set[tuple[str, str]]:
-    """The unit's house numbers and P.O. box numbers, tagged by kind."""
+def line_numbers(lines: Iterable[Optional[str]]) -> set[tuple[str, str]]:
+    """The house numbers and P.O. box numbers address lines start with,
+    tagged by kind (``("house", "264")``, ``("box", "9000")``)."""
     numbers = set()
-    for line in (unit.street1, unit.street2):
+    for line in lines:
         house = leading_number(line)
         if house is not None:
             numbers.add(("house", house))
@@ -222,8 +225,73 @@ def address_numbers(unit: models.Unit) -> set[tuple[str, str]]:
     return numbers
 
 
+# Spellings of one word in a street line, as their canonical form.
+_STREET_WORDS = {
+    "NORTH": "N",
+    "SOUTH": "S",
+    "EAST": "E",
+    "WEST": "W",
+    "NORTHEAST": "NE",
+    "NORTHWEST": "NW",
+    "SOUTHEAST": "SE",
+    "SOUTHWEST": "SW",
+    "STREET": "ST",
+    "ROAD": "RD",
+    "HIGHWAY": "HWY",
+    "AVENUE": "AVE",
+    "AV": "AVE",
+    "BOULEVARD": "BLVD",
+    "DRIVE": "DR",
+    "LANE": "LN",
+    "PARKWAY": "PKWY",
+    "FREEWAY": "FWY",
+    "COURT": "CT",
+    "CIRCLE": "CIR",
+    "TRAIL": "TRL",
+    "PLACE": "PL",
+    "FIRST": "1ST",
+    "SECOND": "2ND",
+    "THIRD": "3RD",
+    "FOURTH": "4TH",
+    "FIFTH": "5TH",
+    "SIXTH": "6TH",
+    "SEVENTH": "7TH",
+    "EIGHTH": "8TH",
+    "NINTH": "9TH",
+    "TENTH": "10TH",
+}
+# A unit marker ending a street line (``#1``, ``Unit B``, ``Ste 4``).
+_UNIT_MARKER = re.compile(
+    r"\s*(?:#\s*[A-Z0-9-]+|\b(?:UNIT|APT|STE|SUITE|BLDG|BUILDING)\.?\s*[A-Z0-9-]+)\s*$"
+)
+
+
+def delivery_line(line: Optional[str]) -> Optional[tuple[str, str]]:
+    """A street line as compared between units: ``("box", number)`` for a
+    numbered P.O. box, ``("street", normalised text)`` for a line starting
+    with a house number, else None.
+
+    The street is uppercased, its punctuation dropped, a trailing unit
+    marker removed and each word put in one spelling (``_STREET_WORDS``).
+    """
+    box = po_box(line)
+    if box:
+        return ("box", box)
+    if leading_number(line) is None:
+        return None
+    street = _UNIT_MARKER.sub("", (line or "").upper())
+    tokens = [_STREET_WORDS.get(token, token) for token in words(street)]
+    return ("street", " ".join(tokens))
+
+
+def delivery_lines(unit: models.Unit) -> set[tuple[str, str]]:
+    """The unit's delivery lines (``delivery_line``)."""
+    found = {delivery_line(line) for line in (unit.street1, unit.street2)}
+    return {line for line in found if line is not None}
+
+
 def _same_place_groups(units: list[models.Unit]) -> list[list[UnitKey]]:
-    """Units of one name and ZIP, joined when they share a number."""
+    """Units of one name and ZIP, joined when they share a delivery line."""
     parent = list(range(len(units)))
 
     def root(i: int) -> int:
@@ -232,13 +300,13 @@ def _same_place_groups(units: list[models.Unit]) -> list[list[UnitKey]]:
             i = parent[i]
         return parent[i]
 
-    by_number: dict[tuple[str, str], int] = {}
+    by_line: dict[tuple[str, str], int] = {}
     for i, unit in enumerate(units):
-        for number in address_numbers(unit):
-            if number in by_number:
-                parent[root(i)] = root(by_number[number])
+        for line in delivery_lines(unit):
+            if line in by_line:
+                parent[root(i)] = root(by_line[line])
             else:
-                by_number[number] = i
+                by_line[line] = i
     groups: dict[int, list[UnitKey]] = defaultdict(list)
     for i, unit in enumerate(units):
         groups[root(i)].append((unit.jurisdiction, unit.name))

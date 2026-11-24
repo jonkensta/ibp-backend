@@ -84,3 +84,65 @@ def test_exit_status_is_passed_through(tmp_path, monkeypatch, args):
     command = seen["command"]
     assert command[len(command) - len(args) :] == args
     assert "EZAKtest" not in command
+
+
+def test_runs_are_mutually_exclusive(tmp_path, monkeypatch, capsys):
+    """While one run holds the lock, another exits 75 at once, runs nothing
+    and pings nothing; once it is released, a run goes ahead."""
+    monkeypatch.setattr(wrapper, "LOCK_FILE", tmp_path / "state" / "run.lock")
+    monkeypatch.setattr(wrapper, "CONFIG", tmp_path)
+    (tmp_path / "ping-url").write_text("https://hc.example/ping\n")
+    pings: list[str] = []
+    runs: list[list[str]] = []
+    monkeypatch.setattr(
+        wrapper, "ping", lambda url, suffix, body="": pings.append(suffix)
+    )
+
+    def fake_run(args, log):
+        runs.append(args)
+        log.append("shipment sync: ok")
+        return 0
+
+    monkeypatch.setattr(wrapper, "run", fake_run)
+    monkeypatch.setattr(
+        wrapper.sys, "argv", ["ibp-shipment-sync", "--since", "2025-11-01"]
+    )
+
+    held = wrapper.take_lock(wrapper.LOCK_FILE)
+    assert held is not None
+    try:
+        assert wrapper.main() == wrapper.BUSY == 75
+        assert "another ibp-shipment-sync run is in progress" in capsys.readouterr().err
+        assert not runs and not pings
+    finally:
+        held.close()
+
+    assert wrapper.main() == 0
+    assert runs == [["--since", "2025-11-01"]]
+    assert pings == ["/start", "/0"]
+
+
+def test_lock_is_held_for_the_whole_run(tmp_path, monkeypatch):
+    """During a run the lock can't be taken by anyone else."""
+    monkeypatch.setattr(wrapper, "LOCK_FILE", tmp_path / "run.lock")
+    monkeypatch.setattr(wrapper, "CONFIG", tmp_path)
+    monkeypatch.setattr(wrapper, "ping", lambda *args, **kwargs: None)
+    monkeypatch.setattr(wrapper.sys, "argv", ["ibp-shipment-sync"])
+    during = []
+
+    def fake_run(_args, _log):
+        during.append(wrapper.take_lock(wrapper.LOCK_FILE))
+        return 0
+
+    monkeypatch.setattr(wrapper, "run", fake_run)
+    assert wrapper.main() == 0
+    assert during == [None]
+    after = wrapper.take_lock(wrapper.LOCK_FILE)
+    assert after is not None
+    after.close()
+
+
+def test_service_treats_a_busy_run_as_success():
+    """The timer's service doesn't fail when a manual run holds the lock."""
+    unit = (SCRIPT.parent / "ibp-shipment-sync.service").read_text()
+    assert "SuccessExitStatus=75" in unit

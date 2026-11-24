@@ -106,3 +106,52 @@ def test_bootstrap_stamps_schema_with_pronouns(tmp_path: Path, monkeypatch):
         )
     finally:
         engine.dispose()
+
+
+def test_downgrade_with_foreign_keys_on_keeps_inmates_and_their_rows(tmp_path: Path):
+    """Downgrading doesn't rebuild inmates, so with foreign keys on, the
+    rows referring to an inmate survive (and the downgrade doesn't fail)."""
+    url = f"sqlite:///{tmp_path / 'fk.db'}"
+    config = db_bootstrap.build_alembic_config(url)
+    command.upgrade(config, db_bootstrap.PRE_RACE_SEX_WORDS_REVISION)
+    engine = sqlalchemy.create_engine(url)
+
+    def foreign_keys_on(connection, _record):
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    sqlalchemy.event.listen(sqlalchemy.engine.Engine, "connect", foreign_keys_on)
+    try:
+        insert_inmate(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                sqlalchemy.text(
+                    "INSERT INTO requests (inmate_jurisdiction, inmate_id, "
+                    '"index", date_processed, date_postmarked, action) '
+                    "VALUES ('Texas', 1, 0, '2026-01-02', '2026-01-01', 'Filled')"
+                )
+            )
+        assert scalar(engine, "PRAGMA foreign_keys") == 1
+        command.downgrade(config, db_bootstrap.PRE_PRONOUNS_REVISION)
+        assert not PRONOUNS_COLUMNS & columns(url)
+        assert scalar(engine, "SELECT COUNT(*) FROM requests") == 1
+        assert scalar(engine, "SELECT first_name FROM inmates") == "JANE"
+    finally:
+        sqlalchemy.event.remove(sqlalchemy.engine.Engine, "connect", foreign_keys_on)
+        engine.dispose()
+
+
+def test_interrupted_downgrade_can_be_run_again(tmp_path: Path):
+    """A downgrade run again after it dropped one column drops the rest."""
+    url = f"sqlite:///{tmp_path / 'again.db'}"
+    config = db_bootstrap.build_alembic_config(url)
+    command.upgrade(config, db_bootstrap.PRE_RACE_SEX_WORDS_REVISION)
+    engine = sqlalchemy.create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                sqlalchemy.text("ALTER TABLE inmates DROP COLUMN pronouns")
+            )
+    finally:
+        engine.dispose()
+    command.downgrade(config, db_bootstrap.PRE_PRONOUNS_REVISION)
+    assert not PRONOUNS_COLUMNS & columns(url)

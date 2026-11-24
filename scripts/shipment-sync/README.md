@@ -17,11 +17,19 @@ never buys, refunds or changes anything at EasyPost.
   that is older, so even a longer outage leaves no gap.
 
 Each run logs one line of counts, e.g.
-`shipment sync: 412 labels seen, 11 new, 37 updated, 0 fetched by id, 160 events added, 388 trackers polled (0 failed), 1420 links built`.
-No names or addresses are logged or stored.
+`shipment sync: 412 labels seen, 11 new, 37 updated, 0 fetched by id, 0 skipped, 160 events added, 388 trackers polled (0 failed), 1420 links built`.
+No names or addresses are logged or stored. A listed label not of
+EasyPost's shape (an id other than `shp_` and hex digits, a tracker id
+other than `trk_` and hex digits, a tracking code other than 8 to 40
+letters and digits, or a field of the wrong type) is not stored and is
+counted as "skipped", and the run then exits 1; a tracker of the wrong
+shape is a failed poll. A listing page without its list of shipments or a
+boolean `has_more` fails the run rather than ending the listing early. Only
+checked ids reach a log line.
 
 Exit status: 0 ok, 1 an EasyPost or database error (or a tracker it could
-not fetch) or any other failure, 2 no usable key. Failures, retries and
+not fetch, or a listed label it skipped) or any other failure, 2 no usable
+key, 75 another run in progress (the wrapper's lock, below). Failures, retries and
 unfetched trackers are logged as one line each with no values: a fixed
 operation (`GET shipments`, `GET shipment`, `GET tracker`, never an id or
 query string) with an EasyPost error's HTTP status and code (a known code,
@@ -64,21 +72,34 @@ label to a unit again.
 ## Re-evaluating every label's unit
 
 A stored label's unit is matched when it is listed, so after a release that
-changes unit matching (`ibp/unit_places.py`, `UnitMatcher` in
-`ibp/shipment_sync.py`), or after fixing units' names or addresses, every
+changes unit matching (`ibp/unit_places.py`, `ibp/unit_matching.py`,
+`ibp/label_reading.py`), or after fixing units' names or addresses, every
 label must be read again. `--since <date>` lists every label bought from
 that date on, then fetches by id each stored label bought since then that
 the listing missed (the listing goes by when the EasyPost shipment was
 created, which can be before the label was bought; the summary counts them
-as "fetched by id"), and only then rebuilds the links. Pages are committed
-as they go, so a run that fails part-way leaves some labels matched the new
-way and some the old: it then exits 1 without rebuilding the links, logging
-that the re-evaluation is incomplete and must be re-run with the same
-`--since`. Keep the daily run from rebuilding links from that mix
-meanwhile:
+as "fetched by id"), and only then rebuilds the links. A stored label
+counts as read again only once an answer with its own id was read and
+stored: an answer with no label, another shipment's id or a shape not
+EasyPost's makes the run incomplete, as does any tracker that can't be
+fetched. Pages are committed as they go, so a run that fails part-way
+leaves some labels matched the new way and some the old: it then exits 1
+without rebuilding the links, logging that the re-evaluation is incomplete
+and must be re-run with the same `--since`. Keep the daily run from
+rebuilding links from that mix meanwhile. Stop the timer before upgrading,
+and wait for a run already in progress, which stopping the timer doesn't
+stop:
 
     sudo systemctl stop ibp-shipment-sync.timer
+    while systemctl is-active --quiet ibp-shipment-sync.service; do sleep 10; done
+    # upgrade the backend (deploy/pi/README.md, Upgrading)
     ~/.local/bin/ibp-shipment-sync --since 2025-11-01   # the first label's date; repeat until it exits 0
     sudo systemctl start ibp-shipment-sync.timer
+
+Runs never overlap: the wrapper holds an exclusive lock
+(`~/.local/state/ibp-shipment-sync/run.lock`) for the whole run. A run that
+finds it held prints "another ibp-shipment-sync run is in progress" and
+exits 75 without running anything or pinging Healthchecks (the run holding
+the lock reports for itself, and the service counts 75 as success).
 
 If the EasyPost key changes, update the key file (and Bitwarden).

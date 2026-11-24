@@ -29,17 +29,15 @@ with counts only: no recipient names or addresses are logged or stored.
 import argparse
 import dataclasses
 import datetime
-import decimal
 import logging
 import os
 import re
 import sys
 import traceback
 import urllib.parse
-from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import Any, Optional
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, selectinload, sessionmaker
@@ -50,9 +48,22 @@ from .easypost_client import (  # pylint: disable=unused-import
     ApiError,
     EasyPost,
 )
-from .labels import RequestKey, parse_request_code
-from .shipment_links import never_mailed, rebuild_links
-from .unit_places import Places, display_name, leading_number, squeeze, zip5
+from .label_reading import (  # pylint: disable=unused-import
+    SHIPMENT_ID,
+    EventValues,
+    Label,
+    Malformed,
+    Tag,
+    event_key,
+    inmate_number,
+    normalize,
+    parse_events,
+    parse_reference,
+    as_text,
+    read_label,
+)
+from .shipment_links import StaleLinks, never_mailed, rebuild_links
+from .unit_matching import UnitMatcher
 
 logger = logging.getLogger(__name__)
 
@@ -75,329 +86,9 @@ class MissingKey(RuntimeError):
     """No usable EasyPost key was given."""
 
 
-# --- the label reference tag -------------------------------------------------
-
-TAG_PREFIX = "ibp1:"
-_JURISDICTIONS = {"texas": "Texas", "federal": "Federal"}
-
-
-@dataclasses.dataclass(frozen=True)
-class Tag:
-    """A parsed ``ibp1:`` reference tag.
-
-    ``kind`` is ``request`` (``ibp1:req:<request code>``), ``unit``
-    (``ibp1:unit:<jurisdiction>:<unit name>``) or ``manual``
-    (``ibp1:manual``).
-    """
-
-    kind: str
-    request: Optional[RequestKey] = None
-    unit: Optional[tuple[str, str]] = None
-
-
-def parse_reference(reference: Optional[str]) -> Optional[Tag]:
-    """Parse a label's EasyPost ``reference``, or None if it is not a tag.
-
-    Anything that is not exactly one of the three forms (no reference, as on
-    every label bought before the shipping apps set one, or unknown text) is
-    treated as absent.
-    """
-    if not reference:
-        return None
-    text = reference.strip()
-    if text == f"{TAG_PREFIX}manual":
-        return Tag("manual")
-    if text.startswith(f"{TAG_PREFIX}req:"):
-        key = parse_request_code(text[len(f"{TAG_PREFIX}req:") :])
-        return Tag("request", request=key) if key is not None else None
-    if text.startswith(f"{TAG_PREFIX}unit:"):
-        jurisdiction, separator, name = text[len(f"{TAG_PREFIX}unit:") :].partition(":")
-        jurisdiction = _JURISDICTIONS.get(jurisdiction.strip().lower(), "")
-        if separator and jurisdiction and name.strip():
-            return Tag("unit", unit=(jurisdiction, name.strip()))
-    return None
-
-
-# --- reading a label ---------------------------------------------------------
-
-# The addressee line ends with the 8-digit inmate number, as
-# ``addresses.format_addressee`` writes it: ``First Last #00012345``.
-_INMATE_NUMBER = re.compile(r"#\s*(\d{8})\s*$")
-
-
-def inmate_number(addressee: Optional[str]) -> Optional[str]:
-    """Return the 8-digit inmate number ending an addressee line, if any."""
-    match = _INMATE_NUMBER.search(addressee or "")
-    return match[1] if match else None
-
-
-def normalize(text: Optional[str]) -> str:
-    """Uppercase, with every run of punctuation and spaces made one space."""
-    return re.sub(r"[^A-Z0-9]+", " ", (text or "").upper()).strip()
-
-
-class UnitMatcher:
-    """Finds the IBP unit a label went to, by its tag, name or address."""
-
-    def __init__(self, units: Iterable[models.Unit]):
-        units = list(units)
-        self._places = Places(units)
-        self._by_tag: dict[tuple[str, str], tuple[str, str]] = {}
-        self._by_name: dict[str, list[tuple[str, str, Optional[str]]]] = defaultdict(
-            list
-        )
-        self._by_number: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
-        for unit in units:
-            key = (unit.jurisdiction, unit.name)
-            self._by_tag[(unit.jurisdiction, unit.name.upper())] = key
-            for name in {squeeze(unit.name), squeeze(display_name(unit))} - {""}:
-                self._by_name[name].append((*key, zip5(unit.zipcode)))
-            zipcode = zip5(unit.zipcode)
-            for street in (unit.street1, unit.street2):
-                number = leading_number(street)
-                if number is not None and zipcode is not None:
-                    self._by_number[(number, zipcode)].add(key)
-
-    def by_tag(self, jurisdiction: str, name: str) -> Optional[tuple[str, str]]:
-        """The unit a tag names, if IBP has it (unit names match in any case)."""
-        return self._by_tag.get((jurisdiction, name.upper()))
-
-    def by_address(self, address: dict[str, Any]) -> Optional[tuple[str, str]]:
-        """The one place a label's address names and is at, or None.
-
-        Units store the street in either line (usually the unit's display
-        name in ``street1`` and the street in ``street2``), and EasyPost's
-        verified addresses come back in USPS spelling with the name moved to
-        ``street2``, so whole lines are not compared. Two kinds of evidence
-        are gathered apart:
-
-        - by name: a ``street1``, ``street2`` or ``company`` line that is a
-          unit's key name or display name (``unit_places.display_name``;
-          letters and digits only, any case) names that unit, whatever the
-          ZIP. A name units in more than one place have (Texas and Federal,
-          or one display name in two towns) counts only if the label's ZIP
-          leaves one place;
-        - by address: the house number either street line starts with,
-          with the label's ZIP, leads the ``street1`` or ``street2`` of
-          these units.
-
-        Only a valid ZIP (``unit_places.zip5``) on both sides counts. With a
-        name, the result is its place, unless it is ambiguous, or the
-        address finds units and the name's place is not among them (the
-        street says one unit, the name another): then nothing. Without a
-        name, the address must find units of one place. Units in different
-        places at one address are told apart only by name. The unit
-        returned is its place's representative (``unit_places.Places``),
-        so units that are one place give one answer.
-        """
-        zipcode = zip5(address.get("zip"))
-        named = {
-            unit
-            for field in ("street1", "street2", "company")
-            for unit in self._by_name.get(squeeze(address.get(field)), [])
-        }
-        at_number: set[tuple[str, str]] = set()
-        if zipcode is not None:
-            for field in ("street1", "street2"):
-                number = leading_number(address.get(field))
-                if number is not None:
-                    at_number |= self._by_number.get((number, zipcode), set())
-        if not named:
-            return self._places.one_place(at_number)
-        place = self._places.one_place((j, name) for j, name, _ in named)
-        if place is None and zipcode is not None:
-            place = self._places.one_place(
-                (j, name) for j, name, unit_zip in named if unit_zip == zipcode
-            )
-        if place is None or (
-            at_number
-            and place not in {self._places.representative(unit) for unit in at_number}
-        ):
-            return None
-        return place
-
-
-class EventValues(NamedTuple):
-    """One tracking event's stored values."""
-
-    occurred_at: datetime.datetime
-    local_time: Optional[str]
-    status: Optional[str]
-    status_detail: Optional[str]
-    message: Optional[str]
-    city: Optional[str]
-    state: Optional[str]
-    zip: Optional[str]
-    occurrence: int
-
-    def key(self) -> tuple:
-        """The values that identify the event (as the unique index does)."""
-        return event_key(self)
-
-
-def event_key(event: Any) -> tuple:
-    """Identify an event (an ``EventValues`` or a stored ``TrackingEvent``)."""
-    return (
-        event.occurred_at,
-        event.status or "",
-        event.status_detail or "",
-        event.message or "",
-        event.city or "",
-        event.state or "",
-        event.zip or "",
-        event.occurrence,
-    )
-
-
-def parse_timestamp(value: str) -> datetime.datetime:
-    """Parse an EasyPost timestamp into an aware UTC datetime."""
-    moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=datetime.timezone.utc)
-    return moment.astimezone(datetime.timezone.utc)
-
-
-def parse_events(tracker: Optional[dict[str, Any]]) -> list[EventValues]:
-    """Every event in a tracker's ``tracking_details``, in the list's order.
-
-    An event identical to an earlier one in the list gets the next
-    ``occurrence``, so repeats are kept and a re-sync matches them up.
-    ``signed_by`` and the rest of the tracker are not kept. An event without
-    a time can't be placed and is skipped.
-    """
-    events = []
-    seen: dict[tuple, int] = defaultdict(int)
-    for detail in (tracker or {}).get("tracking_details") or []:
-        if not detail.get("datetime"):
-            continue
-        location = detail.get("tracking_location") or {}
-        values = EventValues(
-            occurred_at=parse_timestamp(detail["datetime"]),
-            local_time=detail.get("datetime_local") or None,
-            status=detail.get("status") or None,
-            status_detail=detail.get("status_detail") or None,
-            message=detail.get("message") or None,
-            city=location.get("city") or None,
-            state=location.get("state") or None,
-            zip=location.get("zip") or None,
-            occurrence=0,
-        )
-        identity = values.key()[:-1]
-        values = values._replace(occurrence=seen[identity])
-        seen[identity] += 1
-        events.append(values)
-    return events
-
-
-def cents(amount: Any) -> Optional[int]:
-    """Dollars as EasyPost gives them (``"5.57"``) in whole cents."""
-    if amount in (None, ""):
-        return None
-    try:
-        return int(
-            (decimal.Decimal(str(amount)) * 100).quantize(
-                decimal.Decimal(1), rounding=decimal.ROUND_HALF_UP
-            )
-        )
-    except decimal.InvalidOperation:
-        return None
-
-
-@dataclasses.dataclass
-class Label:  # pylint: disable=too-many-instance-attributes
-    """A purchased label as stored: every ``shipments`` column but the sync
-    time, and its events."""
-
-    easypost_id: str
-    tracking_code: str
-    tracker_id: Optional[str]
-    purchased_at: datetime.datetime
-    weight_oz: Optional[float]
-    cost_cents: Optional[int]
-    service: Optional[str]
-    reference: Optional[str]
-    kind: str
-    unit_jurisdiction: Optional[str]
-    unit_name: Optional[str]
-    request_jurisdiction: Optional[str]
-    request_inmate_id: Optional[int]
-    request_index: Optional[int]
-    inmate_number: Optional[str]
-    refund_status: Optional[str]
-    tracker_status: Optional[str]
-    events: list[EventValues]
-
-    def columns(self) -> dict[str, Any]:
-        """The ``shipments`` column values."""
-        return {
-            field.name: getattr(self, field.name)
-            for field in dataclasses.fields(self)
-            if field.name != "events"
-        }
-
-
-def read_label(
-    shipment: dict[str, Any], units: UnitMatcher, unit_recipient: str
-) -> Optional[Label]:
-    """Read a listed shipment, or None if it has no label (never purchased).
-
-    The kind comes from the reference tag; without one, a label whose
-    addressee line ends in an inmate number is ``individual``, one addressed
-    to ``unit_recipient`` (the shipping settings' mailroom line) is
-    ``bulk``, and anything else is ``other``. The name and street address
-    are read here and never stored, nor is a reference that is not a tag.
-    """
-    rate = shipment.get("selected_rate") or {}
-    if not shipment.get("tracking_code") or not rate:
-        return None
-    to_address = shipment.get("to_address") or {}
-    tracker = shipment.get("tracker") or {}
-    label_info = shipment.get("postage_label") or {}
-    tag = parse_reference(shipment.get("reference"))
-    number = inmate_number(to_address.get("name"))
-
-    unit = None
-    if tag is not None and tag.unit is not None:
-        unit = units.by_tag(*tag.unit)
-    if unit is None:
-        unit = units.by_address(to_address)
-
-    if tag is not None:
-        kind = {"request": "individual", "unit": "bulk"}.get(tag.kind, "other")
-    elif number is not None:
-        kind = "individual"
-    elif unit_recipient and unit_recipient in normalize(
-        f"{to_address.get('name') or ''} {to_address.get('company') or ''}"
-    ):
-        kind = "bulk"
-    else:
-        kind = "other"
-
-    request = tag.request if tag is not None else None
-    weight = (shipment.get("parcel") or {}).get("weight")
-    return Label(
-        easypost_id=shipment["id"],
-        tracking_code=shipment["tracking_code"],
-        tracker_id=tracker.get("id") or None,
-        purchased_at=parse_timestamp(
-            label_info.get("created_at") or shipment["created_at"]
-        ),
-        weight_oz=float(weight) if weight is not None else None,
-        cost_cents=cents(rate.get("rate")),
-        service=rate.get("service") or None,
-        # Only our own tags: free text could be anything, a name included.
-        reference=shipment.get("reference") if tag is not None else None,
-        kind=kind,
-        unit_jurisdiction=unit[0] if unit else None,
-        unit_name=unit[1] if unit else None,
-        request_jurisdiction=request.jurisdiction if request else None,
-        request_inmate_id=request.inmate_id if request else None,
-        request_index=request.index if request else None,
-        inmate_number=number,
-        refund_status=shipment.get("refund_status") or None,
-        tracker_status=tracker.get("status") or None,
-        events=parse_events(tracker),
-    )
+class Incomplete(RuntimeError):
+    """A ``--since`` re-evaluation could not cover every label; its message
+    is fixed text and counts."""
 
 
 # --- when a label stops being polled -----------------------------------------
@@ -454,6 +145,9 @@ def list_window(
 
     The end is pushed a second later so a label bought on a boundary second
     is listed by one window or both (the caller keys on the shipment id).
+    A page without a ``shipments`` list or a boolean ``has_more``, or whose
+    last shipment has no id of EasyPost's shape to page on, raises
+    ``ApiError``.
     """
     params: dict[str, Any] = {
         "page_size": PAGE_SIZE,
@@ -465,12 +159,19 @@ def list_window(
     }
     while True:
         data = client.get("shipments", params)
-        batch = data.get("shipments") or []
+        batch, has_more = data.get("shipments"), data.get("has_more", False)
+        # A page without its list, or with has_more not a boolean, would
+        # otherwise end the listing early as if it were complete.
+        if not isinstance(batch, list) or not isinstance(has_more, bool):
+            raise ApiError("GET shipments: page not of EasyPost's shape")
         if batch:
             yield batch
-        if not batch or not data.get("has_more"):
+        if not batch or not has_more:
             return
-        params["before_id"] = batch[-1]["id"]
+        last = batch[-1].get("id") if isinstance(batch[-1], dict) else None
+        if not isinstance(last, str) or not SHIPMENT_ID.fullmatch(last):
+            raise ApiError("GET shipments: page not of EasyPost's shape")
+        params["before_id"] = last
 
 
 # --- storing -----------------------------------------------------------------
@@ -488,12 +189,14 @@ class Summary:  # pylint: disable=too-many-instance-attributes
     poll_failures: int = 0
     links: int = 0
     fetched_by_id: int = 0
+    skipped: int = 0
 
     def line(self) -> str:
         """The one-line summary (counts only)."""
         return (
             f"shipment sync: {self.seen} labels seen, {self.new} new, "
             f"{self.updated} updated, {self.fetched_by_id} fetched by id, "
+            f"{self.skipped} skipped, "
             f"{self.events_added} events added, "
             f"{self.polled} trackers polled ({self.poll_failures} failed), "
             f"{self.links} links built"
@@ -551,11 +254,13 @@ def apply_tracker(
     now: datetime.datetime,
     summary: Summary,
 ) -> None:
-    """Update a stored label from its tracker, fetched on its own."""
-    status = tracker.get("status") or None
+    """Update a stored label from its tracker, fetched on its own; raise
+    ``Malformed``, changing nothing, for a tracker not of EasyPost's shape."""
+    status = as_text(tracker.get("status"), "tracker status")
+    events = parse_events(tracker)
     changed = status != shipment.tracker_status
     shipment.tracker_status = status
-    added = add_events(shipment, parse_events(tracker))
+    added = add_events(shipment, events)
     summary.updated += changed
     summary.events_added += added
     if added or changed:
@@ -597,12 +302,15 @@ def sync_listed(
         for page in list_window(client, low, high):
             with sessions() as session, session.begin():
                 for shipment in page:
-                    if shipment["id"] in seen:
+                    try:
+                        label = read_label(shipment, units, unit_recipient)
+                    except Malformed:
+                        # Not stored, and its values are never logged.
+                        summary.skipped += 1
                         continue
-                    label = read_label(shipment, units, unit_recipient)
-                    if label is None:
+                    if label is None or label.easypost_id in seen:
                         continue
-                    seen.add(shipment["id"])
+                    seen.add(label.easypost_id)
                     summary.seen += 1
                     store_label(session, label, now, summary)
     return seen
@@ -622,7 +330,10 @@ def fetch_unlisted(  # pylint: disable=too-many-arguments,too-many-positional-ar
     The listing goes by when the EasyPost shipment was created, so a label
     bought on or after ``since`` from a shipment created before it is not
     listed, but must be read again too for a ``--since`` re-evaluation.
-    Each is committed on its own, like a page.
+    Each is committed on its own, like a page. A label counts as covered
+    only once an answer with its exact id was read and stored; an answer
+    with another id, no label, or not of EasyPost's shape raises
+    ``Incomplete``.
     """
     start = datetime.datetime.combine(since, datetime.time(), datetime.timezone.utc)
     with sessions() as session:
@@ -637,12 +348,26 @@ def fetch_unlisted(  # pylint: disable=too-many-arguments,too-many-positional-ar
         if easypost_id in listed:
             continue
         data = client.get(f"shipments/{urllib.parse.quote(easypost_id, safe='')}")
+        try:
+            label = read_label(data, units, unit_recipient)
+        except Malformed as error:
+            raise Incomplete("GET shipment: answer not of EasyPost's shape") from error
+        if label is None:
+            raise Incomplete("GET shipment: answer has no label")
+        if label.easypost_id != easypost_id:
+            raise Incomplete("GET shipment: answer is another shipment")
+        with sessions() as session, session.begin():
+            store_label(session, label, now, summary)
         summary.fetched_by_id += 1
         listed.add(easypost_id)
-        label = read_label(data, units, unit_recipient)
-        if label is not None and label.easypost_id == easypost_id:
-            with sessions() as session, session.begin():
-                store_label(session, label, now, summary)
+
+
+def loggable_id(shipment: models.Shipment) -> str:
+    """The label's EasyPost id for a log line, if it is of EasyPost's shape
+    (every id stored since ids were checked is)."""
+    if SHIPMENT_ID.fullmatch(shipment.easypost_id or ""):
+        return shipment.easypost_id
+    return "a label with an id of another shape"
 
 
 def poll_unfinished(
@@ -682,20 +407,26 @@ def poll_unfinished(
                 continue
             try:
                 tracker = client.get(f"trackers/{shipment.tracker_id}")
-            except ApiError as error:
+                apply_tracker(shipment, tracker, now, summary)
+            except (ApiError, Malformed) as error:
                 logger.warning(
-                    "tracker for %s not fetched: %s", shipment.easypost_id, error
+                    "tracker for %s not fetched: %s", loggable_id(shipment), error
                 )
                 summary.poll_failures += 1
                 continue
             summary.polled += 1
-            apply_tracker(shipment, tracker, now, summary)
 
 
 def relink(sessions: sessionmaker, now: Optional[datetime.datetime] = None) -> int:
-    """Rebuild the request links in one transaction; return how many."""
-    with sessions() as session, session.begin():
-        return rebuild_links(session, now)
+    """Rebuild the request links and commit them; return how many.
+
+    ``rebuild_links`` may roll back and retry, so it gets a session outside
+    a ``begin()`` block; a failure closes the session, rolling back.
+    """
+    with sessions() as session:
+        written = rebuild_links(session, now)
+        session.commit()
+        return written
 
 
 def listing_start(
@@ -737,8 +468,10 @@ def run(
     ``since`` lists every label bought from that date (UTC) on, instead of
     the last ``WINDOW`` (see ``listing_start``), then fetches by id every
     stored label bought since then that the listing missed
-    (``fetch_unlisted``): a re-evaluation of every label's unit. Anything
-    that fails raises before the links are rebuilt.
+    (``fetch_unlisted``): a re-evaluation of every label's unit. In such a
+    run anything that fails, a tracker poll included, raises before the
+    links are rebuilt, so links are only ever built from a complete
+    re-evaluation.
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -748,6 +481,8 @@ def run(
     if since is not None:
         fetch_unlisted(client, sessions, since, listed, now, summary)
     poll_unfinished(client, sessions, listed, now, summary)
+    if since is not None and summary.poll_failures:
+        raise Incomplete(f"{summary.poll_failures} trackers not fetched")
     summary.links = relink(sessions, now)
     return summary
 
@@ -824,7 +559,7 @@ def describe_failure(error: Exception) -> str:
         return type(error).__name__
     if isinstance(error, sa.exc.SQLAlchemyError):
         return type(error).__name__
-    if isinstance(error, ApiError):
+    if isinstance(error, (ApiError, Incomplete, StaleLinks)):
         return str(error)
     return f"{type(error).__name__} at {crash_location(error)}"
 
@@ -858,7 +593,8 @@ def main(
     sessions: Optional[sessionmaker] = None,
     client: Optional[EasyPost] = None,
 ) -> int:
-    """Run the sync; return 0, 1 if anything failed, 2 without a key.
+    """Run the sync; return 0, 1 if anything failed (a label skipped or a
+    tracker not fetched included), 2 without a key.
 
     Any failure but a missing key is logged as one line (``describe_failure``),
     never as a traceback. ``sessions`` and ``client`` are for tests.
@@ -890,7 +626,8 @@ def main(
             )
         return 1
     logger.info("%s", summary.line())
-    return 1 if summary.poll_failures else 0
+    # A label skipped or a tracker not fetched is data the run didn't get.
+    return 1 if summary.poll_failures or summary.skipped else 0
 
 
 if __name__ == "__main__":

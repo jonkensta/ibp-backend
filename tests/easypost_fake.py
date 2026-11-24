@@ -80,7 +80,7 @@ def shipment(
         "tracker_status", events[-1]["status"] if events else "unknown"
     )
     data = {
-        "id": f"shp_{number:04d}",
+        "id": f"shp_{number:08d}",
         "object": "Shipment",
         "mode": "production",
         "created_at": stamp(created),
@@ -101,7 +101,7 @@ def shipment(
             "rate": "5.57",
         },
         "tracker": {
-            "id": f"trk_{number:04d}",
+            "id": f"trk_{number:08d}",
             "object": "Tracker",
             "status": tracker_status,
             "signed_by": "SOMEONE",

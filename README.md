@@ -236,17 +236,22 @@ the unit's street1 and street2 that is plainly a facility's name: it has a
 word such as Unit, Jail, Camp, Center or FCI, and isn't a street number, a
 P.O. box or a street such as `FM 686`, `Prison Road` or `IH 45`; a unit
 with no such line has no display name), whatever the ZIP. By address: the
-house number and ZIP of a unit's street line. Only a well-formed ZIP or
-ZIP+4 counts (`77-000` or an empty ZIP is none), on both sides. A name
-units in several places have is narrowed by the label's ZIP; if that leaves
-no place or several, or if the address finds units and the name's place is
-not among them, the label has no unit. Without a name, the address must
-find units of one place.
+house number or P.O. box number, with the ZIP, of a unit's street line.
+Only a well-formed ZIP or ZIP+4 counts (`77-000` or an empty ZIP is none),
+on both sides. A name units in several places have is narrowed by the
+label's ZIP; if that leaves no place or several, the label has no unit.
+If the address finds units and the name's place is not among them, the
+evidence conflicts: the label has no unit, and an untagged one is `other`
+(below). Without a name, the address must find units of one place.
 
 Units with the same jurisdiction, display name and 5-digit ZIP that also
-share a house number or P.O. box number are one place (one facility under
-several provider codes); units with no number are never merged, and units
-at one street address with different display names are not one place. A
+share a delivery line are one place (one facility under several provider
+codes): the same P.O. box number, or the same house number and street once
+spelling is normalised (case, punctuation, `S`/`South`, `St`/`Street`,
+`Hwy`/`Highway`, `First`/`1st`, a trailing `#1` and the like). Lines that
+can't be shown the same (`100 Main Street`, `100 Oak Lane`) are different
+places; units with no delivery line are never merged, and units at one
+street address with different display names are not one place. A
 label to one place stores its representative, the alphabetically first
 unit name. Stored labels are matched again only when read again: the daily
 run relists 35 days, and `--since YYYY-MM-DD` relists everything back to
@@ -260,9 +265,13 @@ A label's EasyPost `reference` carries a tag from the shipping apps:
 `ibp1:req:TEX-00012345-2`), `ibp1:unit:<jurisdiction>:<unit name>` (a bulk
 box, e.g. `ibp1:unit:Texas:BETO`) or `ibp1:manual` (a manually addressed
 label). Anything else, including the empty reference on older labels, is no
-tag. A label without a tag is `individual` if its addressee line ends in an
-inmate number, `bulk` if it is addressed to the unit mailroom line (Settings),
-and `other` otherwise.
+tag. A label without a tag is `other` if its destination evidence
+conflicts (above), since its addressee's number can't be trusted to be an
+inmate at either place; else `individual` if its addressee line ends in an
+inmate number, `bulk` if it is addressed to the unit mailroom line
+(Settings), and `other` otherwise. Only `individual` labels get
+`inmate_number` links. A later listing with clean evidence restores the
+kind.
 
 Links (`ibp/shipment_links.py`), none for a label refunded (or with a refund
 requested) that USPS never scanned, since it was never mailed:

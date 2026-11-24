@@ -222,3 +222,66 @@ def test_downgrade_with_foreign_keys_on_keeps_links(tmp_path: Path):
     finally:
         sqlalchemy.event.remove(sqlalchemy.engine.Engine, "connect", foreign_keys_on)
         engine.dispose()
+
+
+def interrupted_downgrade(tmp_path: Path) -> str:
+    """A database at head whose downgrade dropped unit_recorded and stopped
+    before dropping unit_name or recording the revision."""
+    url = f"sqlite:///{tmp_path / 'halfdown.db'}"
+    command.upgrade(db_bootstrap.build_alembic_config(url), "head")
+    engine = sqlalchemy.create_engine(url)
+    try:
+        insert_filled_request(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                sqlalchemy.text("ALTER TABLE requests DROP COLUMN unit_recorded")
+            )
+    finally:
+        engine.dispose()
+    return url
+
+
+def test_bootstrap_restores_a_column_an_interrupted_downgrade_dropped(
+    tmp_path: Path, monkeypatch
+):
+    """At head with unit_recorded missing, the next start restores it
+    instead of reporting the schema as fine."""
+    url = interrupted_downgrade(tmp_path)
+    bootstrap(monkeypatch, url)
+    assert COLUMNS <= columns(url)
+    engine = sqlalchemy.create_engine(url)
+    try:
+        assert rows(engine, RECORDED) == [(None, 0)]
+        assert scalar(engine, "SELECT version_num FROM alembic_version") == (
+            head_revision()
+        )
+    finally:
+        engine.dispose()
+
+
+def test_interrupted_downgrade_can_be_run_again(tmp_path: Path):
+    """A downgrade run again after it dropped one column drops the other."""
+    url = interrupted_downgrade(tmp_path)
+    command.downgrade(
+        db_bootstrap.build_alembic_config(url), db_bootstrap.PRE_REQUEST_UNIT_REVISION
+    )
+    assert not COLUMNS & columns(url)
+
+
+def test_bootstrap_refuses_a_head_schema_missing_another_column(
+    tmp_path: Path, monkeypatch
+):
+    """A column missing at head that no revision can restore fails the
+    bootstrap loudly."""
+    url = f"sqlite:///{tmp_path / 'broken.db'}"
+    command.upgrade(db_bootstrap.build_alembic_config(url), "head")
+    engine = sqlalchemy.create_engine(url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                sqlalchemy.text("ALTER TABLE inmates DROP COLUMN pronouns_set_by")
+            )
+    finally:
+        engine.dispose()
+    with pytest.raises(RuntimeError, match="lacks columns: inmates.pronouns_set_by"):
+        bootstrap(monkeypatch, url)
