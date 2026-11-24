@@ -59,8 +59,8 @@ from .label_reading import (  # pylint: disable=unused-import
     normalize,
     parse_events,
     parse_reference,
-    as_text,
     read_label,
+    tracker_status,
 )
 from .shipment_links import StaleLinks, never_mailed, rebuild_links
 from .unit_matching import UnitMatcher
@@ -77,6 +77,8 @@ RESUME_OVERLAP = datetime.timedelta(days=1)
 DELIVERED_SETTLED = datetime.timedelta(days=60)
 MAX_POLL_AGE = datetime.timedelta(days=90)
 PAGE_SIZE = 100
+# Pages of one listing window at most (a window is at most a month).
+MAX_PAGES = 500
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # Tracker statuses that mean the label's trip is over and came back.
 RETURNED = frozenset({"return_to_sender"})
@@ -145,9 +147,11 @@ def list_window(
 
     The end is pushed a second later so a label bought on a boundary second
     is listed by one window or both (the caller keys on the shipment id).
-    A page without a ``shipments`` list or a boolean ``has_more``, or whose
-    last shipment has no id of EasyPost's shape to page on, raises
-    ``ApiError``.
+    Each page must have a ``shipments`` list and a boolean ``has_more``. A
+    page saying more follow must have shipments, its last with an id of
+    EasyPost's shape other than the previous page's last, and a window may
+    have at most ``MAX_PAGES`` pages; anything else raises ``ApiError``
+    rather than ending (or never ending) the listing as if complete.
     """
     params: dict[str, Any] = {
         "page_size": PAGE_SIZE,
@@ -157,21 +161,23 @@ def list_window(
             TIMESTAMP_FORMAT
         ),
     }
-    while True:
+    for _ in range(MAX_PAGES):
         data = client.get("shipments", params)
-        batch, has_more = data.get("shipments"), data.get("has_more", False)
-        # A page without its list, or with has_more not a boolean, would
-        # otherwise end the listing early as if it were complete.
+        batch, has_more = data.get("shipments"), data.get("has_more")
         if not isinstance(batch, list) or not isinstance(has_more, bool):
             raise ApiError("GET shipments: page not of EasyPost's shape")
-        if batch:
-            yield batch
-        if not batch or not has_more:
+        if not has_more:
+            if batch:
+                yield batch
             return
-        last = batch[-1].get("id") if isinstance(batch[-1], dict) else None
+        last = batch[-1].get("id") if batch and isinstance(batch[-1], dict) else None
         if not isinstance(last, str) or not SHIPMENT_ID.fullmatch(last):
-            raise ApiError("GET shipments: page not of EasyPost's shape")
+            raise ApiError("GET shipments: page says more follow but can't be paged on")
+        if last == params.get("before_id"):
+            raise ApiError("GET shipments: paging made no progress")
+        yield batch
         params["before_id"] = last
+    raise ApiError(f"GET shipments: more than {MAX_PAGES} pages in a window")
 
 
 # --- storing -----------------------------------------------------------------
@@ -216,13 +222,20 @@ def add_events(shipment: models.Shipment, events: Iterable[EventValues]) -> int:
     return added
 
 
+# Columns a later answer without a value doesn't clear: the tracker (and
+# its status, the evidence a box was scanned) and the refund status.
+KEPT_WHEN_MISSING = frozenset({"tracker_id", "tracker_status", "refund_status"})
+
+
 def store_label(
     session: Session, label: Label, now: datetime.datetime, summary: Summary
 ) -> None:
     """Insert or update a label and add its new events.
 
-    ``synced_at`` is set only when the sync changes the row or adds an
-    event, so an identical run writes nothing.
+    Stored evidence never goes backwards: a value the listing leaves out
+    (``KEPT_WHEN_MISSING``) doesn't clear one already stored, and events are
+    only ever added. ``synced_at`` is set only when the sync changes the
+    row or adds an event, so an identical run writes nothing.
     """
     shipment = session.scalar(
         sa.select(models.Shipment)
@@ -238,6 +251,8 @@ def store_label(
     else:
         changed = False
         for name, value in columns.items():
+            if value is None and name in KEPT_WHEN_MISSING:
+                continue
             if getattr(shipment, name) != value:
                 setattr(shipment, name, value)
                 changed = True
@@ -254,9 +269,18 @@ def apply_tracker(
     now: datetime.datetime,
     summary: Summary,
 ) -> None:
-    """Update a stored label from its tracker, fetched on its own; raise
-    ``Malformed``, changing nothing, for a tracker not of EasyPost's shape."""
-    status = as_text(tracker.get("status"), "tracker status")
+    """Update a stored label from its tracker, fetched on its own.
+
+    The answer must be the tracker asked for (its ``id``) with one of
+    EasyPost's statuses; anything else raises ``Malformed`` and changes
+    nothing, so an empty or partial answer can't clear the stored status
+    (a box's evidence of being scanned). Events are only ever added.
+    """
+    if tracker.get("id") != shipment.tracker_id:
+        raise Malformed("tracker answer is not the tracker asked for")
+    status = tracker_status(tracker.get("status"))
+    if status is None:
+        raise Malformed("tracker answer has no status")
     events = parse_events(tracker)
     changed = status != shipment.tracker_status
     shipment.tracker_status = status
@@ -469,9 +493,10 @@ def run(
     the last ``WINDOW`` (see ``listing_start``), then fetches by id every
     stored label bought since then that the listing missed
     (``fetch_unlisted``): a re-evaluation of every label's unit. In such a
-    run anything that fails, a tracker poll included, raises before the
-    links are rebuilt, so links are only ever built from a complete
-    re-evaluation.
+    run anything that fails raises before the links are rebuilt (a listing
+    page or label that can't be read or stored, a label skipped as
+    malformed, a stored label not covered by id, a tracker poll), so links
+    are only ever built from a complete re-evaluation.
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -481,6 +506,8 @@ def run(
     if since is not None:
         fetch_unlisted(client, sessions, since, listed, now, summary)
     poll_unfinished(client, sessions, listed, now, summary)
+    if since is not None and summary.skipped:
+        raise Incomplete(f"{summary.skipped} listed labels skipped")
     if since is not None and summary.poll_failures:
         raise Incomplete(f"{summary.poll_failures} trackers not fetched")
     summary.links = relink(sessions, now)

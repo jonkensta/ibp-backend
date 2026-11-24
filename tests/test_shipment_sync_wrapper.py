@@ -146,3 +146,35 @@ def test_service_treats_a_busy_run_as_success():
     """The timer's service doesn't fail when a manual run holds the lock."""
     unit = (SCRIPT.parent / "ibp-shipment-sync.service").read_text()
     assert "SuccessExitStatus=75" in unit
+
+
+def test_one_off_container_is_labelled():
+    """The sync's container carries a label a runbook can wait on."""
+    command = wrapper.build_command(Path("/home/x/key"), [])
+    assert command[command.index("--label") + 1] == "ibp.job=shipment-sync"
+    assert command.index("--label") < command.index("ibp-backend")
+
+
+@pytest.mark.parametrize(
+    "readme", ["deploy/pi/README.md", "scripts/shipment-sync/README.md"]
+)
+def test_runbook_waits_for_activating_runs_and_installs_the_wrapper_first(readme):
+    """The upgrade runbooks wait for a run that is still activating and for
+    any one-off sync container, and install the new wrapper and service
+    before the backfill, which comes before starting the timer."""
+    text = (Path(__file__).resolve().parent.parent / readme).read_text()
+    steps = [
+        "sudo systemctl stop ibp-shipment-sync.timer",
+        'ActiveState --value ibp-shipment-sync.service)" = activating',
+        "--filter label=com.docker.compose.oneoff=True",
+        "install -D -m755 ibp-shipment-sync ~/.local/bin/ibp-shipment-sync",
+        "sudo systemctl daemon-reload",
+        "--since 2025-11-01",
+        "sudo systemctl start ibp-shipment-sync.timer",
+    ]
+    positions = [
+        text.find(step, text.find("sudo systemctl stop ibp-shipment-sync.timer"))
+        for step in steps
+    ]
+    assert -1 not in positions, dict(zip(steps, positions))
+    assert positions == sorted(positions)

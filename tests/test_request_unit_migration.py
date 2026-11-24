@@ -285,3 +285,147 @@ def test_bootstrap_refuses_a_head_schema_missing_another_column(
         engine.dispose()
     with pytest.raises(RuntimeError, match="lacks columns: inmates.pronouns_set_by"):
         bootstrap(monkeypatch, url)
+
+
+def interrupt_on(statement_start: str):
+    """A listener failing the first statement starting with
+    ``statement_start``, as if the process died there."""
+
+    def fail(conn, cursor, statement, *args):  # pylint: disable=unused-argument
+        if statement.startswith(statement_start):
+            raise KeyboardInterrupt("interrupted")
+
+    return fail
+
+
+def test_interrupted_downgrade_changes_nothing(tmp_path: Path):
+    """A downgrade stopped between dropping its two columns leaves both
+    columns and the revision as they were: one atomic step."""
+    url = f"sqlite:///{tmp_path / 'atomic.db'}"
+    config = db_bootstrap.build_alembic_config(url)
+    command.upgrade(config, "head")
+    engine = sqlalchemy.create_engine(url)
+    listener = interrupt_on("ALTER TABLE requests DROP COLUMN unit_name")
+    sqlalchemy.event.listen(sqlalchemy.engine.Engine, "before_cursor_execute", listener)
+    try:
+        insert_filled_request(engine)
+        with pytest.raises(KeyboardInterrupt):
+            command.downgrade(config, db_bootstrap.PRE_REQUEST_UNIT_REVISION)
+    finally:
+        sqlalchemy.event.remove(
+            sqlalchemy.engine.Engine, "before_cursor_execute", listener
+        )
+    try:
+        assert COLUMNS <= columns(url)
+        assert scalar(engine, "SELECT version_num FROM alembic_version") == (
+            head_revision()
+        )
+    finally:
+        engine.dispose()
+
+
+def test_interrupted_upgrade_changes_nothing(tmp_path: Path):
+    """An upgrade stopped between adding its two columns leaves neither."""
+    url = f"sqlite:///{tmp_path / 'atomicup.db'}"
+    config = db_bootstrap.build_alembic_config(url)
+    command.upgrade(config, db_bootstrap.PRE_REQUEST_UNIT_REVISION)
+    listener = interrupt_on("ALTER TABLE requests ADD COLUMN unit_recorded")
+    sqlalchemy.event.listen(sqlalchemy.engine.Engine, "before_cursor_execute", listener)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            command.upgrade(config, "head")
+    finally:
+        sqlalchemy.event.remove(
+            sqlalchemy.engine.Engine, "before_cursor_execute", listener
+        )
+    assert not COLUMNS & columns(url)
+    engine = sqlalchemy.create_engine(url)
+    try:
+        assert scalar(engine, "SELECT version_num FROM alembic_version") == (
+            db_bootstrap.PRE_REQUEST_UNIT_REVISION
+        )
+    finally:
+        engine.dispose()
+
+
+def half_state(tmp_path: Path, recorded_unit, drop: str) -> str:
+    """A database at head with one request that recorded ``recorded_unit``
+    (None: an unknown unit), then ``drop`` dropped as a half-run downgrade
+    once could."""
+    url = f"sqlite:///{tmp_path / 'half.db'}"
+    command.upgrade(db_bootstrap.build_alembic_config(url), "head")
+    engine = sqlalchemy.create_engine(url)
+    try:
+        insert_filled_request(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                sqlalchemy.text(
+                    "UPDATE requests SET unit_name = :unit, unit_recorded = 1"
+                ),
+                {"unit": recorded_unit},
+            )
+            connection.execute(
+                sqlalchemy.text(f"ALTER TABLE requests DROP COLUMN {drop}")  # nosec
+            )
+    finally:
+        engine.dispose()
+    return url
+
+
+def test_restored_unit_recorded_keeps_the_recorded_units(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """With unit_recorded lost and unit_name kept, a request that stored a
+    unit is restored as recorded (so it keeps linking to that unit, not the
+    inmate's current one), and the unrecoverable rest is warned about."""
+    url = half_state(tmp_path, "ALPHA", "unit_recorded")
+    bootstrap(monkeypatch, url)
+    engine = sqlalchemy.create_engine(url)
+    try:
+        assert rows(engine, RECORDED) == [("ALPHA", 1)]
+    finally:
+        engine.dispose()
+    # alembic's logging (alembic.ini) writes to stderr.
+    warning = capsys.readouterr().err
+    assert "requests filled while their inmate's unit was unknown" in warning
+
+
+def test_restored_unit_recorded_cannot_recover_an_unknown_unit(
+    tmp_path: Path, monkeypatch
+):
+    """A request that recorded an unknown unit can't be told from an older
+    one once unit_recorded is gone: it is restored as not recorded."""
+    url = half_state(tmp_path, None, "unit_recorded")
+    bootstrap(monkeypatch, url)
+    engine = sqlalchemy.create_engine(url)
+    try:
+        assert rows(engine, RECORDED) == [(None, 0)]
+    finally:
+        engine.dispose()
+
+
+def test_lost_unit_names_refuse_startup(tmp_path: Path, monkeypatch):
+    """With unit_name lost while requests recorded units, startup fails
+    rather than link them by the inmate's current unit."""
+    url = half_state(tmp_path, "ALPHA", "unit_name")
+    with pytest.raises(RuntimeError, match="1 requests recorded a unit at fill"):
+        bootstrap(monkeypatch, url)
+    assert "requests.unit_name" not in columns(url)
+
+
+def test_lost_unit_name_with_nothing_recorded_is_restored(tmp_path: Path, monkeypatch):
+    """With unit_name lost but no request having recorded a unit, nothing is
+    lost: the column is restored."""
+    url = f"sqlite:///{tmp_path / 'nothing.db'}"
+    command.upgrade(db_bootstrap.build_alembic_config(url), "head")
+    engine = sqlalchemy.create_engine(url)
+    try:
+        insert_filled_request(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                sqlalchemy.text("ALTER TABLE requests DROP COLUMN unit_name")
+            )
+    finally:
+        engine.dispose()
+    bootstrap(monkeypatch, url)
+    assert COLUMNS <= columns(url)

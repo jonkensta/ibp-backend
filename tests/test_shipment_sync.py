@@ -35,6 +35,7 @@ from ibp.shipment_sync import (
 )
 
 from .easypost_fake import NAME, STREET, FakeEasyPost, event, shipment
+from .test_unit_places import RESPELLED
 from .shipment_helpers import add_inmate, add_request, add_shipment, add_unit, utc
 
 NOW = utc("2026-03-10T12:00")
@@ -1103,7 +1104,9 @@ def test_malformed_tracker_is_a_poll_failure_and_never_logged(sessions, logs):
         session.commit()
         tracker_id = label.tracker_id
     fake = FakeEasyPost(
-        trackers={tracker_id: {"status": [SENTINEL], "tracking_details": []}}
+        trackers={
+            tracker_id: {"id": tracker_id, "status": [SENTINEL], "tracking_details": []}
+        }
     )
     with logs.at_level(logging.INFO):
         summary = sync(fake, sessions)
@@ -1134,7 +1137,8 @@ def test_page_not_of_easyposts_shape_is_an_api_error(page):
     )
     with pytest.raises(shipment_sync.ApiError) as raised:
         list(shipment_sync.list_window(client, ago(2), NOW))
-    assert str(raised.value) == "GET shipments: page not of EasyPost's shape"
+    assert str(raised.value).startswith("GET shipments: ")
+    assert "Sentinel" not in str(raised.value)
 
 
 def test_stored_id_of_another_shape_is_not_logged(sessions, logs):
@@ -1604,7 +1608,9 @@ def test_odd_error_code_does_not_stop_the_polling(sessions):
                 io.BytesIO(b'{"error": {"code": []}}'),
             )
         if request.full_url.endswith(second_tracker):
-            return io.BytesIO(json.dumps({"status": "delivered"}).encode())
+            return io.BytesIO(
+                json.dumps({"id": second_tracker, "status": "delivered"}).encode()
+            )
         return io.BytesIO(b'{"shipments": [], "has_more": false}')
 
     client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
@@ -1789,3 +1795,282 @@ def test_since_run_with_a_failed_tracker_poll_rebuilds_no_links(sessions, logs):
     assert run_since(sessions, logs, FakeEasyPost(), since=since) == 1
     assert "shipment sync failed: 1 trackers not fetched" in logs.text
     assert_incomplete(sessions, logs, since=since)
+
+
+# --- street lines as address evidence ------------------------------------------
+
+
+@pytest.fixture
+def street_matcher(api_db):
+    """River Unit at 100 Main Street; FM units at 100 FM 1 in another ZIP,
+    one alone and two sharing the number (invented)."""
+    with api_db() as session:
+        return UnitMatcher(
+            [
+                add_unit(
+                    session,
+                    "RIVER",
+                    street1="River Unit",
+                    street2="100 Main Street",
+                    zipcode="77000",
+                ),
+                add_unit(
+                    session,
+                    "LONE",
+                    street1="Lone Unit",
+                    street2="100 FM 1",
+                    zipcode="77100",
+                ),
+                add_unit(
+                    session,
+                    "PAIR A",
+                    street1="Pair A Unit",
+                    street2="200 FM 2",
+                    zipcode="77200",
+                ),
+                add_unit(
+                    session,
+                    "PAIR B",
+                    street1="Pair B Unit",
+                    street2="200 FM 2 Annex",
+                    zipcode="77200",
+                ),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "address, destination",
+    [
+        # The same number on another street contradicts the name.
+        (
+            {"company": "RIVER UNIT", "street1": "100 OAK LN", "zip": "77000"},
+            (None, True),
+        ),
+        # Without a name, another street at the number is no evidence.
+        ({"street1": "100 OAK LN", "zip": "77000"}, (None, False)),
+        # The same street, in USPS spelling, confirms it.
+        (
+            {"street1": "100 MAIN ST", "street2": "RIVER UNIT", "zip": "77000"},
+            (("Texas", "RIVER"), False),
+        ),
+        ({"street1": "100 MAIN ST", "zip": "77000"}, (("Texas", "RIVER"), False)),
+        # A name with no street line stands.
+        ({"company": "RIVER UNIT", "zip": "77000"}, (("Texas", "RIVER"), False)),
+        # Can't tell, and the number is the unit's alone: the name stands.
+        (
+            {"company": "LONE UNIT", "street1": "100 FM 1 SPUR", "zip": "77100"},
+            (("Texas", "LONE"), False),
+        ),
+        ({"street1": "100 FM 1 SPUR", "zip": "77100"}, (("Texas", "LONE"), False)),
+        # Can't tell, and the number is two places': conflict.
+        (
+            {"company": "PAIR A UNIT", "street1": "200 FM 2 SPUR", "zip": "77200"},
+            (None, True),
+        ),
+        ({"street1": "200 FM 2 SPUR", "zip": "77200"}, (None, False)),
+    ],
+)
+def test_street_line_confirms_or_contradicts_the_name(
+    street_matcher, address, destination
+):
+    """The label's street line is compared with the named unit's at the
+    same number, not just the number."""
+    assert tuple(street_matcher.locate(address)) == destination
+
+
+@pytest.mark.parametrize("ours, theirs", RESPELLED)
+@pytest.mark.parametrize("street_line", ["street2", "street1"])
+def test_real_shapes_still_resolve(api_db, ours, theirs, street_line):
+    """Units keyed by a short code with the display name in street1 and the
+    street in street2 (or the street alone in street1), and labels in the
+    verified shape (USPS street in street1, name in street2) and the
+    unverified one (name in street1, our street in street2), all resolve."""
+    with api_db() as session:
+        if street_line == "street2":
+            row = add_unit(
+                session, "SHORT", street1="Sample Unit", street2=ours, zipcode="77300"
+            )
+        else:
+            row = add_unit(session, "SHORT", street1=ours, zipcode="77300")
+        decoy = add_unit(
+            session,
+            "DECOY",
+            street1="Decoy Unit",
+            street2="5 Other Rd",
+            zipcode="77300",
+        )
+        matcher = UnitMatcher([row, decoy])
+    name = "SAMPLE UNIT" if street_line == "street2" else "SHORT"
+    verified = {"street1": theirs, "street2": name, "zip": "77300-1234"}
+    unverified = {"street1": name, "street2": ours, "zip": "77300"}
+    street_only = {"street1": theirs, "zip": "77300"}
+    for address in (verified, unverified, street_only):
+        assert tuple(matcher.locate(address)) == (("Texas", "SHORT"), False), address
+
+
+def test_since_run_that_skipped_a_label_rebuilds_no_links(sessions, logs):
+    """A malformed listed label in a --since run makes it incomplete before
+    the links are rebuilt."""
+    seed_stale_link(sessions)
+    with sessions() as session:
+        stored_id = session.scalars(sa.select(models.Shipment.easypost_id)).one()
+    good = {**shipment(1, utc("2026-01-05T15:00")), "id": stored_id}
+    fake = FakeEasyPost(
+        [good, shipment(2, utc("2026-01-06T15:00"), tracker=[SENTINEL])]
+    )
+    assert run_since(sessions, logs, fake) == 1
+    assert "shipment sync failed: 1 listed labels skipped" in logs.text
+    assert_incomplete(sessions, logs)
+
+
+def test_since_run_with_a_label_it_cannot_store_rebuilds_no_links(
+    sessions, logs, monkeypatch
+):
+    """A label that reads but can't be stored fails a --since run before
+    the links are rebuilt."""
+    seed_stale_link(sessions)
+
+    def broken(*args, **kwargs):
+        raise sa.exc.OperationalError("INSERT", {}, sqlite_error("SELECT * FROM nope"))
+
+    monkeypatch.setattr(shipment_sync, "store_label", broken)
+    fake = FakeEasyPost([shipment(1, utc("2026-01-06T15:00"))])
+    assert run_since(sessions, logs, fake) == 1
+    assert "shipment sync failed: OperationalError: SQLITE_ERROR" in logs.text
+    assert_incomplete(sessions, logs)
+
+
+# --- a tracker answer never takes evidence away --------------------------------
+
+
+def scanned_old_box(sessions) -> tuple[str, str]:
+    """A box bought 20 days before NOW whose only scan evidence is its
+    stored in_transit status, linked to a request; its (label, tracker) ids."""
+    with sessions() as session:
+        add_inmate(session, 40000001, "ALPHA")
+        add_request(session, 40000001, 0, ago(25).date().isoformat())
+        box = add_shipment(
+            session,
+            ago(20).strftime("%Y-%m-%dT%H:%M"),
+            kind="bulk",
+            unit_jurisdiction="Texas",
+            unit_name="ALPHA",
+            tracker_status="in_transit",
+            events=((ago(20).strftime("%Y-%m-%dT%H:%M"), "pre_transit"),),
+        )
+        session.commit()
+        return box.easypost_id, box.tracker_id
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        lambda tracker_id: {},
+        lambda tracker_id: {"id": tracker_id},
+        lambda tracker_id: {"id": tracker_id, "status": None},
+        lambda tracker_id: {"id": tracker_id, "status": "Sentinel"},
+        lambda tracker_id: {"id": "trk_99999999", "status": "unknown"},
+    ],
+)
+def test_unusable_tracker_answer_changes_nothing(sessions, answer):
+    """An empty or wrong tracker answer is a failed poll: the stored status
+    stays, and so does the bulk link it is the evidence for."""
+    easypost_id, tracker_id = scanned_old_box(sessions)
+    assert shipment_sync.relink(sessions, NOW) == 1
+    fake = FakeEasyPost(trackers={tracker_id: answer(tracker_id)})
+    summary = sync(fake, sessions)
+    assert (summary.polled, summary.poll_failures) == (0, 1)
+    row = stored(sessions, easypost_id)
+    assert row.tracker_status == "in_transit"
+    assert len(row.events) == 1
+    assert summary.links == 1
+
+
+def test_listing_without_tracker_status_keeps_the_stored_one(sessions):
+    """A listed label whose tracker gives no status (or no tracker) keeps
+    the status and tracker stored for it, and every event."""
+    first = shipment(
+        1, ago(3), [event(ago(3), "pre_transit"), event(ago(2), "in_transit")]
+    )
+    sync(FakeEasyPost([first]), sessions)
+    bare = shipment(1, ago(3), [], tracker_status=None)
+    bare["tracker"] = {"id": "trk_00000001", "status": None, "tracking_details": []}
+    sync(FakeEasyPost([bare]), sessions)
+    row = stored(sessions, "shp_00000001")
+    assert (row.tracker_id, row.tracker_status) == ("trk_00000001", "in_transit")
+    assert len(row.events) == 2
+    no_tracker = {**shipment(1, ago(3)), "tracker": None}
+    sync(FakeEasyPost([no_tracker]), sessions)
+    row = stored(sessions, "shp_00000001")
+    assert (row.tracker_id, row.tracker_status) == ("trk_00000001", "in_transit")
+    assert len(row.events) == 2
+
+
+def test_listed_tracker_status_must_be_easyposts(sessions):
+    """A listed label whose tracker status isn't one of EasyPost's is
+    skipped, not stored."""
+    odd = shipment(1, ago(3), tracker_status="Sentinel")
+    summary = sync(FakeEasyPost([odd]), sessions)
+    assert (summary.seen, summary.skipped) == (0, 1)
+
+
+# --- a listing ends only when EasyPost says so ---------------------------------
+
+
+def paged(pages):
+    """An opener answering successive listing requests with ``pages``."""
+    answers = list(pages)
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        return io.BytesIO(json.dumps(answers.pop(0)).encode())
+
+    return urlopen
+
+
+@pytest.mark.parametrize(
+    "pages, message",
+    [
+        # has_more missing on a page with shipments.
+        ([{"shipments": [shipment(1, ago(1))]}], "page not of EasyPost's shape"),
+        # An empty page that says more follow.
+        ([{"shipments": [], "has_more": True}], "can't be paged on"),
+        # A continuation whose last shipment repeats the previous page's.
+        (
+            [
+                {"shipments": [shipment(2, ago(1))], "has_more": True},
+                {"shipments": [shipment(2, ago(1))], "has_more": True},
+            ],
+            "paging made no progress",
+        ),
+    ],
+)
+def test_listing_that_cannot_be_trusted_to_be_complete_fails(pages, message):
+    """A page that would end the listing early, or never end it, is an
+    ApiError, not the end."""
+    client = EasyPost(KEY, urlopen=paged(pages), sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError, match=message):
+        list(shipment_sync.list_window(client, ago(2), NOW))
+
+
+def test_listing_has_a_page_limit(monkeypatch):
+    """A window that keeps saying more follow fails after MAX_PAGES."""
+    monkeypatch.setattr(shipment_sync, "MAX_PAGES", 3)
+    pages = [
+        {"shipments": [shipment(n, ago(1))], "has_more": True} for n in range(1, 5)
+    ]
+    client = EasyPost(KEY, urlopen=paged(pages), sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError, match="more than 3 pages in a window"):
+        list(shipment_sync.list_window(client, ago(2), NOW))
+
+
+def test_truncated_backfill_fails(sessions, logs):
+    """A --since backfill whose page drops has_more exits 1 without
+    rebuilding links instead of ending early."""
+    seed_stale_link(sessions)
+    pages = [{"shipments": [shipment(1, ago(1))]}] + [
+        {"shipments": [], "has_more": False}
+    ] * 50
+    assert run_since(sessions, logs, paged(pages)) == 1
+    assert "page not of EasyPost's shape" in logs.text
+    assert_incomplete(sessions, logs)

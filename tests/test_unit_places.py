@@ -161,3 +161,80 @@ def test_same_number_on_another_street_is_another_place(first, second):
         ]
     )
     assert places.one_place([("Texas", "ONE"), ("Texas", "TWO")]) is None
+
+
+@pytest.mark.parametrize(
+    "line, normalised",
+    [
+        ("100 Unit Road", ("street", "100 UNIT RD")),
+        ("100 Building Lane", ("street", "100 BUILDING LN")),
+        ("100 Suite Street", ("street", "100 SUITE ST")),
+        ("100 Main St Apt 2B", ("street", "100 MAIN ST")),
+        ("100 Main St Ste 100", ("street", "100 MAIN ST")),
+        ("100 Main St Bldg C", ("street", "100 MAIN ST")),
+        ("100 Main St Unit 4", ("street", "100 MAIN ST")),
+        ("2665 Prison Road #1", ("street", "2665 PRISON RD")),
+        ("100 Unit 4", ("street", "100 UNIT 4")),
+        ("100", None),
+        ("100 #4", None),
+        ("100 2nd St", ("street", "100 2ND ST")),
+        ("  100  ", None),
+    ],
+)
+def test_delivery_line_keeps_the_street(line, normalised):
+    """A marker word is stripped only after a whole street and before a
+    designator; a bare house number is no delivery line."""
+    from ibp.unit_places import delivery_line  # pylint: disable=import-outside-toplevel
+
+    assert delivery_line(line) == normalised
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [("100 Unit Road", "100 Building Lane"), ("100", "100"), ("100 Apt", "100 Ste")],
+)
+def test_streets_named_like_markers_are_different_places(first, second):
+    """Streets named Unit Road and Building Lane, or lines that are only a
+    number, never make one place."""
+    places = Places(
+        [
+            unit("ONE", "River Valley Unit", first),
+            unit("TWO", "River Valley Unit", second),
+        ]
+    )
+    assert places.one_place([("Texas", "ONE"), ("Texas", "TWO")]) is None
+
+
+# The real pairs of our street line and USPS's spelling of it (made-up units
+# use the same shapes).
+RESPELLED = [
+    ("264 FM 3478", "264 FM 3478 RD"),
+    ("1098 S. Highway 2037", "1098 S HIGHWAY 2037"),
+    ("1401 State School Road", "1401 STATE SCHOOL RD"),
+    ("3872 FM 350 South", "3872 FM 350 S"),
+    ("810 FM 2821", "810 FM 2821 RD W"),
+    ("1916 North Hwy. 36 Bypass", "1916 N HIGHWAY 36 BYP"),
+]
+
+
+@pytest.mark.parametrize(
+    "ours, theirs, same",
+    [
+        *((ours, theirs, True) for ours, theirs in RESPELLED),
+        ("100 Main Street", "100 Oak Lane", False),
+        ("100 Main St", "100 Main Ave", False),
+        ("100 N Main St", "100 S Main St", False),
+        ("100 Main St", "101 Main St", False),
+        ("100 Main St N", "100 MAIN ST S", False),
+        ("100 FM 1", "100 FM 1 SPUR", None),
+        ("100 Main St", "PO Box 100", None),
+        ("100 Main St", None, None),
+    ],
+)
+def test_same_street(ours, theirs, same):
+    """USPS's respelling is the same street; another street, number,
+    directional or suffix is not; more street words can't be told."""
+    from ibp.unit_places import same_street  # pylint: disable=import-outside-toplevel
+
+    assert same_street(ours, theirs) is same
+    assert same_street(theirs, ours) is same
