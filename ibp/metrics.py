@@ -2,7 +2,7 @@
 
 # pylint: disable=not-callable
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Optional
 
 from sqlalchemy import String, and_, case, func
