@@ -17,11 +17,13 @@ each named by the link's ``basis``:
 - ``unit_session``: a session is every bulk box to one unit on one local
   date that USPS has scanned, or that was bought less than ``FRESH_BOX``
   (7 days) ago and so may not have its first scan yet. A Filled request
-  whose inmate's unit (as it is now) ships by box or tub links to every box
-  of the first session to that unit at least ``BULK_LEAD`` (a day) after the
-  request's processed date, so a request processed on a session's date
-  waits for the next one, if that session is within ``BULK_LINK_WINDOW`` of
-  it.
+  with no label of its own (no ``reference`` or ``inmate_number`` link)
+  links to every box of the first session to its inmate's unit (as it is
+  now) at least ``BULK_LEAD`` (a day) after the request's processed date,
+  so a request processed on a session's date waits for the next one, if
+  that session is within ``BULK_LINK_WINDOW`` of it. The unit's shipping
+  method is not consulted: boxes do go to units marked Individual, and a
+  package with its own label is already linked to it.
 
 A label that was never mailed (``never_mailed``) gets no links. Nothing
 here works out delivery: the stored events are left for that.
@@ -47,8 +49,6 @@ BULK_LINK_WINDOW = datetime.timedelta(days=28)
 # least: a request processed on a session's date waits for the next one. A
 # one-day lead fit a year of box weights better than a same-day rule.
 BULK_LEAD = datetime.timedelta(days=1)
-# Unit shipping methods that send requests in bulk boxes (not Individual).
-BOX_METHODS = frozenset({"Box", "Federal Tub"})
 # Statuses that are no evidence USPS has handled a package.
 UNSCANNED = frozenset({"unknown", "pre_transit", "error", "cancelled"})
 # An unscanned bulk box bought this recently still counts toward a session.
@@ -207,14 +207,17 @@ def _unit_session_links(
     links: dict[LinkKey, str],
     now: datetime.datetime,
 ) -> None:
+    # Requests already linked to a label of their own did not ride in a box.
+    labelled = {key[:3] for key in links}
     for unit, by_date in sorted(_bulk_sessions(shipments, now).items()):
-        row = session.get(models.Unit, unit)
-        if row is None or row.shipping_method not in BOX_METHODS:
+        if session.get(models.Unit, unit) is None:
             continue
         dates = sorted(by_date)
         for jurisdiction, inmate_id, index, processed in _unit_requests(
             session, unit, dates[0], dates[-1]
         ):
+            if (jurisdiction, inmate_id, index) in labelled:
+                continue
             position = bisect.bisect_left(dates, processed + BULK_LEAD)
             if position == len(dates) or dates[position] - processed > BULK_LINK_WINDOW:
                 continue

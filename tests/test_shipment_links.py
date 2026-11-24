@@ -256,13 +256,27 @@ def test_bulk_session_28_days_later_is_linked(session):
     }
 
 
-def test_unit_that_ships_individually_gets_no_bulk_links(session):
-    """Boxes to a unit whose shipping method is Individual link nothing."""
+def test_box_to_a_unit_marked_individual_still_links(session):
+    """Boxes do go to units whose shipping method is Individual."""
     seed_box_unit(session, method="Individual")
     add_request(session, 11111111, 0, "2026-03-01")
+    sent = box(session, "2026-03-05T15:00")
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", 11111111, 0, sent.easypost_id, "unit_session"),
+    }
+
+
+def test_request_with_its_own_label_gets_no_bulk_link(session):
+    """A request linked to an individual label didn't ride in a box."""
+    seed_box_unit(session)
+    add_request(session, NUMBER, 0, "2026-03-01")
+    own = individual(session, "2026-03-03T15:00")
     box(session, "2026-03-05T15:00")
     session.commit()
-    assert not rebuild(session)
+    assert rebuild(session) == {
+        ("Texas", NUMBER, 0, own.easypost_id, "inmate_number"),
+    }
 
 
 def test_unmailed_box_is_not_a_session(session):
