@@ -161,3 +161,45 @@ def test_same_number_on_another_street_is_another_place(first, second):
         ]
     )
     assert places.one_place([("Texas", "ONE"), ("Texas", "TWO")]) is None
+
+
+@pytest.mark.parametrize(
+    "line, normalised",
+    [
+        ("100 Unit Road", ("street", "100 UNIT RD")),
+        ("100 Building Lane", ("street", "100 BUILDING LN")),
+        ("100 Suite Street", ("street", "100 SUITE ST")),
+        ("100 Main St Apt 2B", ("street", "100 MAIN ST")),
+        ("100 Main St Ste 100", ("street", "100 MAIN ST")),
+        ("100 Main St Bldg C", ("street", "100 MAIN ST")),
+        ("100 Main St Unit 4", ("street", "100 MAIN ST")),
+        ("2665 Prison Road #1", ("street", "2665 PRISON RD")),
+        ("100 Unit 4", ("street", "100 UNIT 4")),
+        ("100", None),
+        ("100 #4", None),
+        ("100 2nd St", ("street", "100 2ND ST")),
+        ("  100  ", None),
+    ],
+)
+def test_delivery_line_keeps_the_street(line, normalised):
+    """A marker word is stripped only after a whole street and before a
+    designator; a bare house number is no delivery line."""
+    from ibp.unit_places import delivery_line  # pylint: disable=import-outside-toplevel
+
+    assert delivery_line(line) == normalised
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [("100 Unit Road", "100 Building Lane"), ("100", "100"), ("100 Apt", "100 Ste")],
+)
+def test_streets_named_like_markers_are_different_places(first, second):
+    """Streets named Unit Road and Building Lane, or lines that are only a
+    number, never make one place."""
+    places = Places(
+        [
+            unit("ONE", "River Valley Unit", first),
+            unit("TWO", "River Valley Unit", second),
+        ]
+    )
+    assert places.one_place([("Texas", "ONE"), ("Texas", "TWO")]) is None

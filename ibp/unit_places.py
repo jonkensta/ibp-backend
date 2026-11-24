@@ -260,28 +260,48 @@ _STREET_WORDS = {
     "NINTH": "9TH",
     "TENTH": "10TH",
 }
-# A unit marker ending a street line (``#1``, ``Unit B``, ``Ste 4``).
+# A secondary unit marker ending a street line: ``#`` or a marker word
+# followed by a designator (``#1``, ``Unit 4``, ``Apt 2B``, ``Ste 100``,
+# ``Bldg C``). A designator has a digit first, or is one letter, so a street
+# named with such a word (``Unit Road``, ``Building Lane``) is not one.
+_DESIGNATOR = r"(?:[0-9][A-Z0-9-]*|[A-Z])"
 _UNIT_MARKER = re.compile(
-    r"\s*(?:#\s*[A-Z0-9-]+|\b(?:UNIT|APT|STE|SUITE|BLDG|BUILDING)\.?\s*[A-Z0-9-]+)\s*$"
+    rf"(?:\s*#\s*{_DESIGNATOR}|\s+(?:UNIT|APT|STE|SUITE|BLDG|BUILDING)\.?\s+"
+    rf"{_DESIGNATOR})\s*$"
 )
+
+
+def street_tokens(line: Optional[str]) -> Optional[list[str]]:
+    """A street line's words in one spelling, house number first, or None
+    if it doesn't start with a house number followed by a street.
+
+    The line is uppercased and its punctuation dropped, a trailing unit
+    marker removed only when a street remains before it, and each word put
+    in one spelling (``_STREET_WORDS``). A line with no word but numbers
+    after its house number (``100``, ``100 #4``) is no street.
+    """
+    if leading_number(line) is None:
+        return None
+    text = (line or "").upper()
+    stripped = _UNIT_MARKER.sub("", text)
+    if len(words(stripped)) >= 2:
+        text = stripped
+    tokens = [_STREET_WORDS.get(token, token) for token in words(text)]
+    if not tokens[0].isdigit() or all(token.isdigit() for token in tokens[1:]):
+        return None  # no street word after the number
+    return tokens
 
 
 def delivery_line(line: Optional[str]) -> Optional[tuple[str, str]]:
     """A street line as compared between units: ``("box", number)`` for a
-    numbered P.O. box, ``("street", normalised text)`` for a line starting
-    with a house number, else None.
-
-    The street is uppercased, its punctuation dropped, a trailing unit
-    marker removed and each word put in one spelling (``_STREET_WORDS``).
+    numbered P.O. box, ``("street", normalised text)`` for a house number
+    and street (``street_tokens``), else None (never equal to anything).
     """
     box = po_box(line)
     if box:
         return ("box", box)
-    if leading_number(line) is None:
-        return None
-    street = _UNIT_MARKER.sub("", (line or "").upper())
-    tokens = [_STREET_WORDS.get(token, token) for token in words(street)]
-    return ("street", " ".join(tokens))
+    tokens = street_tokens(line)
+    return ("street", " ".join(tokens)) if tokens else None
 
 
 def delivery_lines(unit: models.Unit) -> set[tuple[str, str]]:
