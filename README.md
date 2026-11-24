@@ -257,6 +257,52 @@ requested) that USPS never scanned, since it was never mailed:
 `GET /requests/{code}/shipments` lists a request's linked labels with their
 tracking code, purchase time, kind, basis, tracker status and events.
 
+### Postmark to delivery
+
+`GET /metrics/delivery-latency` (`ibp/delivery_latency.py`) gives, for the
+Filled requests of each postmark month (`YYYY-MM`), how long they took to
+arrive. `method` is `all` (default), `individual` (links with basis
+`reference` or `inmate_number`) or `bulk` (`unit_session`); `date_range`
+(`6months`, `12months`, `all`) or `start_date` and `end_date` filter the
+postmark, as for `/metrics/requests`. The definitions:
+
+- A label is delivered on the local date (`[server] timezone`) of its
+  earliest `delivered` event, unless a `return_to_sender` event came at or
+  before it: then it is returned (that "delivery" is the box arriving back
+  with us), as is a label with a `return_to_sender` event and no delivery.
+- A request's delivery is over its linked labels (of the method) that were
+  delivered: `earliest` and `latest` are the first and last delivery dates,
+  equal for one label (a bulk request links to every box of its session).
+  With none delivered, it is returned if every label was, else not
+  delivered yet.
+- Latency is the delivery date minus `date_postmarked`, in days, for each
+  bound. A request with either bound under 0 or over 365 days (a bad
+  postmark) is left out of the statistics and counted as `excluded`.
+- Stages: handling (postmark to `date_processed`), waiting to ship
+  (processed to the local purchase date of the earliest linked label) and
+  transit (that purchase to delivery, per bound). They add up to the
+  latency.
+
+Each month has `filled` (every Filled request), `linked` (with a link of
+the method), `delivered` (in the statistics), `returned` and `excluded`;
+the rest of `linked` are still in the mail. Unlinked and undelivered
+requests are only counted, never taken as zero days. For the delivered
+ones, `earliest` and `latest` give the 25th percentile, median and 75th
+percentile of latency (linear interpolation) and the median transit, and
+`median_handling` and `median_waiting` the other stages; all are null when
+none was delivered. For example:
+
+```json
+{
+  "month": "2026-02",
+  "filled": 530, "linked": 431, "delivered": 412, "returned": 3, "excluded": 2,
+  "earliest": {"p25": 11.0, "median": 14.0, "p75": 18.0, "median_transit": 4.0},
+  "latest": {"p25": 12.0, "median": 15.0, "p75": 19.0, "median_transit": 5.0},
+  "median_handling": 7.0,
+  "median_waiting": 2.0
+}
+```
+
 ## Deployment
 
 Production runs on `ibp-server`, a Raspberry Pi 4B, as a Docker Compose
