@@ -150,24 +150,126 @@ def test_inmate_number_from_addressee(addressee, number):
     assert inmate_number(addressee) == number
 
 
-def test_unit_matching_by_tag_and_address(api_db):
-    """Tags match unit names in any case; addresses match on street and ZIP
-    (street2 breaks a tie, and a remaining tie is no match)."""
+def test_unit_matching_by_tag(api_db):
+    """Tags match unit names in any case, in the tag's jurisdiction only."""
     with api_db() as session:
         alpha = add_unit(session, "ALPHA", street1="1 Shared Rd", zipcode="77002")
-        beta = add_unit(
-            session, "BETA", street1="1 Shared Rd", street2="Bldg B", zipcode="77002"
-        )
-        gamma = add_unit(session, "GAMMA", street1="9 Twin Rd", zipcode="77003")
-        delta = add_unit(session, "DELTA", street1="9 Twin Rd", zipcode="77003")
-        matcher = UnitMatcher([alpha, beta, gamma, delta])
+        matcher = UnitMatcher([alpha])
     assert matcher.by_tag("Texas", "alpha") == ("Texas", "ALPHA")
     assert matcher.by_tag("Federal", "ALPHA") is None
-    shared = {"street1": "1 SHARED RD.", "zip": "77002-0001"}
-    assert matcher.by_address({**shared, "street2": "BLDG. B"}) == ("Texas", "BETA")
-    assert matcher.by_address(shared) == ("Texas", "ALPHA")
-    assert matcher.by_address({"street1": "9 Twin Rd", "zip": "77003"}) is None
-    assert matcher.by_address({"street1": "5 Nowhere", "zip": "77002"}) is None
+
+
+@pytest.fixture
+def matcher(api_db):
+    """Units shaped like the real table (invented names and addresses)."""
+    with api_db() as session:
+        units = [
+            # The name in street1 and the street in street2, as most rows are.
+            add_unit(
+                session,
+                "Example Unit",
+                street1="Example Unit",
+                street2="264 FM 3478",
+                zipcode="77320",
+            ),
+            add_unit(
+                session,
+                " Testy Q. O'Sample Unit",
+                street1="Testy Q. O'Sample Unit",
+                street2="1098 S. Highway 2037",
+                zipcode="79501",
+            ),
+            # The street in street1.
+            add_unit(
+                session,
+                "Schoolhouse",
+                street1="1401 State School Road",
+                zipcode="77080",
+            ),
+            # Two units at one address.
+            add_unit(
+                session,
+                "Twin A Unit",
+                street1="Twin A Unit",
+                street2="2665 Prison Road #1",
+                zipcode="77351",
+            ),
+            add_unit(
+                session,
+                "Twin B Unit",
+                street1="Twin B Unit",
+                street2="2665 Prison Road #1",
+                zipcode="77351",
+            ),
+            # One name in both jurisdictions.
+            add_unit(session, "Doubled", street1="5 Texas Way", zipcode="77500"),
+            add_unit(
+                session,
+                "Doubled",
+                jurisdiction="Federal",
+                street1="5 Federal Way",
+                zipcode="77600",
+                shipping_method="Federal Tub",
+            ),
+        ]
+        return UnitMatcher(units)
+
+
+@pytest.mark.parametrize(
+    "address, unit",
+    [
+        # Verified: the street in USPS spelling, the name in street2.
+        (
+            {
+                "street1": "264 FM 3478 RD",
+                "street2": "EXAMPLE UNIT",
+                "zip": "77320-6522",
+            },
+            ("Texas", "Example Unit"),
+        ),
+        (
+            {
+                "street1": "1098 S HIGHWAY 2037",
+                "street2": "TESTY Q OSAMPLE UNIT",
+                "zip": "79501",
+            },
+            ("Texas", " Testy Q. O'Sample Unit"),
+        ),
+        # Verified, without the name: by house number and ZIP.
+        (
+            {"street1": "1401 STATE SCHOOL RD", "zip": "77080-1234"},
+            ("Texas", "Schoolhouse"),
+        ),
+        ({"street1": "264 FM 3478 RD", "zip": "77320"}, ("Texas", "Example Unit")),
+        # Unverified: the name in street1, the street in street2.
+        (
+            {"street1": "Example Unit", "street2": "264 FM 3478", "zip": "77320"},
+            ("Texas", "Example Unit"),
+        ),
+        # The name in the company line.
+        (
+            {"company": "Schoolhouse", "street1": "PO Box 9", "zip": "77080"},
+            ("Texas", "Schoolhouse"),
+        ),
+        # Units sharing an address are told apart by name only.
+        (
+            {"street1": "2665 PRISON RD # 1", "street2": "TWIN B UNIT", "zip": "77351"},
+            ("Texas", "Twin B Unit"),
+        ),
+        ({"street1": "2665 PRISON RD # 1", "zip": "77351"}, None),
+        # A name two jurisdictions have: the ZIP decides, or nothing does.
+        ({"street1": "DOUBLED", "zip": "77600"}, ("Federal", "Doubled")),
+        ({"street1": "DOUBLED", "zip": "77000"}, None),
+        # A house number in another ZIP, or no number and no name.
+        ({"street1": "264 FM 3478 RD", "zip": "77321"}, None),
+        ({"street1": "2640 FM 3478 RD", "zip": "77320"}, None),
+        ({"street1": "Somewhere Else", "zip": "77320"}, None),
+        ({}, None),
+    ],
+)
+def test_unit_matching_by_address(matcher, address, unit):
+    """A label's lines name a unit, or its house number and ZIP find one."""
+    assert matcher.by_address(address) == unit
 
 
 # --- listing -------------------------------------------------------------------
