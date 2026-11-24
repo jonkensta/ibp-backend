@@ -42,6 +42,7 @@ from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from . import clock, models, schemas
 from .shipment_links import local_date
@@ -401,19 +402,67 @@ class Rows:
     events: list[Event]
 
 
+def _in_range(
+    request: type[models.Request],
+    start_date: Optional[datetime.date],
+    end_date: Optional[datetime.date],
+) -> list[sa.ColumnElement[bool]]:
+    """Filters for the Filled requests postmarked in the range."""
+    filters = [request.action == "Filled"]
+    if start_date:
+        filters.append(request.date_postmarked >= start_date)
+    if end_date:
+        filters.append(request.date_postmarked <= end_date)
+    return filters
+
+
+def _first_linked_month_start(
+    end_date: Optional[datetime.date], dialect: str
+) -> Optional[sa.ColumnElement]:
+    """The first day of the month of the earliest postmark of a linked Filled
+    request (up to ``end_date``), as SQL; None for a dialect without a
+    month function (the months are then only trimmed in Python)."""
+    request = aliased(models.Request)
+    link = aliased(models.PackageShipment)
+    first = (
+        sa.select(sa.func.min(request.date_postmarked))
+        .select_from(link)
+        .join(
+            request,
+            sa.and_(
+                link.inmate_jurisdiction == request.inmate_jurisdiction,
+                link.inmate_id == request.inmate_id,
+                link.request_index == request.index,
+            ),
+        )
+        .where(*_in_range(request, None, end_date))
+        .scalar_subquery()
+    )
+    if dialect == "sqlite":
+        return sa.func.date(first, "start of month")
+    if dialect == "postgresql":
+        return sa.cast(sa.func.date_trunc("month", first), sa.Date)
+    return None
+
+
 def _rows_statement(
-    start_date: Optional[datetime.date], end_date: Optional[datetime.date]
+    start_date: Optional[datetime.date],
+    end_date: Optional[datetime.date],
+    from_first_linked: bool = False,
+    dialect: str = "sqlite",
 ) -> sa.CompoundSelect:
     """The ``load_rows`` statement: the linked Filled requests in the range,
     a row per link per delivered or returned event, then the number of
-    Filled requests per postmark date."""
+    Filled requests per postmark date (from the first linked month on, with
+    ``from_first_linked``, where the dialect allows)."""
     request, link = models.Request, models.PackageShipment
     shipment, event = models.Shipment, models.TrackingEvent
-    in_range = [request.action == "Filled"]
-    if start_date:
-        in_range.append(request.date_postmarked >= start_date)
-    if end_date:
-        in_range.append(request.date_postmarked <= end_date)
+    in_range = _in_range(request, start_date, end_date)
+    counted_range = list(in_range)
+    if from_first_linked:
+        month_start = _first_linked_month_start(end_date, dialect)
+        if month_start is not None:
+            counted_range.append(request.date_postmarked >= month_start)
 
     linked = (
         sa.select(
@@ -458,7 +507,7 @@ def _rows_statement(
             *([sa.null()] * 7),
             sa.func.count(),  # pylint: disable=not-callable
         )
-        .where(*in_range)
+        .where(*counted_range)
         .group_by(request.date_postmarked)
     )
 
@@ -469,6 +518,7 @@ async def load_rows(
     session: AsyncSession,
     start_date: Optional[datetime.date] = None,
     end_date: Optional[datetime.date] = None,
+    from_first_linked: bool = False,
 ) -> Rows:
     """Read the Filled requests postmarked in the range: their number per
     postmark date, and the linked ones with every link and their labels'
@@ -478,12 +528,15 @@ async def load_rows(
     rebuild committing meanwhile shows up entirely or not at all. Unlinked
     requests are only counted in SQL, which keeps an all-time read small.
     The linked rows are a request per link per event, deduplicated here.
+    With ``from_first_linked``, Filled requests before the month of the first
+    linked one may be left uncounted (see ``first_linked_month``).
     """
     requests: dict[RequestKey, FilledRequest] = {}
     links: dict[tuple[RequestKey, int], Link] = {}
     events: dict[int, Event] = {}
     filled: Counter[str] = Counter()
-    statement = _rows_statement(start_date, end_date)
+    dialect = session.get_bind().dialect.name
+    statement = _rows_statement(start_date, end_date, from_first_linked, dialect)
     for row in (await session.execute(statement)).all():
         if row.row_kind == "filled":
             filled[month_key(row.date_postmarked)] += row.filled
@@ -505,16 +558,37 @@ async def load_rows(
     )
 
 
-async def get_delivery_latency(
+def first_linked_month(requests: Iterable[FilledRequest]) -> Optional[str]:
+    """The postmark month of the earliest of ``requests`` (linked ones, of
+    any method), or None for none."""
+    return min((month_key(request.postmarked) for request in requests), default=None)
+
+
+def from_month(summary: Summary, first: Optional[str]) -> Summary:
+    """``summary`` without the months before ``first`` (every month for
+    None); the settle time is kept."""
+    months = [] if first is None else [m for m in summary.months if m.month >= first]
+    return Summary(months, summary.settle_days)
+
+
+async def get_delivery_latency(  # pylint: disable=too-many-arguments
     session: AsyncSession,
     method: schemas.DeliveryMethodEnum = schemas.DeliveryMethodEnum.ALL,
     start_date: Optional[datetime.date] = None,
     end_date: Optional[datetime.date] = None,
+    *,
     today: Optional[datetime.date] = None,
+    from_first_linked: bool = False,
 ) -> Summary:
-    """The latency metric for Filled requests postmarked in the range."""
-    rows = await load_rows(session, start_date, end_date)
-    return summarize(
+    """The latency metric for Filled requests postmarked in the range.
+
+    With ``from_first_linked`` (for a range with no start), the months
+    before the first with a linked request of any method are dropped, so
+    the series starts where shipment data does; none at all if nothing is
+    linked. The cutoff is the same for every method.
+    """
+    rows = await load_rows(session, start_date, end_date, from_first_linked)
+    summary = summarize(
         rows.requests,
         rows.links,
         rows.events,
@@ -522,3 +596,6 @@ async def get_delivery_latency(
         today=today,
         filled=rows.filled,
     )
+    if from_first_linked:
+        return from_month(summary, first_linked_month(rows.requests))
+    return summary

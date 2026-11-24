@@ -15,6 +15,8 @@ from ibp.delivery_latency import (
     LabelOutcome,
     Link,
     Rows,
+    first_linked_month,
+    from_month,
     is_provisional,
     label_outcomes,
     load_rows,
@@ -794,6 +796,7 @@ def test_loader_matches_the_pure_path(api_db):
         add_request(session, NUMBER + 9, 1, "2026-03-20")  # returned box
         add_request(session, NUMBER + 9, 2, "2026-03-20")  # bad postmark
         add_request(session, NUMBER + 9, 3, "2026-03-20", action="Tossed")
+        add_request(session, NUMBER + 9, 4, "2025-06-10")  # long before any label
         returned = add_shipment(
             session,
             "2026-03-21T18:00",
@@ -822,14 +825,16 @@ def test_loader_matches_the_pure_path(api_db):
         (datetime.date(2026, 2, 1), datetime.date(2026, 2, 28)),
         (datetime.date(2026, 1, 1), datetime.date(2026, 3, 31)),
         (datetime.date(2030, 1, 1), None),
+        (None, datetime.date(2026, 2, 28)),
     ]
+    linked = {x.key for x in links}
 
-    async def run(method, start, end):
+    async def run(method, start, end, trim):
         engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
         try:
             async with AsyncSession(engine) as session:
                 return await delivery_latency.get_delivery_latency(
-                    session, method, start, end, today=TODAY
+                    session, method, start, end, today=TODAY, from_first_linked=trim
                 )
         finally:
             await engine.dispose()
@@ -843,7 +848,103 @@ def test_loader_matches_the_pure_path(api_db):
                 and (end is None or r.postmarked <= end)
             ]
             expected = summarize(cohort, links, events, method, today=TODAY)
-            assert asyncio.run(run(method, start, end)) == expected, (method, start)
+            assert asyncio.run(run(method, start, end, False)) == expected
+            first = first_linked_month(r for r in cohort if r.key in linked)
+            trimmed = asyncio.run(run(method, start, end, True))
+            assert trimmed == from_month(expected, first), (method, start, end)
     whole = summarize(requests, links, events, today=TODAY)
-    assert [m.month for m in whole.months] == ["2026-01", "2026-02", "2026-03"]
-    assert (whole.months[2].returned, whole.months[2].excluded) == (1, 1)
+    assert [m.month for m in whole.months] == [
+        "2025-06",
+        "2026-01",
+        "2026-02",
+        "2026-03",
+    ]
+    assert (whole.months[3].returned, whole.months[3].excluded) == (1, 1)
+
+
+def seed_months(api_db, link_any: bool = True) -> None:
+    """Filled requests postmarked in 2025-10 and 2026-02 with no label; in
+    2026-01 one with no label (the 2nd) and one in a bulk box (the 20th);
+    in 2026-03 one with its own label. With ``link_any`` False, no links."""
+    with api_db() as session:
+        add_unit(session, "ALPHA")
+        add_inmate(session, NUMBER, "ALPHA")
+        dates = ["2025-10-12", "2026-01-09", "2026-01-27", "2026-02-15", "2026-03-10"]
+        for index, processed in enumerate(dates):  # postmarked a week earlier
+            add_request(session, NUMBER, index, processed)
+        box = add_shipment(
+            session,
+            "2026-01-28T18:00",
+            kind="bulk",
+            events=(("2026-02-02T18:00", "delivered"),),
+        )
+        own = add_shipment(
+            session, "2026-03-11T18:00", events=(("2026-03-14T18:00", "delivered"),)
+        )
+        session.flush()
+        if link_any:
+            for index, label, basis in (
+                (2, box, "unit_session"),
+                (4, own, "reference"),
+            ):
+                session.add(
+                    models.PackageShipment(
+                        inmate_jurisdiction="Texas",
+                        inmate_id=NUMBER,
+                        request_index=index,
+                        shipment_id=label.id,
+                        basis=basis,
+                    )
+                )
+        session.commit()
+
+
+def months_of(client, **params) -> list[dict]:
+    """The months the endpoint lists for ``params``."""
+    response = client.get("/metrics/delivery-latency", params=params)
+    assert response.status_code == 200
+    return response.json()["data"]
+
+
+def test_no_start_begins_at_the_first_linked_month(client, api_db):
+    """Leading unlinked months are dropped, an unlinked month in the middle is
+    kept, and the first month counts all its Filled requests."""
+    seed_months(api_db)
+
+    for params in ({}, {"date_range": "all"}, {"end_date": "2026-12-31"}):
+        months = months_of(client, **params)
+        assert [(m["month"], m["filled"], m["linked"]) for m in months] == [
+            ("2026-01", 2, 1),
+            ("2026-02", 1, 0),
+            ("2026-03", 1, 1),
+        ], params
+
+
+def test_cutoff_is_the_same_for_every_method(client, api_db):
+    """The first linked month is over every method: the individual view
+    starts in January too, though its own first label is in March."""
+    seed_months(api_db)
+
+    for method in ("all", "individual", "bulk"):
+        months = months_of(client, method=method)
+        assert [m["month"] for m in months] == ["2026-01", "2026-02", "2026-03"]
+    individual = months_of(client, method="individual")
+    assert [m["linked"] for m in individual] == [0, 0, 1]
+
+
+def test_explicit_start_keeps_every_month(client, api_db):
+    """A range with a start lists its months as before, linked or not."""
+    seed_months(api_db)
+
+    months = months_of(client, start_date="2025-01-01", end_date="2026-12-31")
+
+    assert [m["month"] for m in months] == ["2025-10", "2026-01", "2026-02", "2026-03"]
+
+
+def test_nothing_linked_gives_no_months(client, api_db):
+    """With no linked request, an open range lists no months; a range with
+    a start still lists its Filled requests."""
+    seed_months(api_db, link_any=False)
+
+    assert months_of(client) == []
+    assert len(months_of(client, start_date="2025-01-01")) == 4

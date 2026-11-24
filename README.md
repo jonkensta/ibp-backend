@@ -264,7 +264,12 @@ Filled requests of each postmark month (`YYYY-MM`), how long they took to
 arrive. `method` is `all` (default), `individual` (links with basis
 `reference` or `inmate_number`) or `bulk` (`unit_session`); `date_range`
 (`6months`, `12months`, `all`) or `start_date` and `end_date` filter the
-postmark, as for `/metrics/requests`. The definitions:
+postmark, as for `/metrics/requests`. With no start to the range (no
+`start_date`, and `date_range` `all` or absent), the months before the
+first one with a linked request (of any method) are left out, so the series
+starts where shipment data does rather than decades back; later months stay
+even with no links, and with nothing linked at all the list is empty. A
+range with a start lists every month in it. The definitions:
 
 - A label is delivered on the local date (`[server] timezone`) of its
   earliest `delivered` event, unless a `return_to_sender` event came at or
