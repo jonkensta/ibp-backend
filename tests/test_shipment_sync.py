@@ -3,12 +3,18 @@
 # pylint: disable=redefined-outer-name
 
 import datetime
+import email.message
+import http.client
+import io
+import json
 import logging
+import sqlite3
+import urllib.error
 
 import pytest
 import sqlalchemy as sa
 
-from ibp import models, shipment_sync
+from ibp import db_bootstrap, models, shipment_sync
 from ibp.labels import RequestKey
 from ibp.shipment_sync import (
     EasyPost,
@@ -150,24 +156,126 @@ def test_inmate_number_from_addressee(addressee, number):
     assert inmate_number(addressee) == number
 
 
-def test_unit_matching_by_tag_and_address(api_db):
-    """Tags match unit names in any case; addresses match on street and ZIP
-    (street2 breaks a tie, and a remaining tie is no match)."""
+def test_unit_matching_by_tag(api_db):
+    """Tags match unit names in any case, in the tag's jurisdiction only."""
     with api_db() as session:
         alpha = add_unit(session, "ALPHA", street1="1 Shared Rd", zipcode="77002")
-        beta = add_unit(
-            session, "BETA", street1="1 Shared Rd", street2="Bldg B", zipcode="77002"
-        )
-        gamma = add_unit(session, "GAMMA", street1="9 Twin Rd", zipcode="77003")
-        delta = add_unit(session, "DELTA", street1="9 Twin Rd", zipcode="77003")
-        matcher = UnitMatcher([alpha, beta, gamma, delta])
+        matcher = UnitMatcher([alpha])
     assert matcher.by_tag("Texas", "alpha") == ("Texas", "ALPHA")
     assert matcher.by_tag("Federal", "ALPHA") is None
-    shared = {"street1": "1 SHARED RD.", "zip": "77002-0001"}
-    assert matcher.by_address({**shared, "street2": "BLDG. B"}) == ("Texas", "BETA")
-    assert matcher.by_address(shared) == ("Texas", "ALPHA")
-    assert matcher.by_address({"street1": "9 Twin Rd", "zip": "77003"}) is None
-    assert matcher.by_address({"street1": "5 Nowhere", "zip": "77002"}) is None
+
+
+@pytest.fixture
+def matcher(api_db):
+    """Units shaped like the real table (invented names and addresses)."""
+    with api_db() as session:
+        units = [
+            # The name in street1 and the street in street2, as most rows are.
+            add_unit(
+                session,
+                "Example Unit",
+                street1="Example Unit",
+                street2="264 FM 3478",
+                zipcode="77320",
+            ),
+            add_unit(
+                session,
+                " Testy Q. O'Sample Unit",
+                street1="Testy Q. O'Sample Unit",
+                street2="1098 S. Highway 2037",
+                zipcode="79501",
+            ),
+            # The street in street1.
+            add_unit(
+                session,
+                "Schoolhouse",
+                street1="1401 State School Road",
+                zipcode="77080",
+            ),
+            # Two units at one address.
+            add_unit(
+                session,
+                "Twin A Unit",
+                street1="Twin A Unit",
+                street2="2665 Prison Road #1",
+                zipcode="77351",
+            ),
+            add_unit(
+                session,
+                "Twin B Unit",
+                street1="Twin B Unit",
+                street2="2665 Prison Road #1",
+                zipcode="77351",
+            ),
+            # One name in both jurisdictions.
+            add_unit(session, "Doubled", street1="5 Texas Way", zipcode="77500"),
+            add_unit(
+                session,
+                "Doubled",
+                jurisdiction="Federal",
+                street1="5 Federal Way",
+                zipcode="77600",
+                shipping_method="Federal Tub",
+            ),
+        ]
+        return UnitMatcher(units)
+
+
+@pytest.mark.parametrize(
+    "address, unit",
+    [
+        # Verified: the street in USPS spelling, the name in street2.
+        (
+            {
+                "street1": "264 FM 3478 RD",
+                "street2": "EXAMPLE UNIT",
+                "zip": "77320-6522",
+            },
+            ("Texas", "Example Unit"),
+        ),
+        (
+            {
+                "street1": "1098 S HIGHWAY 2037",
+                "street2": "TESTY Q OSAMPLE UNIT",
+                "zip": "79501",
+            },
+            ("Texas", " Testy Q. O'Sample Unit"),
+        ),
+        # Verified, without the name: by house number and ZIP.
+        (
+            {"street1": "1401 STATE SCHOOL RD", "zip": "77080-1234"},
+            ("Texas", "Schoolhouse"),
+        ),
+        ({"street1": "264 FM 3478 RD", "zip": "77320"}, ("Texas", "Example Unit")),
+        # Unverified: the name in street1, the street in street2.
+        (
+            {"street1": "Example Unit", "street2": "264 FM 3478", "zip": "77320"},
+            ("Texas", "Example Unit"),
+        ),
+        # The name in the company line.
+        (
+            {"company": "Schoolhouse", "street1": "PO Box 9", "zip": "77080"},
+            ("Texas", "Schoolhouse"),
+        ),
+        # Units sharing an address are told apart by name only.
+        (
+            {"street1": "2665 PRISON RD # 1", "street2": "TWIN B UNIT", "zip": "77351"},
+            ("Texas", "Twin B Unit"),
+        ),
+        ({"street1": "2665 PRISON RD # 1", "zip": "77351"}, None),
+        # A name two jurisdictions have: the ZIP decides, or nothing does.
+        ({"street1": "DOUBLED", "zip": "77600"}, ("Federal", "Doubled")),
+        ({"street1": "DOUBLED", "zip": "77000"}, None),
+        # A house number in another ZIP, or no number and no name.
+        ({"street1": "264 FM 3478 RD", "zip": "77321"}, None),
+        ({"street1": "2640 FM 3478 RD", "zip": "77320"}, None),
+        ({"street1": "Somewhere Else", "zip": "77320"}, None),
+        ({}, None),
+    ],
+)
+def test_unit_matching_by_address(matcher, address, unit):
+    """A label's lines name a unit, or its house number and ZIP find one."""
+    assert matcher.by_address(address) == unit
 
 
 # --- listing -------------------------------------------------------------------
@@ -252,6 +360,24 @@ def test_no_recipient_name_or_street_is_stored(sessions):
         "SOMEONE",
     ):
         assert secret.upper() not in text
+
+
+def test_reference_that_is_not_a_tag_is_not_stored(sessions):
+    """Free text in the reference (a name, say) is dropped; a tag is kept."""
+    sentinel = "Sentinel Q. Personname"
+    fake = FakeEasyPost(
+        [
+            shipment(1, ago(3), reference=sentinel),
+            shipment(2, ago(3), reference=f"ibp1:req:{sentinel}"),
+            shipment(3, ago(3), reference="ibp1:manual"),
+        ]
+    )
+    sync(fake, sessions)
+    assert stored(sessions, "shp_0001").reference is None
+    assert stored(sessions, "shp_0002").reference is None
+    assert stored(sessions, "shp_0003").reference == "ibp1:manual"
+    text = repr(snapshot(sessions)).upper()
+    assert "SENTINEL" not in text and "PERSONNAME" not in text
 
 
 def test_second_identical_run_changes_nothing(sessions):
@@ -398,6 +524,189 @@ def test_client_gives_up_after_retries():
     assert len(fake.calls) == shipment_sync.RETRIES
 
 
+SENTINEL = "Sentinel Q. Personname"
+
+
+def failing_urlopen(status: int, body: bytes):
+    """An opener that answers every request with HTTP ``status`` and ``body``."""
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        raise urllib.error.HTTPError(
+            request.full_url, status, "error", email.message.Message(), io.BytesIO(body)
+        )
+
+    return urlopen
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        (
+            json.dumps(
+                {
+                    "error": {
+                        "code": "ADDRESS.VERIFY.FAILURE",
+                        "message": f"Address for {SENTINEL} not found",
+                        "errors": [{"field": "street1", "message": SENTINEL}],
+                    }
+                }
+            ).encode(),
+            "GET shipments: HTTP 422 ADDRESS.VERIFY.FAILURE",
+        ),
+        (f"<html>{SENTINEL}</html>".encode(), "GET shipments: HTTP 422"),
+        (json.dumps({"error": {"code": SENTINEL}}).encode(), "GET shipments: HTTP 422"),
+        (json.dumps([SENTINEL]).encode(), "GET shipments: HTTP 422"),
+    ],
+)
+def test_http_error_keeps_only_status_and_code(body, message):
+    """An EasyPost error is its status and error code, never its body."""
+    client = EasyPost(KEY, urlopen=failing_urlopen(422, body), sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError) as raised:
+        client.get("shipments")
+    assert str(raised.value) == message
+
+
+def test_failed_run_logs_no_easypost_body(sessions, logs):
+    """A run failing on an EasyPost error logs no part of its body."""
+    body = json.dumps({"error": {"code": "BAD", "message": SENTINEL}}).encode()
+    client = EasyPost(KEY, urlopen=failing_urlopen(400, body), sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        assert shipment_sync.main([], sessions=sessions, client=client) == 1
+    assert "HTTP 400 BAD" in logs.text
+    assert "Sentinel" not in logs.text and "Personname" not in logs.text
+
+
+@pytest.mark.parametrize(
+    "error, logged",
+    [
+        (
+            sa.exc.IntegrityError(
+                f"INSERT INTO shipments (reference) VALUES ('{SENTINEL}')",
+                {"reference": SENTINEL},
+                sqlite3.IntegrityError(
+                    "UNIQUE constraint failed: shipments.easypost_id"
+                ),
+            ),
+            "IntegrityError: UNIQUE constraint failed: shipments.easypost_id",
+        ),
+        (
+            sa.exc.OperationalError(
+                "SELECT 1", (SENTINEL,), sqlite3.OperationalError("database is locked")
+            ),
+            "OperationalError: database is locked",
+        ),
+        (
+            sa.exc.StatementError(
+                f"bad value {SENTINEL}", f"SELECT '{SENTINEL}'", {"x": SENTINEL}, None
+            ),
+            "StatementError",
+        ),
+        (sa.exc.InvalidRequestError(SENTINEL), "InvalidRequestError"),
+    ],
+)
+def test_database_failure_logs_no_statement_or_values(
+    sessions, logs, monkeypatch, error, logged
+):
+    """A database error is logged as its class (and the driver's message),
+    without the statement or its parameters."""
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(shipment_sync, "run", fail)
+    monkeypatch.setattr(shipment_sync, "relink", fail)
+    client = EasyPost(KEY, urlopen=FakeEasyPost(), sleep=lambda _: None)
+    for argv in ([], ["--rebuild-links"]):
+        logs.clear()
+        with logs.at_level(logging.INFO):
+            assert shipment_sync.main(argv, sessions=sessions, client=client) == 1
+        assert f"shipment sync failed: {logged}" in logs.text
+        assert "Sentinel" not in logs.text and "Personname" not in logs.text
+
+
+def test_job_engine_hides_parameters(monkeypatch, tmp_path):
+    """The job's own engine keeps parameters out of its error messages."""
+    monkeypatch.setattr(
+        db_bootstrap, "get_sync_database_url", lambda: f"sqlite:///{tmp_path}/x.db"
+    )
+    with shipment_sync.build_sessions()() as session:
+        engine = session.get_bind()
+    try:
+        assert engine.hide_parameters
+    finally:
+        engine.dispose()
+
+
+class BrokenBody(io.BytesIO):
+    """A response body whose reading fails with ``error``."""
+
+    def __init__(self, error: Exception):
+        super().__init__()
+        self.error = error
+
+    def read(self, *args):  # pylint: disable=unused-argument
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        lambda: BrokenBody(TimeoutError("timed out")),
+        lambda: BrokenBody(http.client.IncompleteRead(b'{"shipments": [', 500)),
+        lambda: BrokenBody(ConnectionResetError(104, "reset")),
+        lambda: io.BytesIO(b'{"shipments": ['),
+        lambda: io.BytesIO(b"<html>maintenance</html>"),
+        lambda: io.BytesIO(b"\xff\xfe"),
+    ],
+)
+def test_unreadable_response_is_retried_then_an_api_error(answer):
+    """A timeout, truncated body or invalid JSON is retried, then raises
+    ApiError."""
+    calls = []
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        calls.append(request)
+        return answer()
+
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError, match="reading response"):
+        client.get("shipments")
+    assert len(calls) == shipment_sync.RETRIES
+
+
+def test_unreadable_response_succeeds_on_retry():
+    """One bad read then a good answer gives the good answer."""
+    answers = [BrokenBody(TimeoutError("timed out")), io.BytesIO(b'{"ok": true}')]
+    client = EasyPost(
+        KEY, urlopen=lambda request, timeout: answers.pop(0), sleep=lambda _: None
+    )
+    assert client.get("shipments") == {"ok": True}
+
+
+def test_unreadable_tracker_is_a_poll_failure_and_the_run_goes_on(sessions):
+    """A tracker whose answer can't be read is counted as a failed poll; the
+    other trackers are still polled and the links still rebuilt."""
+    with sessions() as session:
+        add_inmate(session, 40000001, "ALPHA")
+        add_request(session, 40000001, 0, "2026-01-20")
+        bad = old_label(session, 50, [(48, "in_transit")])
+        good = old_label(session, 49, [(48, "in_transit")], inmate_number="40000001")
+        session.commit()
+        bad_path, good_tracker = f"trackers/{bad.tracker_id}", good.tracker_id
+    fake = FakeEasyPost(
+        trackers={good_tracker: {"id": good_tracker, "status": "delivered"}}
+    )
+
+    def urlopen(request, timeout):
+        if request.full_url.endswith(bad_path):
+            return io.BytesIO(b'{"id": "trk_')
+        return fake(request, timeout)
+
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    summary = shipment_sync.run(client, sessions, now=NOW)
+    assert (summary.polled, summary.poll_failures, summary.links) == (1, 1, 1)
+
+
 def test_client_paces_requests():
     """Every request after the first waits PACE_SECONDS."""
     fake = FakeEasyPost()
@@ -445,6 +754,28 @@ def test_normal_run_lists_the_last_35_days(sessions):
         ("2026-03-01T00:00:00Z", "2026-03-10T12:05:01Z"),
         ("2026-02-03T12:00:00Z", "2026-03-01T00:00:01Z"),
     ]
+
+
+@pytest.mark.parametrize(
+    "newest, first_start",
+    [
+        (None, "2026-02-03T12:00:00Z"),  # nothing stored: the last 35 days
+        (10, "2026-02-03T12:00:00Z"),  # stored recently: the last 35 days
+        (50, "2026-01-18T12:00:00Z"),  # an outage: a day before the newest
+    ],
+)
+def test_listing_resumes_from_the_newest_stored_label(sessions, newest, first_start):
+    """After an outage longer than the window, listing starts a day before
+    the newest stored label, so nothing bought meanwhile is missed."""
+    if newest is not None:
+        with sessions() as session:
+            old_label(session, newest + 5, [])
+            old_label(session, newest, [])
+            session.commit()
+    fake = FakeEasyPost([shipment(1, ago(40))])
+    summary = sync(fake, sessions)
+    assert fake.listing_windows()[-1][0] == first_start
+    assert summary.new == (1 if newest == 50 else 0)
 
 
 # --- polling older labels ------------------------------------------------------

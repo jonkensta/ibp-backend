@@ -5,7 +5,7 @@
 import pytest
 
 from ibp import models
-from ibp.shipment_links import local_date, never_mailed, rebuild_links
+from ibp.shipment_links import is_scanned, local_date, never_mailed, rebuild_links
 
 from .shipment_helpers import (
     add_inmate,
@@ -214,30 +214,41 @@ def test_bulk_session_with_three_boxes_and_the_next_session(session):
     }
 
 
-def test_bulk_session_on_the_processed_date_counts(session):
-    """A session on the request's processed date is on or after it."""
+def test_bulk_session_on_the_processed_date_waits_for_the_next(session):
+    """A request processed on a session's date links to the next session."""
     seed_box_unit(session)
     add_request(session, 11111111, 0, "2026-03-05")
-    same_day = box(session, "2026-03-05T20:00")
+    box(session, "2026-03-05T20:00")  # the same (local) day: too soon
+    next_day = box(session, "2026-03-06T15:00")
     session.commit()
     assert rebuild(session) == {
-        ("Texas", 11111111, 0, same_day.easypost_id, "unit_session"),
+        ("Texas", 11111111, 0, next_day.easypost_id, "unit_session"),
     }
 
 
-def test_bulk_session_more_than_14_days_later_is_not_linked(session):
-    """A request more than 14 days before the next session isn't linked."""
+def test_bulk_session_only_on_the_processed_date_links_nothing(session):
+    """With no later session, a request processed on a session's date
+    links nothing."""
     seed_box_unit(session)
-    add_request(session, 11111111, 0, "2026-02-18")
+    add_request(session, 11111111, 0, "2026-03-05")
+    box(session, "2026-03-05T20:00")
+    session.commit()
+    assert not rebuild(session)
+
+
+def test_bulk_session_more_than_28_days_later_is_not_linked(session):
+    """A request more than 28 days before the next session isn't linked."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-02-04")
     box(session, "2026-03-05T15:00")
     session.commit()
     assert not rebuild(session)
 
 
-def test_bulk_session_14_days_later_is_linked(session):
-    """A session exactly 14 days after the processed date still links."""
+def test_bulk_session_28_days_later_is_linked(session):
+    """A session exactly 28 days after the processed date still links."""
     seed_box_unit(session)
-    add_request(session, 11111111, 0, "2026-02-19")
+    add_request(session, 11111111, 0, "2026-02-05")
     late = box(session, "2026-03-05T15:00")
     session.commit()
     assert rebuild(session) == {
@@ -264,6 +275,48 @@ def test_unmailed_box_is_not_a_session(session):
     assert rebuild(session) == {
         ("Texas", 11111111, 0, mailed.easypost_id, "unit_session"),
     }
+
+
+def test_old_unscanned_box_is_not_a_session(session):
+    """A box USPS never scanned doesn't make a session once it is a week
+    old; until then it does, since its first scan may not be in yet."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-03-01")
+    unscanned = box(
+        session, "2026-03-05T15:00", events=(("2026-03-05T15:01", "pre_transit"),)
+    )
+    mailed = box(session, "2026-03-07T15:00")
+    session.commit()
+    expected = ("Texas", 11111111, 0, unscanned.easypost_id, "unit_session")
+    rebuild_links(session, now=utc("2026-03-12T14:59"))
+    assert expected in links(session)
+    rebuild_links(session, now=utc("2026-03-12T15:00"))
+    assert links(session) == {
+        ("Texas", 11111111, 0, mailed.easypost_id, "unit_session"),
+    }
+
+
+@pytest.mark.parametrize(
+    "statuses, scanned",
+    [
+        ((), False),
+        (("pre_transit",), False),
+        (("pre_transit", "error"), False),
+        (("cancelled",), False),
+        (("unknown", "in_transit"), True),
+        (("error", "delivered"), True),
+    ],
+)
+def test_is_scanned_ignores_error_and_cancelled(session, statuses, scanned):
+    """``error`` and ``cancelled`` are no sign that USPS handled a package."""
+    label = individual(
+        session,
+        tracker_status=statuses[-1] if statuses else None,
+        events=tuple(
+            (f"2026-03-1{n}T15:00", status) for n, status in enumerate(statuses)
+        ),
+    )
+    assert is_scanned(label) is scanned
 
 
 def test_rebuild_is_deterministic_and_idempotent(session):

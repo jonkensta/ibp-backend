@@ -213,11 +213,13 @@ are in [`scripts/shipment-sync/`](scripts/shipment-sync/README.md).
 
 - `shipments`: one row per label, keyed by its EasyPost shipment id: tracking
   code, tracker id, purchase time (UTC), weight (oz), postage (cents),
-  service, the raw `reference`, `kind` (`individual`, `bulk` or `other`), the
-  unit it went to when that can be told (from the tag, or the label's street
-  and ZIP against `units`), the request its tag names, the 8-digit inmate
-  number from the addressee line, refund status, current tracker status and
-  when a sync last changed it. No recipient name or street address is stored.
+  service, the `reference` if it is one of the tags below, `kind`
+  (`individual`, `bulk` or `other`), the unit it went to when that can be
+  told (from the tag; else an address line that is one unit's name, letters
+  and digits only; else the house number and ZIP of one unit's street line),
+  the request its tag names, the 8-digit inmate number from the addressee
+  line, refund status, current tracker status and when a sync last changed
+  it. No recipient name or street address is stored.
 - `tracking_events`: every event as EasyPost lists it (time in UTC, the
   carrier's local time, status, detail, message, city, state, ZIP), returns,
   refusals and repeated deliveries included. A re-sync adds only events not
@@ -245,9 +247,11 @@ requested) that USPS never scanned, since it was never mailed:
   (local). The destination unit's jurisdiction tells Texas and Federal
   numbers apart; with no destination, a number both have links to neither.
 - `unit_session`: all mailed bulk boxes to one unit on one local date are a
-  session. A Filled request whose inmate's unit (as it is now) ships by Box or
-  Federal Tub links to every box of the first session to that unit on or
-  after its processed date, if within 14 days.
+  session; a box counts only once USPS has scanned it, or while it is under 7
+  days old (time for its first scan). A Filled request whose inmate's unit
+  (as it is now) ships by Box or Federal Tub links to every box of the first
+  session to that unit on a date after its processed date (a request
+  processed on a session's date waits for the next one), if within 28 days.
 
 `GET /requests/{code}/shipments` lists a request's linked labels with their
 tracking code, purchase time, kind, basis, tracker status and events.

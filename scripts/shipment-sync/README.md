@@ -13,7 +13,8 @@ never buys, refunds or changes anything at EasyPost.
 - `ibp-shipment-sync.service` / `.timer`: daily 07:30, `Persistent=true`.
   That keeps clear of the label refunds (Wed 10:00) and backups (Mon, Fri
   13:00). A missed or failed run is caught up by the next one: each run
-  lists the last 35 days.
+  lists the last 35 days, or from a day before the newest stored label if
+  that is older, so even a longer outage leaves no gap.
 
 Each run logs one line of counts, e.g.
 `shipment sync: 412 labels seen, 11 new, 37 updated, 160 events added, 388 trackers polled (0 failed), 1420 links built`.

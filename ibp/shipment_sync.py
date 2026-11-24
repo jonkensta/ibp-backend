@@ -5,7 +5,9 @@ Run as ``python -m ibp.shipment_sync`` (daily on ibp-server, see
 never buys, refunds or changes anything at EasyPost.
 
 A normal run lists the labels bought in the last ``WINDOW`` (35 days, so
-late events are picked up), in windows split at UTC month starts, each paged
+late events are picked up), or since a day before the newest stored label if
+that is older (so a long outage leaves no gap), in windows split at UTC
+month starts, each paged
 newest first with ``before_id``, and stores each label and every tracking
 event not stored yet. Each stored label not listed in the run that is not
 finished (``is_finished``) then has its tracker fetched on its own. Last, the
@@ -26,6 +28,7 @@ import base64
 import dataclasses
 import datetime
 import decimal
+import http.client
 import json
 import logging
 import os
@@ -52,6 +55,9 @@ logger = logging.getLogger(__name__)
 API = "https://api.easypost.com/v2"
 # Labels bought this recently are listed on every run.
 WINDOW = datetime.timedelta(days=35)
+# After an outage longer than WINDOW, listing starts this long before the
+# newest stored label.
+RESUME_OVERLAP = datetime.timedelta(days=1)
 # A label is finished (no longer polled) this long after its last delivery,
 # or this long after purchase whatever happened.
 DELIVERED_SETTLED = datetime.timedelta(days=60)
@@ -140,38 +146,74 @@ def zip5(zipcode: Optional[str]) -> str:
     return re.sub(r"\D", "", zipcode or "")[:5]
 
 
+def squeeze(text: Optional[str]) -> str:
+    """Uppercase letters and digits only (``O'Daniel Unit`` is ``ODANIELUNIT``)."""
+    return re.sub(r"[^A-Z0-9]", "", (text or "").upper())
+
+
+_HOUSE_NUMBER = re.compile(r"\s*(\d+)(?!\d)")
+
+
+def house_number(street: Optional[str]) -> Optional[str]:
+    """The number a street line starts with, if any (``264`` of ``264 FM 3478``)."""
+    match = _HOUSE_NUMBER.match(street or "")
+    return match[1] if match else None
+
+
 class UnitMatcher:
-    """Finds the IBP unit a label went to, by its tag or by street and ZIP."""
+    """Finds the IBP unit a label went to, by its tag, name or address."""
 
     def __init__(self, units: Iterable[models.Unit]):
-        self._by_name: dict[tuple[str, str], tuple[str, str]] = {}
-        self._by_address: dict[tuple[str, str], list[models.Unit]] = defaultdict(list)
+        self._by_tag: dict[tuple[str, str], tuple[str, str]] = {}
+        self._by_name: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+        self._by_number: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
         for unit in units:
-            self._by_name[(unit.jurisdiction, unit.name.upper())] = (
-                unit.jurisdiction,
-                unit.name,
-            )
-            self._by_address[(normalize(unit.street1), zip5(unit.zipcode))].append(unit)
+            key = (unit.jurisdiction, unit.name)
+            self._by_tag[(unit.jurisdiction, unit.name.upper())] = key
+            if squeeze(unit.name):
+                self._by_name[squeeze(unit.name)].append((*key, zip5(unit.zipcode)))
+            for street in (unit.street1, unit.street2):
+                number = house_number(street)
+                if number is not None:
+                    self._by_number[(number, zip5(unit.zipcode))].add(key)
 
     def by_tag(self, jurisdiction: str, name: str) -> Optional[tuple[str, str]]:
         """The unit a tag names, if IBP has it (unit names match in any case)."""
-        return self._by_name.get((jurisdiction, name.upper()))
+        return self._by_tag.get((jurisdiction, name.upper()))
 
     def by_address(self, address: dict[str, Any]) -> Optional[tuple[str, str]]:
-        """The one unit at the address's street and ZIP, or None.
+        """The one unit a label's address names or is at, or None.
 
-        Units sharing a street and ZIP are told apart by the second street
-        line; if that still leaves more than one, the unit is unknown.
+        Units store the street in either line (usually the unit's name in
+        ``street1`` and the street in ``street2``), and EasyPost's verified
+        addresses come back in USPS spelling with the name moved to
+        ``street2``, so whole lines are not compared. First, a ``street1``,
+        ``street2`` or ``company`` line that is a unit's name (letters and
+        digits only, any case) names that unit; a name more than one unit has
+        (Texas and Federal) counts only if the ZIP leaves one. Otherwise the
+        house number either street line starts with, with the 5-digit ZIP,
+        must lead one unit's ``street1`` or ``street2``. Units sharing an
+        address are told apart only by name; anything ambiguous is unknown.
         """
-        units = self._by_address.get(
-            (normalize(address.get("street1")), zip5(address.get("zip"))), []
-        )
-        if len(units) > 1:
-            street2 = normalize(address.get("street2"))
-            units = [unit for unit in units if normalize(unit.street2) == street2]
-        if len(units) != 1:
-            return None
-        return (units[0].jurisdiction, units[0].name)
+        zipcode = zip5(address.get("zip"))
+        named = {
+            unit
+            for field in ("street1", "street2", "company")
+            for unit in self._by_name.get(squeeze(address.get(field)), [])
+        }
+        if named:
+            if len(named) > 1:
+                named = {unit for unit in named if unit[2] == zipcode}
+            if len(named) != 1:
+                return None
+            jurisdiction, name, _ = named.pop()
+            return (jurisdiction, name)
+        at_number: set[tuple[str, str]] = set()
+        for field in ("street1", "street2"):
+            number = house_number(address.get(field))
+            if number is not None:
+                at_number |= self._by_number.get((number, zipcode), set())
+        return at_number.pop() if len(at_number) == 1 else None
 
 
 class EventValues(NamedTuple):
@@ -302,7 +344,7 @@ def read_label(
     addressee line ends in an inmate number is ``individual``, one addressed
     to ``unit_recipient`` (the shipping settings' mailroom line) is
     ``bulk``, and anything else is ``other``. The name and street address
-    are read here and never stored.
+    are read here and never stored, nor is a reference that is not a tag.
     """
     rate = shipment.get("selected_rate") or {}
     if not shipment.get("tracking_code") or not rate:
@@ -342,7 +384,8 @@ def read_label(
         weight_oz=float(weight) if weight is not None else None,
         cost_cents=cents(rate.get("rate")),
         service=rate.get("service") or None,
-        reference=shipment.get("reference") or None,
+        # Only our own tags: free text could be anything, a name included.
+        reference=shipment.get("reference") if tag is not None else None,
         kind=kind,
         unit_jurisdiction=unit[0] if unit else None,
         unit_name=unit[1] if unit else None,
@@ -386,20 +429,38 @@ def is_finished(shipment: models.Shipment, now: datetime.datetime) -> bool:
 Opener = Callable[..., Any]
 
 
-class EasyPost:  # pylint: disable=too-few-public-methods
-    """A GET-only EasyPost client, paced, retrying 429 and 5xx with backoff.
+class RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Fails every redirect, as an ``HTTPError`` with its 3xx status:
+    following one would send the key's ``Authorization`` header on."""
 
-    ``urlopen`` and ``sleep`` are for tests.
+    def redirect_request(
+        self, req, fp, code, msg, headers, newurl
+    ):  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+def build_opener() -> Opener:
+    """``urlopen`` for EasyPost: the standard one, but never redirected."""
+    return urllib.request.build_opener(RefuseRedirects).open
+
+
+class EasyPost:  # pylint: disable=too-few-public-methods
+    """A GET-only EasyPost client, paced, retrying 429, 5xx, network errors
+    and unreadable responses with backoff; a request that still fails raises
+    ``ApiError``.
+
+    A redirect is not followed: it fails as ``HTTP 3xx``. ``urlopen``
+    (``build_opener()`` by default) and ``sleep`` are for tests.
     """
 
     def __init__(
         self,
         key: str,
-        urlopen: Opener = urllib.request.urlopen,
+        urlopen: Optional[Opener] = None,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self._auth = base64.b64encode(f"{key}:".encode()).decode()
-        self._urlopen = urlopen
+        self._urlopen = urlopen if urlopen is not None else build_opener()
         self._sleep = sleep
         self.requests = 0
 
@@ -425,8 +486,10 @@ class EasyPost:  # pylint: disable=too-few-public-methods
                     return json.load(response)
             except urllib.error.HTTPError as error:
                 if error.code not in RETRY_STATUSES or attempt == RETRIES - 1:
-                    body = error.read().decode(errors="replace")[:300]
-                    raise ApiError(f"GET {path}: HTTP {error.code} {body}") from error
+                    code = error_code(error)
+                    raise ApiError(
+                        f"GET {path}: HTTP {error.code}" + (f" {code}" if code else "")
+                    ) from error
                 wait = retry_after(error) or 2.0**attempt
                 logger.warning(
                     "GET %s: HTTP %d, retrying in %ss", path, error.code, wait
@@ -437,7 +500,33 @@ class EasyPost:  # pylint: disable=too-few-public-methods
                     raise ApiError(f"GET {path}: {error.reason}") from error
                 logger.warning("GET %s: %s, retrying", path, error.reason)
                 self._sleep(2.0**attempt)
+            except (OSError, http.client.HTTPException, ValueError) as error:
+                # A read timeout, a dropped or truncated body, or bad JSON.
+                failure = type(error).__name__
+                if attempt == RETRIES - 1:
+                    raise ApiError(f"GET {path}: {failure} reading response") from error
+                logger.warning("GET %s: %s reading response, retrying", path, failure)
+                self._sleep(2.0**attempt)
         raise ApiError(f"GET {path}: giving up after retries")
+
+
+_ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
+
+def error_code(error: urllib.error.HTTPError) -> Optional[str]:
+    """EasyPost's error ``code`` (e.g. ``NOT_FOUND``) from an error
+    response's JSON body, if it has one.
+
+    Nothing else of the body is kept: its message and field errors can quote
+    an address, and the run's output goes to Healthchecks.
+    """
+    try:
+        body = json.loads(error.read())
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    detail = body.get("error") if isinstance(body, dict) else None
+    code = detail.get("code") if isinstance(detail, dict) else None
+    return code if isinstance(code, str) and _ERROR_CODE.fullmatch(code) else None
 
 
 def retry_after(error: urllib.error.HTTPError) -> Optional[float]:
@@ -674,10 +763,38 @@ def poll_unfinished(
             apply_tracker(shipment, tracker, now, summary)
 
 
-def relink(sessions: sessionmaker) -> int:
+def relink(sessions: sessionmaker, now: Optional[datetime.datetime] = None) -> int:
     """Rebuild the request links in one transaction; return how many."""
     with sessions() as session, session.begin():
-        return rebuild_links(session)
+        return rebuild_links(session, now)
+
+
+def listing_start(
+    sessions: sessionmaker,
+    now: datetime.datetime,
+    since: Optional[datetime.date] = None,
+) -> datetime.datetime:
+    """When the run's listing starts: ``WINDOW`` ago, or ``since``, or a
+    ``RESUME_OVERLAP`` before the newest stored label, whichever is earliest.
+
+    With no label stored yet, the newest label plays no part (the first
+    backfill is done with ``since``).
+    """
+    start = now - WINDOW
+    if since is not None:
+        start = min(
+            start,
+            datetime.datetime.combine(since, datetime.time(), datetime.timezone.utc),
+        )
+    with sessions() as session:
+        newest = session.scalar(
+            sa.select(models.Shipment.purchased_at)
+            .order_by(models.Shipment.purchased_at.desc())
+            .limit(1)
+        )
+    if newest is not None:
+        start = min(start, newest - RESUME_OVERLAP)
+    return start
 
 
 def run(
@@ -689,20 +806,15 @@ def run(
     """Sync labels from EasyPost, then rebuild the links; return the counts.
 
     ``since`` lists every label bought from that date (UTC) on, instead of
-    the last ``WINDOW``.
+    the last ``WINDOW`` (see ``listing_start``).
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
-    start = now - WINDOW
-    if since is not None:
-        start = min(
-            start,
-            datetime.datetime.combine(since, datetime.time(), datetime.timezone.utc),
-        )
+    start = listing_start(sessions, now, since)
     summary = Summary()
     listed = sync_listed(client, sessions, start, now, summary)
     poll_unfinished(client, sessions, listed, now, summary)
-    summary.links = relink(sessions)
+    summary.links = relink(sessions, now)
     return summary
 
 
@@ -742,7 +854,26 @@ def build_sessions() -> sessionmaker:
     # pylint: disable=import-outside-toplevel
     from .db_bootstrap import get_sync_database_url
 
-    return sessionmaker(bind=sa.create_engine(get_sync_database_url()))
+    # Keep row values out of error messages, which reach Healthchecks.
+    return sessionmaker(
+        bind=sa.create_engine(get_sync_database_url(), hide_parameters=True)
+    )
+
+
+def describe_failure(error: Exception) -> str:
+    """A failure as safe to log: no SQL statement, parameters or row values.
+
+    The run's output goes to Healthchecks. A database error is its class
+    name, with the driver's first message line for a DBAPI error (``database
+    is locked``); an ``ApiError`` is already safe.
+    """
+    if isinstance(error, sa.exc.DBAPIError):
+        lines = str(error.orig).splitlines()
+        message = lines[0][:200] if lines else ""
+        return f"{type(error).__name__}: {message}" if message else type(error).__name__
+    if isinstance(error, sa.exc.SQLAlchemyError):
+        return type(error).__name__
+    return str(error)
 
 
 def parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
@@ -782,7 +913,11 @@ def main(
     if sessions is None:
         sessions = build_sessions()
     if args.rebuild_links:
-        logger.info("shipment sync: %d links built", relink(sessions))
+        try:
+            logger.info("shipment sync: %d links built", relink(sessions))
+        except sa.exc.SQLAlchemyError as error:
+            logger.error("shipment sync failed: %s", describe_failure(error))
+            return 1
         return 0
     if client is None:
         try:
@@ -793,7 +928,7 @@ def main(
     try:
         summary = run(client, sessions, since=args.since)
     except (ApiError, sa.exc.SQLAlchemyError) as error:
-        logger.error("shipment sync failed: %s", error)
+        logger.error("shipment sync failed: %s", describe_failure(error))
         return 1
     logger.info("%s", summary.line())
     return 1 if summary.poll_failures else 0

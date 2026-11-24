@@ -457,8 +457,9 @@ class Shipment(Base):
     ``ibp/shipment_sync.py`` writes these from EasyPost; nothing else does.
     No recipient name or street address is stored: only the inmate number
     parsed from an individual label's addressee line and the unit the label
-    went to, when either can be told. ``reference`` is the label's raw
-    EasyPost reference (see ``shipment_sync.parse_reference``); the
+    went to, when either can be told. ``reference`` is the label's EasyPost
+    reference if it is an ``ibp1:`` tag (see ``shipment_sync.parse_reference``),
+    else NULL; the
     ``request_*`` columns are the request it names, without a foreign key
     since the tag may name one IBP no longer has.
     """
