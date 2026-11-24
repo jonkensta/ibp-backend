@@ -86,6 +86,11 @@ class MissingKey(RuntimeError):
     """No usable EasyPost key was given."""
 
 
+class Incomplete(RuntimeError):
+    """A ``--since`` re-evaluation could not cover every label; its message
+    is fixed text and counts."""
+
+
 # --- when a label stops being polled -----------------------------------------
 
 
@@ -322,7 +327,10 @@ def fetch_unlisted(  # pylint: disable=too-many-arguments,too-many-positional-ar
     The listing goes by when the EasyPost shipment was created, so a label
     bought on or after ``since`` from a shipment created before it is not
     listed, but must be read again too for a ``--since`` re-evaluation.
-    Each is committed on its own, like a page.
+    Each is committed on its own, like a page. A label counts as covered
+    only once an answer with its exact id was read and stored; an answer
+    with another id, no label, or not of EasyPost's shape raises
+    ``Incomplete``.
     """
     start = datetime.datetime.combine(since, datetime.time(), datetime.timezone.utc)
     with sessions() as session:
@@ -337,12 +345,18 @@ def fetch_unlisted(  # pylint: disable=too-many-arguments,too-many-positional-ar
         if easypost_id in listed:
             continue
         data = client.get(f"shipments/{urllib.parse.quote(easypost_id, safe='')}")
+        try:
+            label = read_label(data, units, unit_recipient)
+        except Malformed as error:
+            raise Incomplete("GET shipment: answer not of EasyPost's shape") from error
+        if label is None:
+            raise Incomplete("GET shipment: answer has no label")
+        if label.easypost_id != easypost_id:
+            raise Incomplete("GET shipment: answer is another shipment")
+        with sessions() as session, session.begin():
+            store_label(session, label, now, summary)
         summary.fetched_by_id += 1
         listed.add(easypost_id)
-        label = read_label(data, units, unit_recipient)
-        if label is not None and label.easypost_id == easypost_id:
-            with sessions() as session, session.begin():
-                store_label(session, label, now, summary)
 
 
 def loggable_id(shipment: models.Shipment) -> str:
@@ -451,8 +465,10 @@ def run(
     ``since`` lists every label bought from that date (UTC) on, instead of
     the last ``WINDOW`` (see ``listing_start``), then fetches by id every
     stored label bought since then that the listing missed
-    (``fetch_unlisted``): a re-evaluation of every label's unit. Anything
-    that fails raises before the links are rebuilt.
+    (``fetch_unlisted``): a re-evaluation of every label's unit. In such a
+    run anything that fails, a tracker poll included, raises before the
+    links are rebuilt, so links are only ever built from a complete
+    re-evaluation.
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -462,6 +478,8 @@ def run(
     if since is not None:
         fetch_unlisted(client, sessions, since, listed, now, summary)
     poll_unfinished(client, sessions, listed, now, summary)
+    if since is not None and summary.poll_failures:
+        raise Incomplete(f"{summary.poll_failures} trackers not fetched")
     summary.links = relink(sessions, now)
     return summary
 
@@ -538,7 +556,7 @@ def describe_failure(error: Exception) -> str:
         return type(error).__name__
     if isinstance(error, sa.exc.SQLAlchemyError):
         return type(error).__name__
-    if isinstance(error, (ApiError, StaleLinks)):
+    if isinstance(error, (ApiError, Incomplete, StaleLinks)):
         return str(error)
     return f"{type(error).__name__} at {crash_location(error)}"
 

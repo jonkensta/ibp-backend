@@ -1698,3 +1698,89 @@ def test_label_with_conflicting_destination_links_no_one(sessions):
     sync(FakeEasyPost([clean]), sessions)
     row = stored(sessions, "shp_00000001")
     assert (row.kind, row.unit_name) == ("individual", "ALPHA")
+
+
+# --- a --since run publishes only a complete re-evaluation ---------------------
+
+
+class AnswerById:
+    """A FakeEasyPost whose ``GET shipments/{id}`` answers ``answer``."""
+
+    def __init__(self, fake: FakeEasyPost, answer: dict):
+        self.fake, self.answer = fake, answer
+
+    def __call__(self, request, timeout):
+        if "/v2/shipments/" in request.full_url:
+            return io.BytesIO(json.dumps(self.answer).encode())
+        return self.fake(request, timeout)
+
+
+def stale_link_label(sessions) -> str:
+    """The id of seed_stale_link's label."""
+    seed_stale_link(sessions)
+    with sessions() as session:
+        return session.scalars(sa.select(models.Shipment.easypost_id)).one()
+
+
+def run_since(sessions, logs, urlopen, since="2026-01-01") -> int:
+    """main with --since against ``urlopen``."""
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        return shipment_sync.main(["--since", since], sessions=sessions, client=client)
+
+
+def assert_incomplete(sessions, logs, since="2026-01-01") -> None:
+    """The run said to re-run it and left the one stale link alone."""
+    assert (
+        f"re-evaluation since {since} is incomplete and the links were not "
+        f"rebuilt; re-run with --since {since}"
+    ) in logs.text
+    with sessions() as session:
+        assert session.query(models.PackageShipment).count() == 1
+
+
+@pytest.mark.parametrize(
+    "answer, failure",
+    [
+        (lambda id_: shipment(9, ago(3), selected_rate=None), "answer has no label"),
+        (
+            lambda id_: shipment(9, ago(3), tracking_code=None),
+            "answer has no label",
+        ),
+        (lambda id_: shipment(9, ago(3)), "answer is another shipment"),
+        (
+            lambda id_: {**shipment(9, ago(3)), "id": id_, "tracker": [SENTINEL]},
+            "answer not of EasyPost's shape",
+        ),
+    ],
+)
+def test_since_run_with_an_unusable_answer_by_id_is_incomplete(
+    sessions, logs, answer, failure
+):
+    """A fetch by id answered with no label, another shipment or a shape
+    not EasyPost's doesn't cover the stored label: the run fails without
+    rebuilding the links."""
+    easypost_id = stale_link_label(sessions)
+    urlopen = AnswerById(FakeEasyPost(), answer(easypost_id))
+    assert run_since(sessions, logs, urlopen) == 1
+    assert f"shipment sync failed: GET shipment: {failure}" in logs.text
+    assert "Sentinel" not in logs.text
+    assert_incomplete(sessions, logs)
+
+
+def test_since_run_with_a_failed_tracker_poll_rebuilds_no_links(sessions, logs):
+    """A tracker that can't be fetched in a --since run leaves the links as
+    they were: they are rebuilt only after every step succeeded."""
+    seed_stale_link(sessions)
+    today = datetime.datetime.now(datetime.timezone.utc)
+    with sessions() as session:
+        add_shipment(
+            session,
+            (today - 50 * DAY).strftime("%Y-%m-%dT%H:%M"),
+            events=(((today - 49 * DAY).strftime("%Y-%m-%dT%H:%M"), "in_transit"),),
+        )
+        session.commit()
+    since = (today - 10 * DAY).date().isoformat()
+    assert run_since(sessions, logs, FakeEasyPost(), since=since) == 1
+    assert "shipment sync failed: 1 trackers not fetched" in logs.text
+    assert_incomplete(sessions, logs, since=since)

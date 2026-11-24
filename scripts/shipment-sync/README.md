@@ -75,7 +75,11 @@ label must be read again. `--since <date>` lists every label bought from
 that date on, then fetches by id each stored label bought since then that
 the listing missed (the listing goes by when the EasyPost shipment was
 created, which can be before the label was bought; the summary counts them
-as "fetched by id"), and only then rebuilds the links. Pages are committed
+as "fetched by id"), and only then rebuilds the links. A stored label
+counts as read again only once an answer with its own id was read and
+stored: an answer with no label, another shipment's id or a shape not
+EasyPost's makes the run incomplete, as does any tracker that can't be
+fetched. Pages are committed
 as they go, so a run that fails part-way leaves some labels matched the new
 way and some the old: it then exits 1 without rebuilding the links, logging
 that the re-evaluation is incomplete and must be re-run with the same
