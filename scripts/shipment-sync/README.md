@@ -59,7 +59,8 @@ the `docker` group (`id -nG`).
       install -D -m755 ibp-shipment-sync ~/.local/bin/ibp-shipment-sync
       install -d -m700 ~/.config/ibp-shipment-sync
       # production key, from Bitwarden app.easypost.com field api-key-production
-      (umask 077; cat > ~/.config/ibp-shipment-sync/easypost-api-key)
+      # (asked for only if not there, so a re-run keeps it)
+      [ -s ~/.config/ibp-shipment-sync/easypost-api-key ] || (umask 077; cat > ~/.config/ibp-shipment-sync/easypost-api-key)
       # optional: (umask 077; echo https://... > ~/.config/ibp-shipment-sync/ping-url)
       sudo cp ibp-shipment-sync.service ibp-shipment-sync.timer /etc/systemd/system/
       sudo systemctl daemon-reload
@@ -108,12 +109,18 @@ at its first failed step, with a non-zero status):
       trap 'echo "STOPPED before the upgrade: fix the failed step and run this block again; the timer stays stopped" >&2' ERR
       # 1. Stop the timer, so no new daily run starts.
       sudo systemctl stop ibp-shipment-sync.timer
-      # 2. Wait for a run already in progress: a running oneshot service is
-      #    "activating", which is-active alone doesn't count as running.
-      while systemctl is-active --quiet ibp-shipment-sync.service || [ "$(systemctl show -p ActiveState --value ibp-shipment-sync.service)" = activating ]; do sleep 5; done
-      # 3. ...and for any one-off sync container (an older wrapper's has no
-      #    label of its own, so wait on every one-off backend container).
-      while [ -n "$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)" ]; do sleep 5; done
+      # 2.-3. Then:
+      # Wait for a sync already running: the service (a running oneshot is
+      # "activating") and any one-off backend container (an older wrapper's has
+      # no label of its own). Each query must succeed: a failed one stops the
+      # block instead of reading as "nothing running".
+      while :; do
+        state=$(systemctl show -p ActiveState --value ibp-shipment-sync.service)
+        case "$state" in active | activating | deactivating | reloading) sleep 5; continue ;; esac
+        running=$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)
+        if [ -z "$running" ]; then break; fi
+        sleep 5
+      done
       # 4. Install the new release's wrapper and units (with its run lock)
       #    before anything else runs the sync; from a checkout of the new tag:
       cd <checkout of the new tag>/scripts/shipment-sync
