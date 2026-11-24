@@ -8,7 +8,7 @@ from typing import Optional
 
 import pytest
 
-from ibp import shipment_sync
+from ibp import easypost_client, shipment_sync
 from ibp.shipment_sync import EasyPost
 
 KEY = "EZAK" + "0" * 28
@@ -49,7 +49,7 @@ def local_easypost(monkeypatch):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     monkeypatch.setattr(
-        shipment_sync, "API", f"http://127.0.0.1:{server.server_address[1]}/v2"
+        easypost_client, "API", f"http://127.0.0.1:{server.server_address[1]}/v2"
     )
     try:
         yield asked, answer

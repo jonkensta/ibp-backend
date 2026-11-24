@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 
-from ibp import db_bootstrap, models, shipment_links, shipment_sync
+from ibp import db_bootstrap, easypost_client, models, shipment_links, shipment_sync
 from ibp.labels import RequestKey
 from ibp.shipment_sync import (
     EasyPost,
@@ -1099,7 +1099,7 @@ def test_client_paces_requests():
     client = EasyPost(KEY, urlopen=fake, sleep=sleeps.append)
     for _ in range(3):
         client.get("shipments", {"start_datetime": "a", "end_datetime": "b"})
-    assert sleeps == [shipment_sync.PACE_SECONDS] * 2
+    assert sleeps == [easypost_client.PACE_SECONDS] * 2
 
 
 def test_paging_across_more_than_one_page(sessions, monkeypatch):
