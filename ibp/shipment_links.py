@@ -28,8 +28,9 @@ each named by the link's ``basis``:
   request processed on a session's date waits for the next one, if that
   session is within ``BULK_LINK_WINDOW`` of it. A request's unit is the one
   it recorded when it was filled (``requests.unit_name``), so a transfer
-  afterwards doesn't move it; a request filled before that was recorded
-  (NULL) uses its inmate's unit as it is now. The unit's shipping method is
+  afterwards doesn't move it; one that recorded no unit (the inmate's was
+  unknown then) links to no box. A request filled before units were
+  recorded (``unit_recorded`` false) uses its inmate's unit as it is now. The unit's shipping method is
   not consulted: boxes do go to units marked Individual, and a package with
   its own label is already linked to it.
 
@@ -183,6 +184,17 @@ def _bulk_sessions(
     return sessions
 
 
+def request_unit() -> sa.ColumnElement:
+    """A request's unit for linking: the one it recorded when filled
+    (possibly none, which matches no unit) if it recorded one, else its
+    inmate's current unit (a request filled before units were recorded).
+    The query must join the request's inmate."""
+    return sa.case(
+        (models.Request.unit_recorded, models.Request.unit_name),
+        else_=models.Inmate.unit_name,
+    )
+
+
 def _place_requests(
     session: Session,
     units: frozenset[UnitKey],
@@ -192,7 +204,7 @@ def _place_requests(
     """Filled requests to a place's ``units`` that a session from ``first``
     to ``last`` could link: (jurisdiction, inmate id, index, processed date).
 
-    A request's unit is the one it recorded, else its inmate's current one.
+    A request's unit is ``request_unit``.
     """
     (jurisdiction,) = {unit[0] for unit in units}
     unit_names = sorted(unit[1] for unit in units)
@@ -213,9 +225,7 @@ def _place_requests(
             )
             .where(
                 models.Inmate.jurisdiction == jurisdiction,
-                sa.func.coalesce(models.Request.unit_name, models.Inmate.unit_name).in_(
-                    unit_names
-                ),
+                request_unit().in_(unit_names),
                 models.Request.action == "Filled",
                 models.Request.date_processed >= first - BULK_LINK_WINDOW,
                 models.Request.date_processed <= last - BULK_LEAD,

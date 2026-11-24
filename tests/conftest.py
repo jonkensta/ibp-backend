@@ -17,8 +17,11 @@ MIGRATE_SCRIPT = TOPLEVEL / "scripts" / "migrate.py"
 SHIPMENT_TABLES = ("package_shipments", "tracking_events", "shipments")
 DROP_SHIPMENT_TABLES = [f"DROP TABLE {table}" for table in SHIPMENT_TABLES]
 # Added by the migration after the shipment tracking one; tests that build an
-# older schema with create_all drop it.
-DROP_REQUEST_UNIT_NAME = "ALTER TABLE requests DROP COLUMN unit_name"
+# older schema with create_all drop them.
+REQUEST_UNIT_COLUMNS = ("unit_recorded", "unit_name")
+DROP_REQUEST_UNIT_COLUMNS = [
+    f"ALTER TABLE requests DROP COLUMN {column}" for column in REQUEST_UNIT_COLUMNS
+]
 
 if str(TOPLEVEL) not in sys.path:
     sys.path.insert(0, str(TOPLEVEL))

@@ -267,13 +267,16 @@ def test_box_to_a_unit_marked_individual_still_links(session):
     }
 
 
-def seed_transfer(session, recorded):
+def seed_transfer(session, unit_name, recorded=True):
     """Inmate 11111111, filled at ALPHA and since moved to BETA, with the
-    request recording ``recorded``; a box to each unit after the fill."""
+    request recording ``unit_name`` (or, unless ``recorded``, recording
+    nothing, as before units were recorded); a box to each unit after the
+    fill."""
     add_unit(session, "ALPHA")
     add_unit(session, "BETA", street1="200 Other Way")
     add_inmate(session, 11111111, "BETA")
-    add_request(session, 11111111, 0, "2026-03-01").unit_name = recorded
+    request = add_request(session, 11111111, 0, "2026-03-01")
+    request.unit_name, request.unit_recorded = unit_name, recorded
     old = box(session, "2026-03-05T15:00", unit="ALPHA")
     new = box(session, "2026-03-05T16:00", unit="BETA")
     session.commit()
@@ -289,13 +292,20 @@ def test_transferred_inmate_links_to_the_recorded_unit(session):
     }
 
 
-def test_request_without_a_recorded_unit_follows_the_inmate(session):
-    """A request with no recorded unit (filled before it was recorded) uses
-    the inmate's unit as it is now."""
-    _, new = seed_transfer(session, None)
+def test_request_filled_before_units_were_recorded_follows_the_inmate(session):
+    """A request that recorded nothing (filled before units were recorded)
+    uses the inmate's unit as it is now."""
+    _, new = seed_transfer(session, None, recorded=False)
     assert rebuild(session) == {
         ("Texas", 11111111, 0, new.easypost_id, "unit_session"),
     }
+
+
+def test_request_filled_with_no_unit_links_to_no_box(session):
+    """A request filled while its inmate's unit was unknown recorded that:
+    it links to no box, not to the unit the inmate turned up at later."""
+    seed_transfer(session, None)
+    assert not rebuild(session)
 
 
 def test_recorded_unit_that_no_longer_exists_links_nothing(session):
@@ -336,7 +346,8 @@ def test_boxes_under_two_codes_of_one_place_are_one_session(session):
     """Boxes stored under different codes of one place on one date are one
     session; a request recording one code links to both."""
     seed_one_place(session)
-    add_request(session, 33333333, 1, "2026-03-01").unit_name = "MAIN"
+    moved = add_request(session, 33333333, 1, "2026-03-01")
+    moved.unit_name, moved.unit_recorded = "MAIN", True
     first = box(session, "2026-03-05T15:00", unit="CAMP")
     second = box(session, "2026-03-05T16:00", unit="MAIN")
     session.commit()

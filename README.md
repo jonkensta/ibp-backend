@@ -268,8 +268,9 @@ requested) that USPS never scanned, since it was never mailed:
   processed date (a request processed on a session's date waits for the
   next one), if within 28 days. A request's unit is the one its inmate was
   at when it was filled (`requests.unit_name`, recorded since that column
-  was added), so a transfer afterwards doesn't move it; an older request,
-  with none recorded, uses its inmate's unit as it is now. The unit's
+  was added), so a transfer afterwards doesn't move it; one filled while the
+  inmate's unit was unknown recorded none and links to no box. An older
+  request (`unit_recorded` false) uses its inmate's unit as it is now. The unit's
   shipping method is not consulted: boxes do go to units marked Individual.
 
 `GET /requests/{code}/shipments` lists a request's linked labels with their

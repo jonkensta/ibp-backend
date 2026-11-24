@@ -1,4 +1,4 @@
-"""Add requests.unit_name
+"""Add requests.unit_name and requests.unit_recorded
 
 Revision ID: e9b3d7a1c5f2
 Revises: a3c8e6f2d9b4
@@ -21,14 +21,22 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     """Upgrade schema.
 
-    Nullable with no default and no data step: the unit an inmate was at
-    when an existing request was filled is not known, and copying today's
-    unit would record a transfer's new unit as if it were the old one.
+    No data step: the unit an inmate was at when an existing request was
+    filled is not known, so every existing request records none
+    (``unit_recorded`` false, ``unit_name`` NULL); copying today's unit
+    would record a transfer's new unit as if it were the old one.
     """
     op.add_column('requests', sa.Column('unit_name', sa.String(), nullable=True))
+    op.add_column(
+        'requests',
+        sa.Column(
+            'unit_recorded', sa.Boolean(), server_default=sa.false(), nullable=False
+        ),
+    )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     with op.batch_alter_table('requests') as batch_op:
+        batch_op.drop_column('unit_recorded')
         batch_op.drop_column('unit_name')

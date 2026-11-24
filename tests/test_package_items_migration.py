@@ -10,7 +10,7 @@ from alembic.script import ScriptDirectory
 import ibp.models
 from ibp import db_bootstrap
 
-from .conftest import DROP_REQUEST_UNIT_NAME, SHIPMENT_TABLES, TOPLEVEL
+from .conftest import DROP_REQUEST_UNIT_COLUMNS, SHIPMENT_TABLES, TOPLEVEL
 from .test_migrate_end_to_end import run_migrate
 
 PACKAGE_TABLES = {"package_items", "registrations"}
@@ -110,7 +110,7 @@ def test_bootstrap_adopts_pre_package_items_schema(tmp_path: Path, monkeypatch):
         with engine.begin() as connection:
             # Added by the package_items migration or later ones.
             for statement in [
-                DROP_REQUEST_UNIT_NAME,
+                *DROP_REQUEST_UNIT_COLUMNS,
                 "ALTER TABLE requests DROP COLUMN contents_revision",
                 "ALTER TABLE inmates DROP COLUMN pronouns",
                 "ALTER TABLE inmates DROP COLUMN pronouns_set_by",
