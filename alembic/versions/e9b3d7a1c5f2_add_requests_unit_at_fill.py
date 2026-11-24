@@ -8,6 +8,8 @@ Create Date: 2026-11-24 00:00:00.000000
 
 from typing import Sequence, Union
 
+import logging
+
 from alembic import context, op
 import sqlalchemy as sa
 
@@ -16,6 +18,8 @@ revision: str = 'e9b3d7a1c5f2'
 down_revision: Union[str, None] = 'a3c8e6f2d9b4'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+logger = logging.getLogger('alembic.runtime.migration')
 
 
 def new_columns() -> list[sa.Column]:
@@ -55,10 +59,23 @@ def upgrade() -> None:
     (``unit_recorded`` false, ``unit_name`` NULL); copying today's unit
     would record a transfer's new unit as if it were the old one.
 
-    Each column is added only if it is missing: SQLite DDL isn't
-    transactional under alembic, so a run interrupted after adding one may
-    have left it without recording this revision. A column already there
-    must have the type and nullability this revision gives it.
+    Each column is added only if it is missing: before migrations ran in
+    one transaction on SQLite (``alembic/env.py``), an interrupted run could
+    leave one without recording this revision. A column already there must
+    have the type and nullability this revision gives it.
+
+    Repairing such a half state keeps what history is left (``db_bootstrap``
+    replays this revision when a column is missing at head):
+
+    - ``unit_name`` there, ``unit_recorded`` missing (a downgrade stopped
+      after dropping it): every request with a unit name provably recorded
+      one, so it is restored as recorded; a request that recorded an
+      unknown unit can't be told from an older one and is restored as not
+      recorded, which is logged as a warning;
+    - ``unit_recorded`` there with recorded requests, ``unit_name`` missing:
+      the recorded units are gone, and linking those requests by the
+      inmate's current unit would be wrong, so the upgrade fails and the
+      database must be restored from a backup.
     """
     existing = (
         {}
@@ -68,11 +85,32 @@ def upgrade() -> None:
             for found in sa.inspect(op.get_bind()).get_columns('requests')
         }
     )
+    if 'unit_recorded' in existing and 'unit_name' not in existing:
+        recorded = op.get_bind().execute(
+            sa.text('SELECT COUNT(*) FROM requests WHERE unit_recorded')
+        ).scalar_one()
+        if recorded:
+            raise RuntimeError(
+                f"requests.unit_name is missing but {recorded} requests recorded "
+                "a unit at fill: those units are lost; restore the database "
+                "from the backup taken before the migration"
+            )
+    restore_recorded = 'unit_name' in existing and 'unit_recorded' not in existing
     for column in new_columns():
         if column.name in existing:
             check_existing(existing[column.name], column)
         else:
             op.add_column('requests', column)
+    if restore_recorded:
+        op.execute(
+            sa.text('UPDATE requests SET unit_recorded = :yes WHERE unit_name IS NOT NULL')
+            .bindparams(yes=True)
+        )
+        logger.warning(
+            "requests.unit_recorded was missing: restored as recorded for every "
+            "request with a unit name; requests filled while their inmate's "
+            "unit was unknown could not be recovered and now count as older"
+        )
 
 
 def downgrade() -> None:
