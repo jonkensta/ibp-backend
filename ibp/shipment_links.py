@@ -30,9 +30,9 @@ each named by the link's ``basis``:
   it recorded when it was filled (``requests.unit_name``), so a transfer
   afterwards doesn't move it; one that recorded no unit (the inmate's was
   unknown then) links to no box. A request filled before units were
-  recorded (``unit_recorded`` false) uses its inmate's unit as it is now. The unit's shipping method is
-  not consulted: boxes do go to units marked Individual, and a package with
-  its own label is already linked to it.
+  recorded (``unit_recorded`` false) uses its inmate's unit as it is now.
+  The unit's shipping method is not consulted: boxes do go to units marked
+  Individual, and a package with its own label is already linked to it.
 
 A label that was never mailed (``never_mailed``) gets no links. Nothing
 here works out delivery: the stored events are left for that.
