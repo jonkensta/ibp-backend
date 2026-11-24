@@ -280,10 +280,12 @@ tracking code, purchase time, kind, basis, tracker status and events.
 `GET /metrics/delivery-latency` (`ibp/delivery_latency.py`) gives, for the
 Filled requests of each postmark month (`YYYY-MM`), how long they took to
 arrive. `method` is `all` (default), `individual` (links with basis
-`reference` or `inmate_number`) or `bulk` (`unit_session`); `date_range`
-(`6months`, `12months`, `all`) or `start_date` and `end_date` filter the
-postmark, as for `/metrics/requests`. With no start to the range (no
-`start_date`, and `date_range` `all` or absent), the months before the
+`reference` or `inmate_number`) or `bulk` (`unit_session`). `start_date`,
+`end_date` and the `date_range` preset (`6months` or `12months`, ending
+today; `all`) filter the postmark, as for `/metrics/requests`: a given
+`start_date` or `end_date` wins for its bound, the preset only fills a
+bound not given, and `filters_applied` reports the bounds used. With no
+start to the range (none given, and none from the preset), the months before the
 first one with a linked request (of any method) are left out, so the series
 starts where shipment data does rather than decades back; later months stay
 even with no links, and with nothing linked at all the list is empty. A
