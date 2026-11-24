@@ -22,6 +22,9 @@ REQUEST_UNIT_COLUMNS = ("unit_recorded", "unit_name")
 DROP_REQUEST_UNIT_COLUMNS = [
     f"ALTER TABLE requests DROP COLUMN {column}" for column in REQUEST_UNIT_COLUMNS
 ]
+# Added by the migration after that; tests building an older schema with the
+# shipment tables drop it.
+DROP_EVER_SCANNED = "ALTER TABLE shipments DROP COLUMN ever_scanned"
 
 if str(TOPLEVEL) not in sys.path:
     sys.path.insert(0, str(TOPLEVEL))

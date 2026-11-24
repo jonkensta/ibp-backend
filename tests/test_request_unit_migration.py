@@ -9,7 +9,7 @@ from alembic import command
 import ibp.models
 from ibp import db_bootstrap
 
-from .conftest import DROP_REQUEST_UNIT_COLUMNS, TOPLEVEL
+from .conftest import DROP_EVER_SCANNED, DROP_REQUEST_UNIT_COLUMNS, TOPLEVEL
 from .test_package_items_migration import head_revision, scalar
 from .test_shipments_migration import insert_shipment
 
@@ -63,9 +63,8 @@ def bootstrap(monkeypatch, url: str) -> None:
     db_bootstrap.bootstrap()
 
 
-def test_migration_is_the_only_head_after_shipments():
-    """The revision is the single head, right after the shipments one."""
-    assert head_revision() == "e9b3d7a1c5f2"
+def test_migration_follows_shipments():
+    """The revision comes right after the shipments one."""
     source = MIGRATION.read_text(encoding="utf-8")
     assert "down_revision: Union[str, None] = 'a3c8e6f2d9b4'" in source
     assert db_bootstrap.PRE_REQUEST_UNIT_REVISION == "a3c8e6f2d9b4"
@@ -120,7 +119,7 @@ def test_bootstrap_adopts_pre_unit_name_create_all_schema(tmp_path: Path, monkey
     try:
         ibp.models.Base.metadata.create_all(engine)
         with engine.begin() as connection:
-            for statement in DROP_REQUEST_UNIT_COLUMNS:
+            for statement in [*DROP_REQUEST_UNIT_COLUMNS, DROP_EVER_SCANNED]:
                 connection.execute(sqlalchemy.text(statement))
         insert_filled_request(engine)
         bootstrap(monkeypatch, url)

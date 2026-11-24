@@ -61,9 +61,11 @@ PRE_RACE_SEX_WORDS_REVISION = "c4e7a2f9d1b3"
 # tables were added; it is the race and sex data migration.
 PRE_SHIPMENTS_REVISION = "d2a6f8c3e1b7"
 # Last revision before requests.unit_name and unit_recorded were added; it
-# adds the shipments
-# tables.
+# adds the shipments tables.
 PRE_REQUEST_UNIT_REVISION = "a3c8e6f2d9b4"
+# Last revision before shipments.ever_scanned was added; it adds the request
+# unit columns.
+PRE_EVER_SCANNED_REVISION = "e9b3d7a1c5f2"
 
 _SYNC_SCHEME_MAPPING = {
     "postgresql+asyncpg": "postgresql",
@@ -130,6 +132,16 @@ def seed_shipping_settings(url: str) -> None:
         engine.dispose()
 
 
+def built_revision(columns: set[str]) -> str:
+    """The newest revision a create_all schema with the shipment tables has
+    every column of."""
+    if "shipments.ever_scanned" in columns:
+        return "head"
+    if "requests.unit_recorded" in columns:
+        return PRE_EVER_SCANNED_REVISION
+    return PRE_REQUEST_UNIT_REVISION
+
+
 def adopt_create_all_schema(
     config: Config, tables: set[str], columns: set[str]
 ) -> None:
@@ -141,13 +153,11 @@ def adopt_create_all_schema(
     """
     if "shipments" in tables:
         # Schema was created by Base.metadata.create_all from the current
-        # models (with requests.unit_recorded) or from older ones. Adopt
-        # it before the race and sex data migration and run that, then stamp
+        # models (with shipments.ever_scanned) or from older ones. Adopt it
+        # before the race and sex data migration and run that, then stamp
         # the schema migrations after it that create_all already built, and
-        # replay the rest.
-        built = (
-            "head" if "requests.unit_recorded" in columns else PRE_REQUEST_UNIT_REVISION
-        )
+        # replay the rest (which also backfills ever_scanned).
+        built = built_revision(columns)
         logger.info(
             "Existing schema without alembic_version detected; stamping %s, "
             "upgrading to %s, then stamping %s and upgrading to head.",
@@ -258,7 +268,11 @@ def adopt_create_all_schema(
 REPAIRABLE_COLUMNS = {
     "requests.unit_name": PRE_REQUEST_UNIT_REVISION,
     "requests.unit_recorded": PRE_REQUEST_UNIT_REVISION,
+    "shipments.ever_scanned": PRE_EVER_SCANNED_REVISION,
 }
+# Those revisions, oldest first: replaying from the oldest one needed
+# replays the later ones too, each adding only what is missing.
+REPAIR_ORDER = [PRE_REQUEST_UNIT_REVISION, PRE_EVER_SCANNED_REVISION]
 
 
 def missing_columns(url: str) -> set[str]:
@@ -281,7 +295,8 @@ def check_columns(config: Config, url: str) -> None:
     """
     missing = missing_columns(url)
     if missing and missing <= REPAIRABLE_COLUMNS.keys():
-        (revision,) = {REPAIRABLE_COLUMNS[column] for column in missing}
+        needed = {REPAIRABLE_COLUMNS[column] for column in missing}
+        revision = next(rev for rev in REPAIR_ORDER if rev in needed)
         logger.warning(
             "Schema at head lacks %s; replaying from %s to restore it.",
             ", ".join(sorted(missing)),
