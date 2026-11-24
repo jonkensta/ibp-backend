@@ -240,20 +240,20 @@ with the ZIP: a P.O. box number confirms the units with that box, and a
 street line is compared with the street line of each unit at its house
 number. The same street, allowing USPS's respelling (`264 FM 3478` /
 `264 FM 3478 RD`, `1916 North Hwy. 36 Bypass` / `1916 N HIGHWAY 36 BYP`),
-confirms the unit; a different street (`100 Oak Lane` against `100 Main
-Street`) rules it out; a line normalisation can't decide on (`100 FM 1` /
-`100 FM 1 SPUR`) is undecided. Only a well-formed ZIP or ZIP+4 counts
-(`77-000` or an empty ZIP is none), on both sides. A name units in several
-places have is narrowed by the label's ZIP; if that leaves no place or
-several, the label has no unit. A name stands if the label has no street
-line, if its street confirms the named unit, or if it can't be told from
-the named unit's and that number and ZIP are the named place's alone.
-The evidence conflicts if the street confirms another unit, is a different
-street than the named unit's at the same number, or can't be told from a
-unit's at a number other places share: the label then has no unit, and an
-untagged one is `other` (below). Without a name, the confirmed units (or,
-at a number and ZIP of one place only, the undecided ones) must be of one
-place (`UnitMatcher.locate`).
+confirms the unit; a street that can't be shown the same (a renamed
+street, another suffix: `8602 Peach Street` / `8602 PEACH AVE`) confirms
+nothing, but is no evidence of another destination either. Only a
+well-formed ZIP or ZIP+4 counts (`77-000` or an empty ZIP is none), on both
+sides. A name units in several places have is narrowed by the label's ZIP;
+if that leaves no place or several, the label has no unit. A name stands
+unless the address gives positive evidence for another place: the label's
+street (or P.O. box) is the same as another place's and not the named
+unit's, or its house number and ZIP are another place's and none of the
+named unit's. Then the evidence conflicts: the label has no unit, and an
+untagged one is `other` (below). Several units at one address are told
+apart by name. Without a name, the confirmed units (or, at a number and
+ZIP of one place only, the undecided ones) must be of one place
+(`UnitMatcher.locate`).
 
 Units with the same jurisdiction, display name and 5-digit ZIP that also
 share a delivery line are one place (one facility under several provider

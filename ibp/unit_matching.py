@@ -128,26 +128,31 @@ class UnitMatcher:
           compared with the street line of each unit at that house number
           (``unit_places.same_street``, which allows USPS's respelling,
           added suffixes and directionals): the same street confirms the
-          unit, a different street rules it out, and a line normalisation
-          can't decide on leaves it undecided.
+          unit; a street shown different, or one normalisation can't
+          decide on, confirms nothing.
 
-        Only a valid ZIP (``unit_places.zip5``) on both sides counts. The
-        rules, with the name's place P:
+        Only a valid ZIP (``unit_places.zip5``) on both sides counts.
+        Spelling drifts between our street and USPS's (a renamed street, a
+        suffix spelled differently), so failing to prove two streets the
+        same is no evidence of another destination: a conflict needs
+        positive evidence for another place. With the name's place P:
 
-        - no name: the confirmed units must be of one place; with none, the
-          undecided ones count only if every unit at that number and ZIP is
-          of one place;
-        - a label with no street line or box (a name only): P stands;
-        - the label's street confirms P: P;
-        - it confirms another unit's: conflict;
-        - it is a different street than P's at the same number: conflict;
-        - it can't be told from P's: P if that number and ZIP are unique to
-          P's place, else conflict; undecided against another place's unit
-          at that number: conflict;
-        - it is at no unit's number, or only at other units' numbers on
-          other streets: P stands;
-        - a name that stays ambiguous gives no unit, and a conflict if the
-          address supports none of the places it could mean.
+        - the label's street (or P.O. box) is the same as P's: P, whatever
+          other places share that address (the name tells them apart);
+        - it is the same as another place's and not P's: conflict;
+        - its house number and ZIP match no line of P's but some other
+          place's: conflict;
+        - otherwise P stands: no street line, a number no unit has, or P's
+          number with a street that differs from P's or can't be told from
+          it but is the same as no other place's (also when several places
+          share the number and the street matches none of them).
+
+        Without a name the address must say where the label went: the
+        units whose street (or box) is the same must be of one place; with
+        none, units whose street can't be told count only if every unit at
+        that number and ZIP is of one place. A name that stays ambiguous
+        gives no unit, and a conflict if the address supports none of the
+        places it could mean.
 
         A conflict gives no unit and ``conflict``, so nothing about where
         the label went is trusted. Units in different places at one address
@@ -175,26 +180,22 @@ class UnitMatcher:
             )
         if place is None:
             return self._ambiguous_name(named, evidence)
-        return self._named_place(place, evidence, unique)
+        return self._named_place(place, evidence)
 
-    def _named_place(
-        self, place: UnitKey, evidence: AddressEvidence, unique: bool
-    ) -> Destination:
+    def _named_place(self, place: UnitKey, evidence: AddressEvidence) -> Destination:
         """The destination when the name gives ``place`` (see ``locate``)."""
 
         def places_of(units: set[UnitKey]) -> set[Optional[UnitKey]]:
             return {self._places.representative(unit) for unit in units}
 
-        if place in places_of(evidence.confirmed):
+        confirmed = places_of(evidence.confirmed)
+        if place in confirmed:
             return Destination(place)
-        if evidence.confirmed:
-            return Destination(None, conflict=True)
-        if evidence.undecided:
-            if place in places_of(evidence.undecided) and unique:
-                return Destination(place)
-            return Destination(None, conflict=True)
-        if place in places_of(evidence.at_number):
-            return Destination(None, conflict=True)  # its number, another street
+        if confirmed:
+            return Destination(None, conflict=True)  # another place's street
+        at_number = places_of(evidence.at_number)
+        if at_number and place not in at_number:
+            return Destination(None, conflict=True)  # another place's number
         return Destination(place)
 
     def _ambiguous_name(
