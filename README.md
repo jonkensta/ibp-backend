@@ -230,12 +230,15 @@ are in [`scripts/shipment-sync/`](scripts/shipment-sync/README.md).
 A label's unit comes from its tag; else from an address line (street1,
 street2 or company, letters and digits only, any case) that is a unit's key
 name (the provider's code, e.g. `PLANE JAIL`) or its display name (the
-first of the unit's street1 and street2 that doesn't start with a digit and
-isn't a P.O. box, e.g. `Plane Unit`), whatever the ZIP; else from the house
-number and ZIP of a unit's street line. Units with the same jurisdiction,
-display name and 5-digit ZIP are one place (one facility under several
-provider codes); units at one street address with different display names
-are not. A label whose candidates are more than one place is narrowed by
+first of the unit's street1 and street2 that is plainly a facility's name:
+it has a word such as Unit, Jail, Camp, Center or FCI, and isn't a street
+number, a P.O. box or a street such as `FM 686`, `Prison Road` or `IH 45`;
+a unit with no such line has no display name), whatever the ZIP; else from
+the house number and ZIP of a unit's street line. Units with the same
+jurisdiction, display name and 5-digit ZIP that also share a house number
+or P.O. box number are one place (one facility under several provider
+codes); units with no number are never merged, and units at one street
+address with different display names are not one place. A label whose candidates are more than one place is narrowed by
 ZIP, and is left without a unit if that leaves no place or several; a label
 to one place stores its representative, the alphabetically first unit name
 (`ibp/unit_places.py`). Stored labels are matched again only when listed

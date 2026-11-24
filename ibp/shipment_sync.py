@@ -50,7 +50,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from . import models
 from .labels import RequestKey, parse_request_code
 from .shipment_links import never_mailed, rebuild_links
-from .unit_places import Places, display_name, squeeze, zip5
+from .unit_places import Places, display_name, leading_number, squeeze, zip5
 
 logger = logging.getLogger(__name__)
 
@@ -143,15 +143,6 @@ def normalize(text: Optional[str]) -> str:
     return re.sub(r"[^A-Z0-9]+", " ", (text or "").upper()).strip()
 
 
-_HOUSE_NUMBER = re.compile(r"\s*(\d+)(?!\d)")
-
-
-def house_number(street: Optional[str]) -> Optional[str]:
-    """The number a street line starts with, if any (``264`` of ``264 FM 3478``)."""
-    match = _HOUSE_NUMBER.match(street or "")
-    return match[1] if match else None
-
-
 class UnitMatcher:
     """Finds the IBP unit a label went to, by its tag, name or address."""
 
@@ -167,7 +158,7 @@ class UnitMatcher:
             for name in {squeeze(unit.name), squeeze(display_name(unit))} - {""}:
                 self._by_name[name].append((*key, zip5(unit.zipcode)))
             for street in (unit.street1, unit.street2):
-                number = house_number(street)
+                number = leading_number(street)
                 if number is not None:
                     self._by_number[(number, zip5(unit.zipcode))].add(key)
 
@@ -209,7 +200,7 @@ class UnitMatcher:
             return place
         at_number: set[tuple[str, str]] = set()
         for field in ("street1", "street2"):
-            number = house_number(address.get(field))
+            number = leading_number(address.get(field))
             if number is not None:
                 at_number |= self._by_number.get((number, zipcode), set())
         return self._places.one_place(at_number)

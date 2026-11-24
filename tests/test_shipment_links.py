@@ -330,6 +330,22 @@ def seed_one_place(session):
         add_request(session, inmate_id, 0, "2026-03-01")
 
 
+def test_box_to_one_of_two_same_named_units_links_only_its_own(session):
+    """Units with one display name and ZIP at different streets are not one
+    place: a box tagged for one links only its inmates' requests."""
+    add_unit(session, "FIRST", street1="Twin Unit", street2="100 First Rd")
+    add_unit(session, "SECOND", street1="Twin Unit", street2="200 Second Rd")
+    add_inmate(session, 11111111, "FIRST")
+    add_inmate(session, 22222222, "SECOND")
+    add_request(session, 11111111, 0, "2026-03-01")
+    add_request(session, 22222222, 0, "2026-03-01")
+    sent = box(session, "2026-03-05T15:00", unit="FIRST")
+    session.commit()
+    assert rebuild(session) == {
+        ("Texas", 11111111, 0, sent.easypost_id, "unit_session"),
+    }
+
+
 def test_box_to_one_place_serves_every_code(session):
     """A box stored under a place's representative links requests of inmates
     under either code, but not those of the other unit at its address."""

@@ -402,6 +402,35 @@ def test_unit_matching_by_display_name(coded_matcher, address, unit):
     assert coded_matcher.by_address(address) == unit
 
 
+def test_street_without_a_number_is_not_a_name(api_db):
+    """A unit whose only line is a street with no house number has no
+    display name, so a label on that street elsewhere doesn't match it."""
+    with api_db() as session:
+        matcher = UnitMatcher(
+            [add_unit(session, "ROADSIDE", street1="Highway 190", zipcode="77000")]
+        )
+    assert matcher.by_address({"street1": "HIGHWAY 190", "zip": "77999"}) is None
+    assert matcher.by_address({"street1": "Roadside", "zip": "77999"}) == (
+        "Texas",
+        "ROADSIDE",
+    )
+
+
+def test_same_named_units_at_different_streets_stay_ambiguous(api_db):
+    """Two units with one display name and ZIP at different streets aren't
+    one place, so the name alone doesn't tell them apart."""
+    with api_db() as session:
+        matcher = UnitMatcher(
+            [
+                add_unit(session, "FIRST", street1="Twin Unit", street2="100 First Rd"),
+                add_unit(
+                    session, "SECOND", street1="Twin Unit", street2="200 Second Rd"
+                ),
+            ]
+        )
+    assert matcher.by_address({"street1": "TWIN UNIT", "zip": "77000"}) is None
+
+
 def test_relisting_updates_a_stored_labels_unit(sessions):
     """A label stored before its unit could be told gets the unit when it is
     listed again (as ``--since`` lists every label back to its date)."""
