@@ -10,11 +10,12 @@ import json
 import logging
 import sqlite3
 import urllib.error
+from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
 
-from ibp import db_bootstrap, models, shipment_sync
+from ibp import db_bootstrap, models, shipment_links, shipment_sync
 from ibp.labels import RequestKey
 from ibp.shipment_sync import (
     EasyPost,
@@ -625,6 +626,62 @@ def test_database_failure_logs_no_statement_or_values(
             assert shipment_sync.main(argv, sessions=sessions, client=client) == 1
         assert f"shipment sync failed: {logged}" in logs.text
         assert "Sentinel" not in logs.text and "Personname" not in logs.text
+
+
+def source_line(module, text: str) -> int:
+    """The number of the line of ``module``'s source holding ``text``."""
+    lines = Path(module.__file__).read_text(encoding="utf-8").splitlines()
+    (number,) = [n for n, line in enumerate(lines, 1) if text in line]
+    return number
+
+
+def assert_one_safe_line(logs, capsys, logged: str) -> None:
+    """The failure is logged as ``logged``, with no traceback or sentinel."""
+    output = capsys.readouterr()
+    assert f"shipment sync failed: {logged}" in logs.text
+    assert all(record.exc_info is None for record in logs.records)
+    for text in (logs.text, output.out, output.err):
+        assert "Sentinel" not in text and "Personname" not in text
+        assert "Traceback" not in text
+
+
+def test_unexpected_error_logs_class_and_place_only(sessions, logs, capsys):
+    """EasyPost data of an unexpected shape fails the run with one line: the
+    error's class and where IBP's code raised it, not its message."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    malformed = shipment(1, now - DAY, parcel={"weight": SENTINEL})
+    client = EasyPost(KEY, urlopen=FakeEasyPost([malformed]), sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        assert shipment_sync.main([], sessions=sessions, client=client) == 1
+    line = source_line(shipment_sync, "weight_oz=float(weight)")
+    assert_one_safe_line(logs, capsys, f"ValueError at ibp/shipment_sync.py:{line}")
+
+
+def test_unexpected_error_rebuilding_links_logs_class_and_place_only(
+    sessions, logs, capsys, monkeypatch
+):
+    """--rebuild-links fails the same way, at the innermost frame in ibp/."""
+
+    def fail(*args, **kwargs):
+        raise KeyError(SENTINEL)
+
+    monkeypatch.setattr(shipment_links, "_unit_session_links", fail)
+    with logs.at_level(logging.INFO):
+        assert shipment_sync.main(["--rebuild-links"], sessions=sessions) == 1
+    line = source_line(shipment_links, "_unit_session_links(session, shipments")
+    assert_one_safe_line(logs, capsys, f"KeyError at ibp/shipment_links.py:{line}")
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, SystemExit])
+def test_interrupt_and_exit_are_not_caught(sessions, monkeypatch, error):
+    """Ctrl-C and sys.exit still end the run as they would anyway."""
+
+    def stop(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(shipment_sync, "relink", stop)
+    with pytest.raises(error):
+        shipment_sync.main(["--rebuild-links"], sessions=sessions)
 
 
 def test_job_engine_hides_parameters(monkeypatch, tmp_path):

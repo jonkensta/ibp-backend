@@ -35,6 +35,7 @@ import os
 import re
 import sys
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -860,12 +861,27 @@ def build_sessions() -> sessionmaker:
     )
 
 
+def crash_location(error: BaseException) -> str:
+    """Where ``error`` was raised in IBP's code: the file (as
+    ``ibp/shipment_sync.py``) and line of its traceback's innermost frame
+    inside the ``ibp`` package."""
+    package = Path(__file__).resolve().parent
+    location = "unknown location"
+    for frame, line in traceback.walk_tb(error.__traceback__):
+        path = Path(frame.f_code.co_filename).resolve()
+        if path.is_relative_to(package):
+            location = f"{path.relative_to(package.parent).as_posix()}:{line}"
+    return location
+
+
 def describe_failure(error: Exception) -> str:
     """A failure as safe to log: no SQL statement, parameters or row values.
 
     The run's output goes to Healthchecks. A database error is its class
     name, with the driver's first message line for a DBAPI error (``database
-    is locked``); an ``ApiError`` is already safe.
+    is locked``); an ``ApiError`` is already safe. Anything else (a bug, or
+    EasyPost data of an unexpected shape) is its class name and where IBP's
+    code raised it: its message could hold a value from a label.
     """
     if isinstance(error, sa.exc.DBAPIError):
         lines = str(error.orig).splitlines()
@@ -873,7 +889,9 @@ def describe_failure(error: Exception) -> str:
         return f"{type(error).__name__}: {message}" if message else type(error).__name__
     if isinstance(error, sa.exc.SQLAlchemyError):
         return type(error).__name__
-    return str(error)
+    if isinstance(error, ApiError):
+        return str(error)
+    return f"{type(error).__name__} at {crash_location(error)}"
 
 
 def parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
@@ -907,27 +925,24 @@ def main(
 ) -> int:
     """Run the sync; return 0, 1 if anything failed, 2 without a key.
 
-    ``sessions`` and ``client`` are for tests.
+    Any failure but a missing key is logged as one line (``describe_failure``),
+    never as a traceback. ``sessions`` and ``client`` are for tests.
     """
     args = parse_args(argv)
-    if sessions is None:
-        sessions = build_sessions()
-    if args.rebuild_links:
-        try:
-            logger.info("shipment sync: %d links built", relink(sessions))
-        except sa.exc.SQLAlchemyError as error:
-            logger.error("shipment sync failed: %s", describe_failure(error))
-            return 1
-        return 0
-    if client is None:
-        try:
-            client = EasyPost(read_key(args.key_file))
-        except MissingKey as error:
-            logger.error("%s", error)
-            return 2
     try:
+        if sessions is None:
+            sessions = build_sessions()
+        if args.rebuild_links:
+            logger.info("shipment sync: %d links built", relink(sessions))
+            return 0
+        if client is None:
+            try:
+                client = EasyPost(read_key(args.key_file))
+            except MissingKey as error:
+                logger.error("%s", error)
+                return 2
         summary = run(client, sessions, since=args.since)
-    except (ApiError, sa.exc.SQLAlchemyError) as error:
+    except Exception as error:  # pylint: disable=broad-exception-caught
         logger.error("shipment sync failed: %s", describe_failure(error))
         return 1
     logger.info("%s", summary.line())

@@ -21,7 +21,11 @@ Each run logs one line of counts, e.g.
 No names or addresses are logged or stored.
 
 Exit status: 0 ok, 1 an EasyPost or database error (or a tracker it could
-not fetch), 2 no usable key. Monitoring: pings a Healthchecks check (start,
+not fetch) or any other failure, 2 no usable key. A failure is logged as one
+line with no values: an EasyPost error's status and code, a database error's
+class (and the driver's first message line), anything else its class and
+the file and line in `ibp/` that raised it (`ValueError at
+ibp/shipment_sync.py:384`), never a traceback. Monitoring: pings a Healthchecks check (start,
 then the exit status with the output) if `~/.config/ibp-shipment-sync/ping-url`
 exists.
 
