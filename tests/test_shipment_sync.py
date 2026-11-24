@@ -567,6 +567,28 @@ def test_normal_run_lists_the_last_35_days(sessions):
     ]
 
 
+@pytest.mark.parametrize(
+    "newest, first_start",
+    [
+        (None, "2026-02-03T12:00:00Z"),  # nothing stored: the last 35 days
+        (10, "2026-02-03T12:00:00Z"),  # stored recently: the last 35 days
+        (50, "2026-01-18T12:00:00Z"),  # an outage: a day before the newest
+    ],
+)
+def test_listing_resumes_from_the_newest_stored_label(sessions, newest, first_start):
+    """After an outage longer than the window, listing starts a day before
+    the newest stored label, so nothing bought meanwhile is missed."""
+    if newest is not None:
+        with sessions() as session:
+            old_label(session, newest + 5, [])
+            old_label(session, newest, [])
+            session.commit()
+    fake = FakeEasyPost([shipment(1, ago(40))])
+    summary = sync(fake, sessions)
+    assert fake.listing_windows()[-1][0] == first_start
+    assert summary.new == (1 if newest == 50 else 0)
+
+
 # --- polling older labels ------------------------------------------------------
 
 

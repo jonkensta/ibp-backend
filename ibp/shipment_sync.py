@@ -5,7 +5,9 @@ Run as ``python -m ibp.shipment_sync`` (daily on ibp-server, see
 never buys, refunds or changes anything at EasyPost.
 
 A normal run lists the labels bought in the last ``WINDOW`` (35 days, so
-late events are picked up), in windows split at UTC month starts, each paged
+late events are picked up), or since a day before the newest stored label if
+that is older (so a long outage leaves no gap), in windows split at UTC
+month starts, each paged
 newest first with ``before_id``, and stores each label and every tracking
 event not stored yet. Each stored label not listed in the run that is not
 finished (``is_finished``) then has its tracker fetched on its own. Last, the
@@ -52,6 +54,9 @@ logger = logging.getLogger(__name__)
 API = "https://api.easypost.com/v2"
 # Labels bought this recently are listed on every run.
 WINDOW = datetime.timedelta(days=35)
+# After an outage longer than WINDOW, listing starts this long before the
+# newest stored label.
+RESUME_OVERLAP = datetime.timedelta(days=1)
 # A label is finished (no longer polled) this long after its last delivery,
 # or this long after purchase whatever happened.
 DELIVERED_SETTLED = datetime.timedelta(days=60)
@@ -717,6 +722,34 @@ def relink(sessions: sessionmaker) -> int:
         return rebuild_links(session)
 
 
+def listing_start(
+    sessions: sessionmaker,
+    now: datetime.datetime,
+    since: Optional[datetime.date] = None,
+) -> datetime.datetime:
+    """When the run's listing starts: ``WINDOW`` ago, or ``since``, or a
+    ``RESUME_OVERLAP`` before the newest stored label, whichever is earliest.
+
+    With no label stored yet, the newest label plays no part (the first
+    backfill is done with ``since``).
+    """
+    start = now - WINDOW
+    if since is not None:
+        start = min(
+            start,
+            datetime.datetime.combine(since, datetime.time(), datetime.timezone.utc),
+        )
+    with sessions() as session:
+        newest = session.scalar(
+            sa.select(models.Shipment.purchased_at)
+            .order_by(models.Shipment.purchased_at.desc())
+            .limit(1)
+        )
+    if newest is not None:
+        start = min(start, newest - RESUME_OVERLAP)
+    return start
+
+
 def run(
     client: EasyPost,
     sessions: sessionmaker,
@@ -726,16 +759,11 @@ def run(
     """Sync labels from EasyPost, then rebuild the links; return the counts.
 
     ``since`` lists every label bought from that date (UTC) on, instead of
-    the last ``WINDOW``.
+    the last ``WINDOW`` (see ``listing_start``).
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
-    start = now - WINDOW
-    if since is not None:
-        start = min(
-            start,
-            datetime.datetime.combine(since, datetime.time(), datetime.timezone.utc),
-        )
+    start = listing_start(sessions, now, since)
     summary = Summary()
     listed = sync_listed(client, sessions, start, now, summary)
     poll_unfinished(client, sessions, listed, now, summary)
