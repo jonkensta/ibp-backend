@@ -3,12 +3,17 @@
 # pylint: disable=redefined-outer-name
 
 import datetime
+import email.message
+import io
+import json
 import logging
+import sqlite3
+import urllib.error
 
 import pytest
 import sqlalchemy as sa
 
-from ibp import models, shipment_sync
+from ibp import db_bootstrap, models, shipment_sync
 from ibp.labels import RequestKey
 from ibp.shipment_sync import (
     EasyPost,
@@ -516,6 +521,119 @@ def test_client_gives_up_after_retries():
     with pytest.raises(shipment_sync.ApiError, match="HTTP 500"):
         client.get("shipments", {"start_datetime": "a", "end_datetime": "b"})
     assert len(fake.calls) == shipment_sync.RETRIES
+
+
+SENTINEL = "Sentinel Q. Personname"
+
+
+def failing_urlopen(status: int, body: bytes):
+    """An opener that answers every request with HTTP ``status`` and ``body``."""
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        raise urllib.error.HTTPError(
+            request.full_url, status, "error", email.message.Message(), io.BytesIO(body)
+        )
+
+    return urlopen
+
+
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        (
+            json.dumps(
+                {
+                    "error": {
+                        "code": "ADDRESS.VERIFY.FAILURE",
+                        "message": f"Address for {SENTINEL} not found",
+                        "errors": [{"field": "street1", "message": SENTINEL}],
+                    }
+                }
+            ).encode(),
+            "GET shipments: HTTP 422 ADDRESS.VERIFY.FAILURE",
+        ),
+        (f"<html>{SENTINEL}</html>".encode(), "GET shipments: HTTP 422"),
+        (json.dumps({"error": {"code": SENTINEL}}).encode(), "GET shipments: HTTP 422"),
+        (json.dumps([SENTINEL]).encode(), "GET shipments: HTTP 422"),
+    ],
+)
+def test_http_error_keeps_only_status_and_code(body, message):
+    """An EasyPost error is its status and error code, never its body."""
+    client = EasyPost(KEY, urlopen=failing_urlopen(422, body), sleep=lambda _: None)
+    with pytest.raises(shipment_sync.ApiError) as raised:
+        client.get("shipments")
+    assert str(raised.value) == message
+
+
+def test_failed_run_logs_no_easypost_body(sessions, logs):
+    """A run failing on an EasyPost error logs no part of its body."""
+    body = json.dumps({"error": {"code": "BAD", "message": SENTINEL}}).encode()
+    client = EasyPost(KEY, urlopen=failing_urlopen(400, body), sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        assert shipment_sync.main([], sessions=sessions, client=client) == 1
+    assert "HTTP 400 BAD" in logs.text
+    assert "Sentinel" not in logs.text and "Personname" not in logs.text
+
+
+@pytest.mark.parametrize(
+    "error, logged",
+    [
+        (
+            sa.exc.IntegrityError(
+                f"INSERT INTO shipments (reference) VALUES ('{SENTINEL}')",
+                {"reference": SENTINEL},
+                sqlite3.IntegrityError(
+                    "UNIQUE constraint failed: shipments.easypost_id"
+                ),
+            ),
+            "IntegrityError: UNIQUE constraint failed: shipments.easypost_id",
+        ),
+        (
+            sa.exc.OperationalError(
+                "SELECT 1", (SENTINEL,), sqlite3.OperationalError("database is locked")
+            ),
+            "OperationalError: database is locked",
+        ),
+        (
+            sa.exc.StatementError(
+                f"bad value {SENTINEL}", f"SELECT '{SENTINEL}'", {"x": SENTINEL}, None
+            ),
+            "StatementError",
+        ),
+        (sa.exc.InvalidRequestError(SENTINEL), "InvalidRequestError"),
+    ],
+)
+def test_database_failure_logs_no_statement_or_values(
+    sessions, logs, monkeypatch, error, logged
+):
+    """A database error is logged as its class (and the driver's message),
+    without the statement or its parameters."""
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(shipment_sync, "run", fail)
+    monkeypatch.setattr(shipment_sync, "relink", fail)
+    client = EasyPost(KEY, urlopen=FakeEasyPost(), sleep=lambda _: None)
+    for argv in ([], ["--rebuild-links"]):
+        logs.clear()
+        with logs.at_level(logging.INFO):
+            assert shipment_sync.main(argv, sessions=sessions, client=client) == 1
+        assert f"shipment sync failed: {logged}" in logs.text
+        assert "Sentinel" not in logs.text and "Personname" not in logs.text
+
+
+def test_job_engine_hides_parameters(monkeypatch, tmp_path):
+    """The job's own engine keeps parameters out of its error messages."""
+    monkeypatch.setattr(
+        db_bootstrap, "get_sync_database_url", lambda: f"sqlite:///{tmp_path}/x.db"
+    )
+    with shipment_sync.build_sessions()() as session:
+        engine = session.get_bind()
+    try:
+        assert engine.hide_parameters
+    finally:
+        engine.dispose()
 
 
 def test_client_paces_requests():

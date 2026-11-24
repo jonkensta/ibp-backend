@@ -28,6 +28,7 @@ import base64
 import dataclasses
 import datetime
 import decimal
+import http.client
 import json
 import logging
 import os
@@ -467,8 +468,10 @@ class EasyPost:  # pylint: disable=too-few-public-methods
                     return json.load(response)
             except urllib.error.HTTPError as error:
                 if error.code not in RETRY_STATUSES or attempt == RETRIES - 1:
-                    body = error.read().decode(errors="replace")[:300]
-                    raise ApiError(f"GET {path}: HTTP {error.code} {body}") from error
+                    code = error_code(error)
+                    raise ApiError(
+                        f"GET {path}: HTTP {error.code}" + (f" {code}" if code else "")
+                    ) from error
                 wait = retry_after(error) or 2.0**attempt
                 logger.warning(
                     "GET %s: HTTP %d, retrying in %ss", path, error.code, wait
@@ -480,6 +483,25 @@ class EasyPost:  # pylint: disable=too-few-public-methods
                 logger.warning("GET %s: %s, retrying", path, error.reason)
                 self._sleep(2.0**attempt)
         raise ApiError(f"GET {path}: giving up after retries")
+
+
+_ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
+
+def error_code(error: urllib.error.HTTPError) -> Optional[str]:
+    """EasyPost's error ``code`` (e.g. ``NOT_FOUND``) from an error
+    response's JSON body, if it has one.
+
+    Nothing else of the body is kept: its message and field errors can quote
+    an address, and the run's output goes to Healthchecks.
+    """
+    try:
+        body = json.loads(error.read())
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    detail = body.get("error") if isinstance(body, dict) else None
+    code = detail.get("code") if isinstance(detail, dict) else None
+    return code if isinstance(code, str) and _ERROR_CODE.fullmatch(code) else None
 
 
 def retry_after(error: urllib.error.HTTPError) -> Optional[float]:
@@ -807,7 +829,26 @@ def build_sessions() -> sessionmaker:
     # pylint: disable=import-outside-toplevel
     from .db_bootstrap import get_sync_database_url
 
-    return sessionmaker(bind=sa.create_engine(get_sync_database_url()))
+    # Keep row values out of error messages, which reach Healthchecks.
+    return sessionmaker(
+        bind=sa.create_engine(get_sync_database_url(), hide_parameters=True)
+    )
+
+
+def describe_failure(error: Exception) -> str:
+    """A failure as safe to log: no SQL statement, parameters or row values.
+
+    The run's output goes to Healthchecks. A database error is its class
+    name, with the driver's first message line for a DBAPI error (``database
+    is locked``); an ``ApiError`` is already safe.
+    """
+    if isinstance(error, sa.exc.DBAPIError):
+        lines = str(error.orig).splitlines()
+        message = lines[0][:200] if lines else ""
+        return f"{type(error).__name__}: {message}" if message else type(error).__name__
+    if isinstance(error, sa.exc.SQLAlchemyError):
+        return type(error).__name__
+    return str(error)
 
 
 def parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
@@ -847,7 +888,11 @@ def main(
     if sessions is None:
         sessions = build_sessions()
     if args.rebuild_links:
-        logger.info("shipment sync: %d links built", relink(sessions))
+        try:
+            logger.info("shipment sync: %d links built", relink(sessions))
+        except sa.exc.SQLAlchemyError as error:
+            logger.error("shipment sync failed: %s", describe_failure(error))
+            return 1
         return 0
     if client is None:
         try:
@@ -858,7 +903,7 @@ def main(
     try:
         summary = run(client, sessions, since=args.since)
     except (ApiError, sa.exc.SQLAlchemyError) as error:
-        logger.error("shipment sync failed: %s", error)
+        logger.error("shipment sync failed: %s", describe_failure(error))
         return 1
     logger.info("%s", summary.line())
     return 1 if summary.poll_failures else 0
