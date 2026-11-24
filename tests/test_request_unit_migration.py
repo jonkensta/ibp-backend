@@ -197,3 +197,28 @@ def test_upgrade_refuses_a_different_existing_column(tmp_path: Path, column):
             command.upgrade(config, "head")
     finally:
         engine.dispose()
+
+
+def test_downgrade_with_foreign_keys_on_keeps_links(tmp_path: Path):
+    """Downgrading doesn't rebuild requests, so with foreign keys on its
+    cascade doesn't empty package_shipments."""
+    url = f"sqlite:///{tmp_path / 'links.db'}"
+    config = db_bootstrap.build_alembic_config(url)
+    command.upgrade(config, "head")
+    engine = sqlalchemy.create_engine(url)
+
+    def foreign_keys_on(connection, _record):
+        connection.execute("PRAGMA foreign_keys=ON")
+
+    sqlalchemy.event.listen(sqlalchemy.engine.Engine, "connect", foreign_keys_on)
+    try:
+        insert_filled_request(engine)
+        insert_shipment(engine)
+        assert scalar(engine, "PRAGMA foreign_keys") == 1
+        command.downgrade(config, db_bootstrap.PRE_REQUEST_UNIT_REVISION)
+        assert not COLUMNS & columns(url)
+        assert scalar(engine, "SELECT COUNT(*) FROM package_shipments") == 1
+        assert scalar(engine, "SELECT COUNT(*) FROM requests") == 1
+    finally:
+        sqlalchemy.event.remove(sqlalchemy.engine.Engine, "connect", foreign_keys_on)
+        engine.dispose()

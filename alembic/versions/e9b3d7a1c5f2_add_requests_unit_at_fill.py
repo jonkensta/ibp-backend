@@ -69,7 +69,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
-    with op.batch_alter_table('requests') as batch_op:
-        batch_op.drop_column('unit_recorded')
-        batch_op.drop_column('unit_name')
+    """Downgrade schema.
+
+    On SQLite the columns are dropped with a native ``ALTER TABLE ... DROP
+    COLUMN``, not batch mode: rebuilding ``requests`` would drop the table,
+    and with foreign keys on, that deletes every ``package_shipments`` row
+    (``ON DELETE CASCADE``).
+    """
+    for column in reversed(new_columns()):
+        if op.get_context().dialect.name == 'sqlite':
+            op.execute(f'ALTER TABLE requests DROP COLUMN {column.name}')
+        else:
+            op.drop_column('requests', column.name)
