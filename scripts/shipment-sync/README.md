@@ -21,11 +21,15 @@ Each run logs one line of counts, e.g.
 No names or addresses are logged or stored.
 
 Exit status: 0 ok, 1 an EasyPost or database error (or a tracker it could
-not fetch) or any other failure, 2 no usable key. A failure is logged as one
-line with no values: an EasyPost error's status and code, a database error's
-class (and the driver's first message line), anything else its class and
-the file and line in `ibp/` that raised it (`ValueError at
-ibp/shipment_sync.py:384`), never a traceback. Monitoring: pings a Healthchecks check (start,
+not fetch) or any other failure, 2 no usable key. Failures, retries and
+unfetched trackers are logged as one line each with no values: a fixed
+operation (`GET shipments`, `GET shipment`, `GET tracker`, never an id or
+query string) with an EasyPost error's HTTP status and code (a known code,
+else `other`), or a network error's class; a database error's class and
+SQLite's error code name (`OperationalError: SQLITE_BUSY`), never its
+message; anything else its class and the file and line in `ibp/` that
+raised it (`ValueError at ibp/shipment_sync.py:384`); never a traceback.
+An unfetched tracker's warning names the label's EasyPost id. Monitoring: pings a Healthchecks check (start,
 then the exit status with the output) if `~/.config/ibp-shipment-sync/ping-url`
 exists.
 

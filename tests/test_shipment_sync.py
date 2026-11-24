@@ -808,12 +808,22 @@ def failing_urlopen(status: int, body: bytes):
             "GET shipments: HTTP 422 ADDRESS.VERIFY.FAILURE",
         ),
         (f"<html>{SENTINEL}</html>".encode(), "GET shipments: HTTP 422"),
-        (json.dumps({"error": {"code": SENTINEL}}).encode(), "GET shipments: HTTP 422"),
+        (
+            json.dumps({"error": {"code": SENTINEL}}).encode(),
+            "GET shipments: HTTP 422 other",
+        ),
+        # A code that looks like one but isn't known is not logged.
+        (
+            json.dumps({"error": {"code": "Sentinel.Personname"}}).encode(),
+            "GET shipments: HTTP 422 other",
+        ),
+        (json.dumps({"error": {"code": 7}}).encode(), "GET shipments: HTTP 422 other"),
         (json.dumps([SENTINEL]).encode(), "GET shipments: HTTP 422"),
     ],
 )
 def test_http_error_keeps_only_status_and_code(body, message):
-    """An EasyPost error is its status and error code, never its body."""
+    """An EasyPost error is its status and a known error code, never its
+    body or an unknown code."""
     client = EasyPost(KEY, urlopen=failing_urlopen(422, body), sleep=lambda _: None)
     with pytest.raises(shipment_sync.ApiError) as raised:
         client.get("shipments")
@@ -822,12 +832,25 @@ def test_http_error_keeps_only_status_and_code(body, message):
 
 def test_failed_run_logs_no_easypost_body(sessions, logs):
     """A run failing on an EasyPost error logs no part of its body."""
-    body = json.dumps({"error": {"code": "BAD", "message": SENTINEL}}).encode()
+    body = json.dumps({"error": {"code": SENTINEL, "message": SENTINEL}}).encode()
     client = EasyPost(KEY, urlopen=failing_urlopen(400, body), sleep=lambda _: None)
     with logs.at_level(logging.INFO):
         assert shipment_sync.main([], sessions=sessions, client=client) == 1
-    assert "HTTP 400 BAD" in logs.text
+    assert "shipment sync failed: GET shipments: HTTP 400 other" in logs.text
     assert "Sentinel" not in logs.text and "Personname" not in logs.text
+
+
+def sqlite_error(*statements: str) -> sqlite3.Error:
+    """The error SQLite raises running ``statements``, carrying its code."""
+    connection = sqlite3.connect(":memory:")
+    try:
+        for statement in statements:
+            connection.execute(statement)
+    except sqlite3.Error as error:
+        return error
+    finally:
+        connection.close()
+    raise AssertionError("no error")
 
 
 @pytest.mark.parametrize(
@@ -837,17 +860,29 @@ def test_failed_run_logs_no_easypost_body(sessions, logs):
             sa.exc.IntegrityError(
                 f"INSERT INTO shipments (reference) VALUES ('{SENTINEL}')",
                 {"reference": SENTINEL},
-                sqlite3.IntegrityError(
-                    "UNIQUE constraint failed: shipments.easypost_id"
+                sqlite_error(
+                    "CREATE TABLE t (x UNIQUE)",
+                    "INSERT INTO t VALUES (1)",
+                    "INSERT INTO t VALUES (1)",
                 ),
             ),
-            "IntegrityError: UNIQUE constraint failed: shipments.easypost_id",
+            "IntegrityError: SQLITE_CONSTRAINT_UNIQUE",
         ),
+        # The driver's message itself can name a value.
         (
             sa.exc.OperationalError(
-                "SELECT 1", (SENTINEL,), sqlite3.OperationalError("database is locked")
+                "SELECT 1",
+                (SENTINEL,),
+                sqlite_error('SELECT * FROM "Sentinel Q. Personname"'),
             ),
-            "OperationalError: database is locked",
+            "OperationalError: SQLITE_ERROR",
+        ),
+        # A driver error without SQLite's code is its class alone.
+        (
+            sa.exc.OperationalError(
+                "SELECT 1", (), sqlite3.OperationalError(f"locked by {SENTINEL}")
+            ),
+            "OperationalError",
         ),
         (
             sa.exc.StatementError(
@@ -861,8 +896,8 @@ def test_failed_run_logs_no_easypost_body(sessions, logs):
 def test_database_failure_logs_no_statement_or_values(
     sessions, logs, monkeypatch, error, logged
 ):
-    """A database error is logged as its class (and the driver's message),
-    without the statement or its parameters."""
+    """A database error is logged as its class (and SQLite's error code
+    name), without the statement, its parameters or the driver's message."""
 
     def fail(*args, **kwargs):
         raise error
@@ -932,6 +967,46 @@ def test_interrupt_and_exit_are_not_caught(sessions, monkeypatch, error):
     monkeypatch.setattr(shipment_sync, "relink", stop)
     with pytest.raises(error):
         shipment_sync.main(["--rebuild-links"], sessions=sessions)
+
+
+def test_request_failures_name_the_operation_only(logs):
+    """Retry warnings and errors name a fixed operation, not the request's
+    id or query string."""
+    client = EasyPost(KEY, urlopen=failing_urlopen(503, b""), sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        with pytest.raises(shipment_sync.ApiError) as raised:
+            client.get("trackers/trk_Sentinel")
+        with pytest.raises(shipment_sync.ApiError):
+            client.get("shipments", {"start_datetime": "Sentinel"})
+    assert str(raised.value) == "GET tracker: HTTP 503"
+    assert "GET tracker: HTTP 503, retrying" in logs.text
+    assert "GET shipments: HTTP 503, retrying" in logs.text
+    assert "Sentinel" not in logs.text and "trk_" not in logs.text
+
+
+@pytest.mark.parametrize(
+    "reason, logged",
+    [
+        (f"cannot reach {SENTINEL}", "URLError"),
+        (
+            ConnectionRefusedError(111, f"refused by {SENTINEL}"),
+            "ConnectionRefusedError",
+        ),
+    ],
+)
+def test_network_error_is_its_reasons_class(logs, reason, logged):
+    """A network error is logged as its reason's class, not its text."""
+
+    def urlopen(request, timeout):  # pylint: disable=unused-argument
+        raise urllib.error.URLError(reason)
+
+    client = EasyPost(KEY, urlopen=urlopen, sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        with pytest.raises(shipment_sync.ApiError) as raised:
+            client.get("shipments")
+    assert str(raised.value) == f"GET shipments: {logged}"
+    assert f"GET shipments: {logged}, retrying" in logs.text
+    assert "Sentinel" not in logs.text
 
 
 def test_job_engine_hides_parameters(monkeypatch, tmp_path):
@@ -1173,6 +1248,21 @@ def test_failed_tracker_poll_is_counted_and_others_continue(sessions):
         session.commit()
     summary = sync(FakeEasyPost(), sessions)
     assert (summary.polled, summary.poll_failures) == (0, 1)
+
+
+def test_unfetched_tracker_warning_names_no_tracker_id(sessions, logs):
+    """The warning for a tracker not fetched names the label's opaque
+    EasyPost id and the operation, not the tracker's path."""
+    with sessions() as session:
+        label = old_label(session, 50, [(48, "in_transit")])
+        session.commit()
+        easypost_id, tracker_id = label.easypost_id, label.tracker_id
+    with logs.at_level(logging.INFO):
+        sync(FakeEasyPost(), sessions)
+    assert f"tracker for {easypost_id} not fetched: GET tracker: HTTP 404" in (
+        logs.text
+    )
+    assert tracker_id not in logs.text
 
 
 # --- the command line ----------------------------------------------------------
