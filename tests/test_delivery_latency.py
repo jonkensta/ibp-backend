@@ -14,10 +14,13 @@ from ibp.delivery_latency import (
     FilledRequest,
     LabelOutcome,
     Link,
+    Rows,
+    is_provisional,
     label_outcomes,
     load_rows,
     percentile,
     request_delivery,
+    settle_days,
     summarize,
 )
 from ibp.schemas import DeliveryMethodEnum
@@ -25,6 +28,7 @@ from ibp.schemas import DeliveryMethodEnum
 from .shipment_helpers import add_inmate, add_request, add_shipment, add_unit, utc
 
 CHICAGO = ZoneInfo("America/Chicago")
+TODAY = datetime.date(2026, 11, 24)
 NUMBER = 12345678
 KEY = ("Texas", NUMBER, 0)
 
@@ -57,7 +61,7 @@ def event(shipment_id: int, when: str, status: str) -> Event:
 
 def only_month(requests, links, events, method=DeliveryMethodEnum.ALL):
     """The single month ``summarize`` returns, as a dict."""
-    (month,) = summarize(requests, links, events, method, CHICAGO)
+    (month,) = summarize(requests, links, events, method, CHICAGO, TODAY).months
     return month.model_dump()
 
 
@@ -79,6 +83,7 @@ def test_one_label():
         "latest": quartiles,
         "median_handling": 4.0,
         "median_waiting": 1.0,
+        "provisional": False,
     }
 
 
@@ -342,7 +347,7 @@ def test_months_are_by_postmark_and_sorted():
         filled(postmarked="2026-02-27", key=("Texas", NUMBER, 1)),
     ]
 
-    months = summarize(requests, [], [], DeliveryMethodEnum.ALL, CHICAGO)
+    months = summarize(requests, [], [], DeliveryMethodEnum.ALL, CHICAGO, TODAY).months
 
     assert [m.month for m in months] == ["2026-02", "2026-04"]
 
@@ -434,6 +439,7 @@ def test_endpoint_shape(client, api_db):
         "latest": None,
         "median_handling": None,
         "median_waiting": None,
+        "provisional": False,
     }
     # Postmarked 2026-02-22, processed 2026-03-01; delivered after 11 days
     # (own label) and after 12 or 15 days (the session).
@@ -448,7 +454,10 @@ def test_endpoint_shape(client, api_db):
         "latest": {"p25": 12.0, "median": 13.0, "p75": 14.0, "median_transit": 4.5},
         "median_handling": 7.0,
         "median_waiting": 1.5,
+        "provisional": False,
     }
+    # Two deliveries are too few to measure the settle time.
+    assert body["settle_days"] == 90
 
 
 def test_endpoint_method_and_dates(client, api_db):
@@ -478,7 +487,7 @@ def test_endpoint_empty(client, api_db):  # pylint: disable=unused-argument
     assert response.json()["data"] == []
 
 
-def run_loader(api_db, start=None, end=None, method=DeliveryMethodEnum.ALL):
+def run_loader(api_db, start=None, end=None):
     """Run ``load_rows`` on the test database; return its result and every
     statement it sent, with its parameters."""
     with api_db() as session:
@@ -493,7 +502,7 @@ def run_loader(api_db, start=None, end=None, method=DeliveryMethodEnum.ALL):
         sa.event.listen(engine.sync_engine, "before_cursor_execute", record)
         try:
             async with AsyncSession(engine) as session:
-                return await load_rows(session, start, end, method)
+                return await load_rows(session, start, end)
         finally:
             await engine.dispose()
 
@@ -501,40 +510,64 @@ def run_loader(api_db, start=None, end=None, method=DeliveryMethodEnum.ALL):
 
 
 def test_loader_reads_everything_in_one_statement(api_db):
-    """Requests, links and the delivered and returned events (no other
-    status) come from one statement, each once."""
+    """The Filled counts, the linked requests, their links and the delivered
+    and returned events (no other status) come from one statement, each
+    once."""
     seed(api_db)
 
-    (requests, links, events), statements = run_loader(api_db)
+    rows, statements = run_loader(api_db)
 
     assert len(statements) == 1
     assert "package_shipments" in statements[0][0]
     assert "tracking_events" in statements[0][0]
-    assert len(requests) == 4  # the Tossed request is left out
-    assert len(links) == len({(link.key, link.shipment_id) for link in links}) == 4
-    assert sorted(e.status for e in events) == ["delivered"] * 3
-    assert {e.shipment_id for e in events} < {link.shipment_id for link in links}
+    # Every Filled request is counted; the Tossed one is not.
+    assert rows.filled == {"2026-01": 1, "2026-02": 3}
+    # Only linked requests are read one by one.
+    assert {r.key for r in rows.requests} == {
+        ("Texas", NUMBER, 0),
+        ("Texas", NUMBER + 1, 0),
+        ("Texas", NUMBER, 1),
+    }
+    assert len(rows.links) == len({(x.key, x.shipment_id) for x in rows.links}) == 4
+    assert sorted(e.status for e in rows.events) == ["delivered"] * 3
+    assert {e.shipment_id for e in rows.events} < {x.shipment_id for x in rows.links}
+
+
+def test_loader_reads_every_method(api_db):
+    """Links of every method are read, since the settle time is worked out
+    over all of them."""
+    seed(api_db)
+
+    rows, _ = run_loader(api_db)
+
+    assert {x.basis for x in rows.links} == {
+        "reference",
+        "unit_session",
+        "inmate_number",
+    }
 
 
 def test_loader_fetches_events_only_for_cohort_labels(api_db):
-    """A postmark range loads the events of its own requests' labels only."""
+    """A postmark range loads its own requests and labels' events only."""
     seed(api_db)
 
-    (requests, links, events), statements = run_loader(
+    january, statements = run_loader(
         api_db, datetime.date(2026, 1, 1), datetime.date(2026, 1, 31)
     )
-    (_, february_links, february_events), _ = run_loader(
+    february, _ = run_loader(
         api_db, datetime.date(2026, 2, 1), datetime.date(2026, 2, 28)
     )
 
-    assert [r.key for r in requests] == [("Texas", NUMBER, 1)]
-    assert len(links) == 1
-    # The February labels' deliveries are not read for January.
-    assert events == []
     assert len(statements) == 1
-    assert len(february_events) == 3
-    assert {e.shipment_id for e in february_events} <= {
-        link.shipment_id for link in february_links
+    assert january.filled == {"2026-01": 1}
+    assert [r.key for r in january.requests] == [("Texas", NUMBER, 1)]
+    assert len(january.links) == 1
+    # The February labels' deliveries are not read for January.
+    assert january.events == []
+    assert february.filled == {"2026-02": 3}
+    assert len(february.events) == 3
+    assert {e.shipment_id for e in february.events} <= {
+        x.shipment_id for x in february.links
     }
 
 
@@ -542,32 +575,55 @@ def test_loader_fetches_nothing_for_an_empty_cohort(api_db):
     """No request in the range: one statement, nothing back."""
     seed(api_db)
 
-    (requests, links, events), statements = run_loader(
+    rows, statements = run_loader(
         api_db, datetime.date(2030, 1, 1), datetime.date(2030, 12, 31)
     )
 
-    assert (requests, links, events) == ([], [], [])
+    assert rows == Rows({}, [], [], [])
     assert len(statements) == 1
 
 
-@pytest.mark.parametrize(
-    "method, bases, delivered",
-    [
-        (DeliveryMethodEnum.BULK, {"unit_session"}, 2),
-        (DeliveryMethodEnum.INDIVIDUAL, {"reference", "inmate_number"}, 1),
-    ],
-)
-def test_loader_filters_links_by_method(api_db, method, bases, delivered):
-    """Only the method's links and their labels' events are fetched; every
-    Filled request still is."""
-    seed(api_db)
+def test_loader_deduplicates_fanned_out_rows(api_db):
+    """Two requests on one label with two terminal events join to four rows,
+    read back as two requests, two links and two events."""
+    with api_db() as session:
+        add_inmate(session, NUMBER, None)
+        add_request(session, NUMBER, 0, "2026-03-01")
+        add_request(session, NUMBER, 1, "2026-03-01")
+        box = add_shipment(
+            session,
+            "2026-03-02T18:00",
+            kind="bulk",
+            events=(
+                ("2026-03-04T18:00", "delivered"),
+                ("2026-03-06T18:00", "delivered"),
+            ),
+        )
+        session.flush()
+        for index in (0, 1):
+            session.add(
+                models.PackageShipment(
+                    inmate_jurisdiction="Texas",
+                    inmate_id=NUMBER,
+                    request_index=index,
+                    shipment_id=box.id,
+                    basis="unit_session",
+                )
+            )
+        session.commit()
+        joined = session.execute(
+            delivery_latency._rows_statement(  # pylint: disable=protected-access
+                None, None
+            )
+        ).all()
 
-    (requests, links, events), _ = run_loader(api_db, method=method)
+    rows, _ = run_loader(api_db)
 
-    assert len(requests) == 4
-    assert {link.basis for link in links} == bases
-    assert len(events) == delivered
-    assert {e.shipment_id for e in events} <= {link.shipment_id for link in links}
+    assert len([row for row in joined if row.row_kind == "link"]) == 4
+    assert rows.filled == {"2026-02": 2}
+    assert len(rows.requests) == 2
+    assert len(rows.links) == 2
+    assert len(rows.events) == 2
 
 
 def test_loader_reads_one_snapshot(api_db):
@@ -630,7 +686,164 @@ def test_loader_reads_one_snapshot(api_db):
         finally:
             await engine.dispose()
 
-    (month,) = asyncio.run(run())
+    (month,) = asyncio.run(run()).months
 
     assert committed
     assert (month.linked, month.delivered) in {(count, 0), (count, 2)}
+
+
+def test_settle_days_counts_months_ended_over_120_days_ago():
+    """A month 120 days past its end is not yet used; at 121 days it is."""
+    latest = {"2026-07": list(range(1, 51))}  # July ends 2026-07-31
+
+    assert settle_days(latest, datetime.date(2026, 11, 28)) == 90  # 120 days
+    # 90th percentile of 1..50 is 45.1, rounded up.
+    assert settle_days(latest, datetime.date(2026, 11, 29)) == 46
+
+
+def test_settle_days_falls_back_under_50_requests():
+    """Fewer than 50 settled deliveries give the default 90 days."""
+    today = datetime.date(2026, 11, 24)
+
+    assert settle_days({"2026-01": [10] * 49}, today) == 90
+    assert settle_days({"2026-01": [10] * 25, "2026-02": [20] * 25}, today) == 20
+    assert settle_days({"2026-01": [10] * 49, "2026-10": [99] * 10}, today) == 90
+
+
+def test_is_provisional_until_settle_days_after_the_month_ends():
+    """October ends on the 31st: with a 30-day settle time it is provisional
+    on 29 November and settled on the 30th."""
+    assert is_provisional("2026-10", datetime.date(2026, 11, 29), 30)
+    assert not is_provisional("2026-10", datetime.date(2026, 11, 30), 30)
+    assert is_provisional("2026-12", datetime.date(2026, 11, 30), 30)
+
+
+def settle_fixture():
+    """Fifty requests with their own label (10 days) and fifty in a box
+    (100 days) postmarked in March, and one postmarked in October."""
+    requests, links, events = [], [], []
+    for index in range(100):
+        key = ("Texas", NUMBER, index)
+        own = index < 50
+        requests.append(filled(postmarked="2026-03-01", key=key))
+        links.append(link(index, "reference" if own else "unit_session", key=key))
+        delivered = "2026-03-11T18:00" if own else "2026-06-09T18:00"
+        events.append(event(index, delivered, "delivered"))
+    october = ("Texas", NUMBER + 1, 0)
+    requests.append(
+        filled(postmarked="2026-10-01", processed="2026-10-03", key=october)
+    )
+    links.append(link(100, purchased="2026-10-04T18:00", key=october))
+    events.append(event(100, "2026-10-08T18:00", "delivered"))
+    return requests, links, events
+
+
+def test_settle_days_is_the_same_for_every_method():
+    """The settle time comes from every link, so the methods agree on it and
+    on which months are provisional."""
+    requests, links, events = settle_fixture()
+
+    summaries = {
+        method: summarize(requests, links, events, method, CHICAGO, TODAY)
+        for method in DeliveryMethodEnum
+    }
+
+    # p90 of fifty 10s and fifty 100s is 100; individual alone would give 10.
+    assert {s.settle_days for s in summaries.values()} == {100}
+    for summary in summaries.values():
+        assert [(m.month, m.provisional) for m in summary.months] == [
+            ("2026-03", False),
+            ("2026-10", True),
+        ]
+
+
+def all_filled_rows(api_db):
+    """Every Filled request, link and event, read plainly for the old path."""
+    with api_db() as session:
+        requests = [
+            FilledRequest(
+                (r.inmate_jurisdiction, r.inmate_id, r.index),
+                r.date_postmarked,
+                r.date_processed,
+            )
+            for r in session.query(models.Request).filter_by(action="Filled")
+        ]
+        links = [
+            Link(
+                (x.inmate_jurisdiction, x.inmate_id, x.request_index),
+                x.shipment_id,
+                x.basis,
+                x.shipment.purchased_at,
+            )
+            for x in session.query(models.PackageShipment)
+        ]
+        events = [
+            Event(e.shipment_id, e.occurred_at, e.status)
+            for e in session.query(models.TrackingEvent)
+        ]
+    return requests, links, events
+
+
+def test_loader_matches_the_pure_path(api_db):
+    """For every method and range, the endpoint's loader gives what
+    summarizing every Filled request, link and event gives."""
+    seed(api_db)
+    with api_db() as session:  # more mixed cases
+        add_inmate(session, NUMBER + 9, "ALPHA")
+        add_request(session, NUMBER + 9, 0, "2026-03-20")  # unlinked
+        add_request(session, NUMBER + 9, 1, "2026-03-20")  # returned box
+        add_request(session, NUMBER + 9, 2, "2026-03-20")  # bad postmark
+        add_request(session, NUMBER + 9, 3, "2026-03-20", action="Tossed")
+        returned = add_shipment(
+            session,
+            "2026-03-21T18:00",
+            events=(("2026-03-24T18:00", "return_to_sender"),),
+        )
+        early = add_shipment(
+            session, "2026-03-21T18:00", events=(("2026-03-05T18:00", "delivered"),)
+        )
+        session.flush()
+        for index, label in ((1, returned), (2, early)):
+            session.add(
+                models.PackageShipment(
+                    inmate_jurisdiction="Texas",
+                    inmate_id=NUMBER + 9,
+                    request_index=index,
+                    shipment_id=label.id,
+                    basis="reference",
+                )
+            )
+        session.commit()
+    requests, links, events = all_filled_rows(api_db)
+    with api_db() as session:
+        path = session.get_bind().url.database
+    ranges = [
+        (None, None),
+        (datetime.date(2026, 2, 1), datetime.date(2026, 2, 28)),
+        (datetime.date(2026, 1, 1), datetime.date(2026, 3, 31)),
+        (datetime.date(2030, 1, 1), None),
+    ]
+
+    async def run(method, start, end):
+        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+        try:
+            async with AsyncSession(engine) as session:
+                return await delivery_latency.get_delivery_latency(
+                    session, method, start, end, today=TODAY
+                )
+        finally:
+            await engine.dispose()
+
+    for method in DeliveryMethodEnum:
+        for start, end in ranges:
+            cohort = [
+                r
+                for r in requests
+                if (start is None or r.postmarked >= start)
+                and (end is None or r.postmarked <= end)
+            ]
+            expected = summarize(cohort, links, events, method, today=TODAY)
+            assert asyncio.run(run(method, start, end)) == expected, (method, start)
+    whole = summarize(requests, links, events, today=TODAY)
+    assert [m.month for m in whole.months] == ["2026-01", "2026-02", "2026-03"]
+    assert (whole.months[2].returned, whole.months[2].excluded) == (1, 1)

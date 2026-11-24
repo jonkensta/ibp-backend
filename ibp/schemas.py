@@ -904,7 +904,8 @@ class DeliveryLatencyMonth(BaseModel):
     in the statistics; ``returned`` those whose every label came back;
     ``excluded`` those delivered with a latency under 0 or over 365 days.
     The rest of ``linked`` are not delivered yet. The latency and stage
-    fields are null when ``delivered`` is 0.
+    fields are null when ``delivered`` is 0. ``provisional`` marks a month
+    too recent to have settled (see ``DeliveryLatencyResponse``).
     """
 
     month: str
@@ -917,10 +918,17 @@ class DeliveryLatencyMonth(BaseModel):
     latest: Optional[LatencyQuartiles] = None
     median_handling: Optional[float] = None
     median_waiting: Optional[float] = None
+    provisional: bool = False
 
 
 class DeliveryLatencyResponse(BaseModel):
-    """Schema for the delivery latency metric response."""
+    """Schema for the delivery latency metric response.
+
+    ``settle_days`` is how long a postmark month takes to settle; a month
+    that ended fewer days ago than that is ``provisional``: its letters are
+    still being answered, so its figures will rise.
+    """
 
     data: list[DeliveryLatencyMonth]
+    settle_days: int
     filters_applied: dict[str, Any]
