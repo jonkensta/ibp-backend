@@ -44,6 +44,8 @@ DELIVERED = "delivered"
 RETURN_TO_SENDER = "return_to_sender"
 # A latency over this many days, like a negative one, means a bad postmark.
 MAX_LATENCY_DAYS = 365
+# Labels per events query, well under SQLite's bound-variable limit.
+EVENT_CHUNK = 500
 
 # The link bases each method counts.
 METHOD_BASES: dict[schemas.DeliveryMethodEnum, frozenset[str]] = {
@@ -280,7 +282,12 @@ async def load_rows(
     end_date: Optional[datetime.date] = None,
 ) -> tuple[list[FilledRequest], list[Link], list[Event]]:
     """Fetch the Filled requests postmarked in the range, their links and the
-    linked labels' delivered and returned events, in two queries."""
+    linked labels' delivered and returned events.
+
+    The links are read once: the events are fetched for the labels of the
+    links read, so a link rebuild running meanwhile cannot drop a delivery,
+    and only the labels of the requests in the range are looked at.
+    """
     request, link, shipment = models.Request, models.PackageShipment, models.Shipment
     query = (
         sa.select(
@@ -319,15 +326,27 @@ async def load_rows(
         if row.shipment_id is not None and row.purchased_at is not None:
             links.append(Link(key, row.shipment_id, row.basis, row.purchased_at))
 
-    event = models.TrackingEvent
-    event_rows = await session.execute(
-        sa.select(event.shipment_id, event.occurred_at, event.status).where(
-            event.status.in_((DELIVERED, RETURN_TO_SENDER)),
-            event.shipment_id.in_(sa.select(link.shipment_id).distinct()),
-        )
-    )
-    events = [Event(*row) for row in event_rows.all()]
+    events = await load_events(session, {link.shipment_id for link in links})
     return list(requests.values()), links, events
+
+
+async def load_events(
+    session: AsyncSession, shipment_ids: Iterable[int]
+) -> list[Event]:
+    """The delivered and returned events of the given labels, fetched
+    ``EVENT_CHUNK`` labels at a time (none for no labels)."""
+    ids = sorted(shipment_ids)
+    event = models.TrackingEvent
+    events: list[Event] = []
+    for start in range(0, len(ids), EVENT_CHUNK):
+        rows = await session.execute(
+            sa.select(event.shipment_id, event.occurred_at, event.status).where(
+                event.status.in_((DELIVERED, RETURN_TO_SENDER)),
+                event.shipment_id.in_(ids[start : start + EVENT_CHUNK]),
+            )
+        )
+        events.extend(Event(*row) for row in rows.all())
+    return events
 
 
 async def get_delivery_latency(
