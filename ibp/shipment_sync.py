@@ -469,9 +469,10 @@ def run(
     the last ``WINDOW`` (see ``listing_start``), then fetches by id every
     stored label bought since then that the listing missed
     (``fetch_unlisted``): a re-evaluation of every label's unit. In such a
-    run anything that fails, a tracker poll included, raises before the
-    links are rebuilt, so links are only ever built from a complete
-    re-evaluation.
+    run anything that fails raises before the links are rebuilt (a listing
+    page or label that can't be read or stored, a label skipped as
+    malformed, a stored label not covered by id, a tracker poll), so links
+    are only ever built from a complete re-evaluation.
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
@@ -481,6 +482,8 @@ def run(
     if since is not None:
         fetch_unlisted(client, sessions, since, listed, now, summary)
     poll_unfinished(client, sessions, listed, now, summary)
+    if since is not None and summary.skipped:
+        raise Incomplete(f"{summary.skipped} listed labels skipped")
     if since is not None and summary.poll_failures:
         raise Incomplete(f"{summary.poll_failures} trackers not fetched")
     summary.links = relink(sessions, now)

@@ -1902,3 +1902,35 @@ def test_real_shapes_still_resolve(api_db, ours, theirs, street_line):
     street_only = {"street1": theirs, "zip": "77300"}
     for address in (verified, unverified, street_only):
         assert tuple(matcher.locate(address)) == (("Texas", "SHORT"), False), address
+
+
+def test_since_run_that_skipped_a_label_rebuilds_no_links(sessions, logs):
+    """A malformed listed label in a --since run makes it incomplete before
+    the links are rebuilt."""
+    seed_stale_link(sessions)
+    with sessions() as session:
+        stored_id = session.scalars(sa.select(models.Shipment.easypost_id)).one()
+    good = {**shipment(1, utc("2026-01-05T15:00")), "id": stored_id}
+    fake = FakeEasyPost(
+        [good, shipment(2, utc("2026-01-06T15:00"), tracker=[SENTINEL])]
+    )
+    assert run_since(sessions, logs, fake) == 1
+    assert "shipment sync failed: 1 listed labels skipped" in logs.text
+    assert_incomplete(sessions, logs)
+
+
+def test_since_run_with_a_label_it_cannot_store_rebuilds_no_links(
+    sessions, logs, monkeypatch
+):
+    """A label that reads but can't be stored fails a --since run before
+    the links are rebuilt."""
+    seed_stale_link(sessions)
+
+    def broken(*args, **kwargs):
+        raise sa.exc.OperationalError("INSERT", {}, sqlite_error("SELECT * FROM nope"))
+
+    monkeypatch.setattr(shipment_sync, "store_label", broken)
+    fake = FakeEasyPost([shipment(1, utc("2026-01-06T15:00"))])
+    assert run_since(sessions, logs, fake) == 1
+    assert "shipment sync failed: OperationalError: SQLITE_ERROR" in logs.text
+    assert_incomplete(sessions, logs)
