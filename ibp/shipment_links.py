@@ -16,9 +16,10 @@ each named by the link's ``basis``:
   that both jurisdictions could match links to neither.
 - ``unit_session``: a session is every mailed bulk box to one unit on one
   local date. A Filled request whose inmate's unit (as it is now) ships by
-  box or tub links to every box of the first session to that unit on or
-  after the request's processed date, if that session is within
-  ``BULK_LINK_WINDOW`` of it.
+  box or tub links to every box of the first session to that unit at least
+  ``BULK_LEAD`` (a day) after the request's processed date, so a request
+  processed on a session's date waits for the next one, if that session is
+  within ``BULK_LINK_WINDOW`` of it.
 
 A label that was never mailed (``never_mailed``) gets no links. Nothing
 here works out delivery: the stored events are left for that.
@@ -37,9 +38,12 @@ from . import clock, models
 # How long before an untagged individual label's purchase date its request
 # may have been processed.
 LINK_WINDOW = datetime.timedelta(days=60)
-# How long after a request's processed date its bulk session may be. Units
-# ship about every two weeks, so a later session is unlikely to hold it.
-BULK_LINK_WINDOW = datetime.timedelta(days=14)
+# How long after a request's processed date its bulk session may be at most.
+BULK_LINK_WINDOW = datetime.timedelta(days=28)
+# How long after a request's processed date its bulk session must be at
+# least: a request processed on a session's date waits for the next one. A
+# one-day lead fit a year of box weights better than a same-day rule.
+BULK_LEAD = datetime.timedelta(days=1)
 # Unit shipping methods that send requests in bulk boxes (not Individual).
 BOX_METHODS = frozenset({"Box", "Federal Tub"})
 # Statuses that mean USPS has not handled a package.
@@ -181,7 +185,7 @@ def _unit_requests(
                 models.Inmate.unit_name == unit_name,
                 models.Request.action == "Filled",
                 models.Request.date_processed >= first - BULK_LINK_WINDOW,
-                models.Request.date_processed <= last,
+                models.Request.date_processed <= last - BULK_LEAD,
             )
         ).all()
     )
@@ -198,7 +202,7 @@ def _unit_session_links(
         for jurisdiction, inmate_id, index, processed in _unit_requests(
             session, unit, dates[0], dates[-1]
         ):
-            position = bisect.bisect_left(dates, processed)
+            position = bisect.bisect_left(dates, processed + BULK_LEAD)
             if position == len(dates) or dates[position] - processed > BULK_LINK_WINDOW:
                 continue
             for shipment_id in by_date[dates[position]]:

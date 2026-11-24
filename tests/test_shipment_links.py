@@ -214,30 +214,41 @@ def test_bulk_session_with_three_boxes_and_the_next_session(session):
     }
 
 
-def test_bulk_session_on_the_processed_date_counts(session):
-    """A session on the request's processed date is on or after it."""
+def test_bulk_session_on_the_processed_date_waits_for_the_next(session):
+    """A request processed on a session's date links to the next session."""
     seed_box_unit(session)
     add_request(session, 11111111, 0, "2026-03-05")
-    same_day = box(session, "2026-03-05T20:00")
+    box(session, "2026-03-05T20:00")  # the same (local) day: too soon
+    next_day = box(session, "2026-03-06T15:00")
     session.commit()
     assert rebuild(session) == {
-        ("Texas", 11111111, 0, same_day.easypost_id, "unit_session"),
+        ("Texas", 11111111, 0, next_day.easypost_id, "unit_session"),
     }
 
 
-def test_bulk_session_more_than_14_days_later_is_not_linked(session):
-    """A request more than 14 days before the next session isn't linked."""
+def test_bulk_session_only_on_the_processed_date_links_nothing(session):
+    """With no later session, a request processed on a session's date
+    links nothing."""
     seed_box_unit(session)
-    add_request(session, 11111111, 0, "2026-02-18")
+    add_request(session, 11111111, 0, "2026-03-05")
+    box(session, "2026-03-05T20:00")
+    session.commit()
+    assert not rebuild(session)
+
+
+def test_bulk_session_more_than_28_days_later_is_not_linked(session):
+    """A request more than 28 days before the next session isn't linked."""
+    seed_box_unit(session)
+    add_request(session, 11111111, 0, "2026-02-04")
     box(session, "2026-03-05T15:00")
     session.commit()
     assert not rebuild(session)
 
 
-def test_bulk_session_14_days_later_is_linked(session):
-    """A session exactly 14 days after the processed date still links."""
+def test_bulk_session_28_days_later_is_linked(session):
+    """A session exactly 28 days after the processed date still links."""
     seed_box_unit(session)
-    add_request(session, 11111111, 0, "2026-02-19")
+    add_request(session, 11111111, 0, "2026-02-05")
     late = box(session, "2026-03-05T15:00")
     session.commit()
     assert rebuild(session) == {

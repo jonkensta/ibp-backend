@@ -246,8 +246,9 @@ requested) that USPS never scanned, since it was never mailed:
   numbers apart; with no destination, a number both have links to neither.
 - `unit_session`: all mailed bulk boxes to one unit on one local date are a
   session. A Filled request whose inmate's unit (as it is now) ships by Box or
-  Federal Tub links to every box of the first session to that unit on or
-  after its processed date, if within 14 days.
+  Federal Tub links to every box of the first session to that unit on a
+  date after its processed date (a request processed on a session's date
+  waits for the next one), if within 28 days.
 
 `GET /requests/{code}/shipments` lists a request's linked labels with their
 tracking code, purchase time, kind, basis, tracker status and events.
