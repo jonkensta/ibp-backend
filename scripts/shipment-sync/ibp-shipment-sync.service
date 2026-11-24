@@ -5,6 +5,8 @@ After=network-online.target docker.service
 
 [Service]
 Type=oneshot
+# 75: another run (e.g. a manual --since) holds the lock; not a failure.
+SuccessExitStatus=75
 User=jstarr
 Group=jstarr
 ExecStart=/home/jstarr/.local/bin/ibp-shipment-sync

@@ -12,6 +12,13 @@ Pings a Healthchecks check (start, then the exit status with the output) if
 the ping-url file exists. The output has counts and EasyPost ids only, no
 names or addresses.
 
+Runs never overlap: each holds an exclusive lock on LOCK_FILE for its whole
+run, so the daily timer's run and a manual one (say a ``--since``
+re-evaluation) can't interleave. A run that finds the lock held exits
+with status 75 (EX_TEMPFAIL) and a message, without pinging Healthchecks:
+the run holding the lock reports for itself, and another run in progress
+is not a failure.
+
 Config (mode 0600, outside the repo):
     ~/.config/ibp-shipment-sync/easypost-api-key   production key (EZAK...)
     ~/.config/ibp-shipment-sync/ping-url           Healthchecks URL (optional)
@@ -19,6 +26,7 @@ Config (mode 0600, outside the repo):
 
 from __future__ import annotations
 
+import fcntl
 import os
 import subprocess
 import sys
@@ -28,6 +36,11 @@ from pathlib import Path
 CONFIG = Path.home() / ".config" / "ibp-shipment-sync"
 COMPOSE = os.environ.get("IBP_COMPOSE_FILE", "/srv/ibp/compose.yaml")
 KEY_IN_CONTAINER = "/run/secrets/easypost-api-key"
+# A fixed path (not $XDG_RUNTIME_DIR, which the timer's service doesn't
+# have), so the service and an interactive run take the same lock.
+LOCK_FILE = Path.home() / ".local" / "state" / "ibp-shipment-sync" / "run.lock"
+# Exit status when another run holds the lock.
+BUSY = 75
 
 
 def read_secret(name: str) -> str | None:
@@ -98,7 +111,29 @@ def run(args: list[str], log: list[str]) -> int:
     return proc.returncode
 
 
+def take_lock(path: Path):
+    """Open ``path`` and lock it exclusively without waiting; return the
+    open file (the lock lasts until it is closed or the process ends), or
+    None if another run holds it."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    handle = open(path, "a+")  # pylint: disable=consider-using-with
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
 def main() -> int:
+    lock = take_lock(LOCK_FILE)
+    if lock is None:
+        print(
+            f"another ibp-shipment-sync run is in progress (lock {LOCK_FILE}); "
+            "not started",
+            file=sys.stderr,
+        )
+        return BUSY
     ping_url = read_secret("ping-url")
     ping(ping_url, "/start")
     log: list[str] = []
@@ -110,6 +145,7 @@ def main() -> int:
         log.append(msg)
         code = 1
     ping(ping_url, f"/{code}", "\n".join(log))
+    lock.close()
     return code
 
 
