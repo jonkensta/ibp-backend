@@ -15,7 +15,14 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 
-from ibp import db_bootstrap, easypost_client, models, shipment_links, shipment_sync
+from ibp import (
+    db_bootstrap,
+    easypost_client,
+    label_reading,
+    models,
+    shipment_links,
+    shipment_sync,
+)
 from ibp.labels import RequestKey
 from ibp.shipment_sync import (
     EasyPost,
@@ -1029,8 +1036,8 @@ def test_unexpected_error_logs_class_and_place_only(sessions, logs, capsys):
     client = EasyPost(KEY, urlopen=FakeEasyPost([malformed]), sleep=lambda _: None)
     with logs.at_level(logging.INFO):
         assert shipment_sync.main([], sessions=sessions, client=client) == 1
-    line = source_line(shipment_sync, "weight_oz=float(weight)")
-    assert_one_safe_line(logs, capsys, f"ValueError at ibp/shipment_sync.py:{line}")
+    line = source_line(label_reading, "weight_oz=float(weight)")
+    assert_one_safe_line(logs, capsys, f"ValueError at ibp/label_reading.py:{line}")
 
 
 def test_unexpected_error_rebuilding_links_logs_class_and_place_only(
