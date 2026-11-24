@@ -302,12 +302,17 @@ class MonthlyMetricPoint(BaseModel):
     filled_count: int
     tossed_count: int
     total_count: int
+    # The month ended under ``settle_days`` ago: its letters are still being
+    # answered, so its counts will rise.
+    provisional: bool = False
 
 
 class RequestMetricsResponse(BaseModel):
     """Schema for request metrics response."""
 
     data: list[MonthlyMetricPoint]
+    # How long a postmark month's counts take to settle, in days.
+    settle_days: int
     filters_applied: dict[str, Any]
 
 

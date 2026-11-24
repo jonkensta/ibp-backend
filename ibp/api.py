@@ -880,8 +880,10 @@ async def get_metrics_requests(
     # Explicit bounds win; the preset fills only a bound not given.
     start_date, end_date = metrics.resolve_date_range(date_range, start_date, end_date)
 
+    settle_days = await metrics.request_settle_days(session, clock.today())
     data = await metrics.get_request_metrics(
         session=session,
+        settle_days=settle_days,
         unit_jurisdiction=unit_jurisdiction,
         unit_name=unit_name,
         jurisdiction=jurisdiction if jurisdiction != "All" else None,
@@ -892,6 +894,7 @@ async def get_metrics_requests(
 
     return schemas.RequestMetricsResponse(
         data=data,
+        settle_days=settle_days,
         filters_applied={
             "unit_jurisdiction": unit_jurisdiction,
             "unit_name": unit_name,
