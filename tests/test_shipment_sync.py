@@ -402,6 +402,97 @@ def test_unit_matching_by_display_name(coded_matcher, address, unit):
     assert coded_matcher.by_address(address) == unit
 
 
+def test_since_run_fetches_stored_labels_the_listing_misses(sessions):
+    """A label bought on or after --since from a shipment created before it
+    isn't listed (the listing goes by creation time), so it is fetched by id
+    and its unit matched again; labels the listing returned aren't."""
+    with sessions() as session:
+        add_shipment(session, "2026-01-01T01:00", kind="bulk")
+        session.commit()
+        add_unit(session, "GAMMA CODE", street1="Gamma Unit", zipcode="77002")
+        session.commit()
+    sync(FakeEasyPost([shipment(2, ago(3))]), sessions)  # a newer stored label
+    straddling = shipment(
+        1,
+        utc("2025-12-31T23:00"),
+        name="ATTN: MAILROOM STAFF",
+        street1="300 New Rd",
+        street2="GAMMA UNIT",
+        zip="77002",
+    )
+    with sessions() as session:
+        stored_id = session.scalars(
+            sa.select(models.Shipment.easypost_id).where(
+                models.Shipment.easypost_id != "shp_0002"
+            )
+        ).one()
+        straddling["id"] = stored_id
+        straddling["postage_label"]["created_at"] = "2026-01-01T01:00:00Z"
+    fake = FakeEasyPost([straddling, shipment(2, ago(3))])
+    summary = sync(fake, sessions, since=datetime.date(2026, 1, 1))
+    assert summary.fetched_by_id == 1
+    assert [path for path, _ in fake.calls if path.startswith("shipments/")] == [
+        f"shipments/{stored_id}"
+    ]
+    assert stored(sessions, stored_id).unit_name == "GAMMA CODE"
+    assert "1 fetched by id" in summary.line()
+
+
+def seed_stale_link(sessions) -> None:
+    """A stored label bought since 2026-01-01 that EasyPost no longer has,
+    and a link a rebuild would remove."""
+    with sessions() as session:
+        add_inmate(session, 40000001, "ALPHA")
+        add_request(session, 40000001, 0, "2026-01-02")
+        label = add_shipment(session, "2026-01-05T15:00", kind="other")
+        session.flush()
+        session.add(
+            models.PackageShipment(
+                inmate_jurisdiction="Texas",
+                inmate_id=40000001,
+                request_index=0,
+                shipment_id=label.id,
+                basis="reference",
+            )
+        )
+        session.commit()
+
+
+@pytest.mark.parametrize("failures", [[], [500] * easypost_client.RETRIES])
+def test_incomplete_since_run_fails_without_rebuilding_links(sessions, logs, failures):
+    """A --since run that fails part-way (listing, or fetching a stored
+    label by id) exits 1, says to re-run it, and leaves the links alone."""
+    seed_stale_link(sessions)
+    fake = FakeEasyPost(failures=failures)
+    client = EasyPost(KEY, urlopen=fake, sleep=lambda _: None)
+    with logs.at_level(logging.INFO):
+        assert (
+            shipment_sync.main(
+                ["--since", "2026-01-01"], sessions=sessions, client=client
+            )
+            == 1
+        )
+    assert (
+        "re-evaluation since 2026-01-01 is incomplete and the links were not "
+        "rebuilt; re-run with --since 2026-01-01"
+    ) in logs.text
+    with sessions() as session:
+        assert session.query(models.PackageShipment).count() == 1
+
+
+def test_failed_daily_run_says_nothing_of_a_re_evaluation(sessions, logs):
+    """Without --since, a failure is just the failure line."""
+    client = EasyPost(
+        KEY,
+        urlopen=FakeEasyPost(failures=[500] * easypost_client.RETRIES),
+        sleep=lambda _: None,
+    )
+    with logs.at_level(logging.INFO):
+        assert shipment_sync.main([], sessions=sessions, client=client) == 1
+    assert "shipment sync failed" in logs.text
+    assert "re-evaluation" not in logs.text
+
+
 def test_street_without_a_number_is_not_a_name(api_db):
     """A unit whose only line is a street with no house number has no
     display name, so a label on that street elsewhere doesn't match it."""
@@ -1309,7 +1400,8 @@ def test_main_logs_a_summary_line(sessions, logs):
     with logs.at_level(logging.INFO, logger="ibp.shipment_sync"):
         assert shipment_sync.main([], sessions=sessions, client=client) == 0
     assert (
-        "shipment sync: 1 labels seen, 1 new, 0 updated, 1 events added, "
+        "shipment sync: 1 labels seen, 1 new, 0 updated, 0 fetched by id, "
+        "1 events added, "
         "0 trackers polled (0 failed), 0 links built"
     ) in logs.text
     assert NAME not in logs.text and STREET not in logs.text

@@ -248,9 +248,12 @@ share a house number or P.O. box number are one place (one facility under
 several provider codes); units with no number are never merged, and units
 at one street address with different display names are not one place. A
 label to one place stores its representative, the alphabetically first
-unit name. Stored labels are matched again only when listed again: the
-daily run relists 35 days, and `--since YYYY-MM-DD` relists everything back
-to that date, updating `unit_name` on labels already stored.
+unit name. Stored labels are matched again only when read again: the daily
+run relists 35 days, and `--since YYYY-MM-DD` relists everything back to
+that date and fetches by id each stored label bought since then that the
+listing missed, updating `unit_name` on labels already stored. A `--since`
+run that fails part-way exits 1 without rebuilding the links and must be
+re-run (see [`scripts/shipment-sync/`](scripts/shipment-sync/README.md)).
 
 A label's EasyPost `reference` carries a tag from the shipping apps:
 `ibp1:req:<request code>` (an individual package, e.g.

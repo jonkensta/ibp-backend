@@ -113,7 +113,8 @@ def shipment(
 
 
 class FakeEasyPost:
-    """Answers ``GET /shipments`` and ``GET /trackers/{id}`` like EasyPost.
+    """Answers ``GET /shipments``, ``GET /shipments/{id}`` and
+    ``GET /trackers/{id}`` like EasyPost.
 
     Shipments are listed newest first, filtered by ``start_datetime`` and
     ``end_datetime`` (exclusive), paged by ``page_size`` and ``before_id``.
@@ -143,8 +144,11 @@ class FakeEasyPost:
             raise urllib.error.HTTPError(
                 request.full_url, code, "error", headers, io.BytesIO(b"{}")
             )
+        by_id = {s["id"]: s for s in self.shipments}
         if path == "shipments":
             body = self.list_shipments(params)
+        elif path.startswith("shipments/") and path[len("shipments/") :] in by_id:
+            body = by_id[path[len("shipments/") :]]
         elif path.startswith("trackers/") and path[len("trackers/") :] in self.trackers:
             body = self.trackers[path[len("trackers/") :]]
         else:

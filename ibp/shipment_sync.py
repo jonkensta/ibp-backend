@@ -14,7 +14,10 @@ finished (``is_finished``) then has its tracker fetched on its own. Last, the
 request links are rebuilt (``ibp.shipment_links``).
 
 ``--since YYYY-MM-DD`` lists every window back to that date instead (the
-one-time backfill); ``--rebuild-links`` only rebuilds the links.
+backfill, or a re-evaluation of every label's unit), then fetches by id the
+stored labels bought since then that the listing missed; if it fails
+part-way it exits 1 without rebuilding the links and must be re-run.
+``--rebuild-links`` only rebuilds the links.
 
 The key comes from ``--key-file``, the file named by ``EASYPOST_API_KEY_FILE``
 or ``EASYPOST_API_KEY``, never from the server config, and must be a
@@ -32,6 +35,7 @@ import os
 import re
 import sys
 import traceback
+import urllib.parse
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -473,7 +477,7 @@ def list_window(
 
 
 @dataclasses.dataclass
-class Summary:
+class Summary:  # pylint: disable=too-many-instance-attributes
     """Counts for the run's log line."""
 
     seen: int = 0
@@ -483,12 +487,14 @@ class Summary:
     polled: int = 0
     poll_failures: int = 0
     links: int = 0
+    fetched_by_id: int = 0
 
     def line(self) -> str:
         """The one-line summary (counts only)."""
         return (
             f"shipment sync: {self.seen} labels seen, {self.new} new, "
-            f"{self.updated} updated, {self.events_added} events added, "
+            f"{self.updated} updated, {self.fetched_by_id} fetched by id, "
+            f"{self.events_added} events added, "
             f"{self.polled} trackers polled ({self.poll_failures} failed), "
             f"{self.links} links built"
         )
@@ -602,6 +608,43 @@ def sync_listed(
     return seen
 
 
+def fetch_unlisted(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    client: EasyPost,
+    sessions: sessionmaker,
+    since: datetime.date,
+    listed: set[str],
+    now: datetime.datetime,
+    summary: Summary,
+) -> None:
+    """Fetch by id, read and store each stored label bought since ``since``
+    that the listing didn't return; add them to ``listed``.
+
+    The listing goes by when the EasyPost shipment was created, so a label
+    bought on or after ``since`` from a shipment created before it is not
+    listed, but must be read again too for a ``--since`` re-evaluation.
+    Each is committed on its own, like a page.
+    """
+    start = datetime.datetime.combine(since, datetime.time(), datetime.timezone.utc)
+    with sessions() as session:
+        stored = session.scalars(
+            sa.select(models.Shipment.easypost_id)
+            .where(models.Shipment.purchased_at >= start)
+            .order_by(models.Shipment.purchased_at, models.Shipment.id)
+        ).all()
+        units = load_units(session)
+        unit_recipient = load_unit_recipient(session)
+    for easypost_id in stored:
+        if easypost_id in listed:
+            continue
+        data = client.get(f"shipments/{urllib.parse.quote(easypost_id, safe='')}")
+        summary.fetched_by_id += 1
+        listed.add(easypost_id)
+        label = read_label(data, units, unit_recipient)
+        if label is not None and label.easypost_id == easypost_id:
+            with sessions() as session, session.begin():
+                store_label(session, label, now, summary)
+
+
 def poll_unfinished(
     client: EasyPost,
     sessions: sessionmaker,
@@ -692,13 +735,18 @@ def run(
     """Sync labels from EasyPost, then rebuild the links; return the counts.
 
     ``since`` lists every label bought from that date (UTC) on, instead of
-    the last ``WINDOW`` (see ``listing_start``).
+    the last ``WINDOW`` (see ``listing_start``), then fetches by id every
+    stored label bought since then that the listing missed
+    (``fetch_unlisted``): a re-evaluation of every label's unit. Anything
+    that fails raises before the links are rebuilt.
     """
     if now is None:
         now = datetime.datetime.now(datetime.timezone.utc)
     start = listing_start(sessions, now, since)
     summary = Summary()
     listed = sync_listed(client, sessions, start, now, summary)
+    if since is not None:
+        fetch_unlisted(client, sessions, since, listed, now, summary)
     poll_unfinished(client, sessions, listed, now, summary)
     summary.links = relink(sessions, now)
     return summary
@@ -831,6 +879,15 @@ def main(
         summary = run(client, sessions, since=args.since)
     except Exception as error:  # pylint: disable=broad-exception-caught
         logger.error("shipment sync failed: %s", describe_failure(error))
+        if args.since is not None:
+            # Pages already stored keep their new units; the links were not
+            # rebuilt from that mix.
+            logger.error(
+                "shipment sync: re-evaluation since %s is incomplete and the "
+                "links were not rebuilt; re-run with --since %s",
+                args.since.isoformat(),
+                args.since.isoformat(),
+            )
         return 1
     logger.info("%s", summary.line())
     return 1 if summary.poll_failures else 0

@@ -17,7 +17,7 @@ never buys, refunds or changes anything at EasyPost.
   that is older, so even a longer outage leaves no gap.
 
 Each run logs one line of counts, e.g.
-`shipment sync: 412 labels seen, 11 new, 37 updated, 160 events added, 388 trackers polled (0 failed), 1420 links built`.
+`shipment sync: 412 labels seen, 11 new, 37 updated, 0 fetched by id, 160 events added, 388 trackers polled (0 failed), 1420 links built`.
 No names or addresses are logged or stored.
 
 Exit status: 0 ok, 1 an EasyPost or database error (or a tracker it could
@@ -56,7 +56,29 @@ Then:
     sudo systemctl enable --now ibp-shipment-sync.timer
     sudo systemctl start ibp-shipment-sync.service && journalctl -u ibp-shipment-sync -n 30
 
-Rebuild the links alone (no key, no EasyPost requests), e.g. after fixing
-units: `~/.local/bin/ibp-shipment-sync --rebuild-links`.
+Rebuild the links alone (no key, no EasyPost requests), e.g. after a
+release that changes only the link rules:
+`~/.local/bin/ibp-shipment-sync --rebuild-links`. That does not match any
+label to a unit again.
+
+## Re-evaluating every label's unit
+
+A stored label's unit is matched when it is listed, so after a release that
+changes unit matching (`ibp/unit_places.py`, `UnitMatcher` in
+`ibp/shipment_sync.py`), or after fixing units' names or addresses, every
+label must be read again. `--since <date>` lists every label bought from
+that date on, then fetches by id each stored label bought since then that
+the listing missed (the listing goes by when the EasyPost shipment was
+created, which can be before the label was bought; the summary counts them
+as "fetched by id"), and only then rebuilds the links. Pages are committed
+as they go, so a run that fails part-way leaves some labels matched the new
+way and some the old: it then exits 1 without rebuilding the links, logging
+that the re-evaluation is incomplete and must be re-run with the same
+`--since`. Keep the daily run from rebuilding links from that mix
+meanwhile:
+
+    sudo systemctl stop ibp-shipment-sync.timer
+    ~/.local/bin/ibp-shipment-sync --since 2025-11-01   # the first label's date; repeat until it exits 0
+    sudo systemctl start ibp-shipment-sync.timer
 
 If the EasyPost key changes, update the key file (and Bitwarden).
