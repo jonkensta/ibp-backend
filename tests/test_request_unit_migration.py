@@ -285,3 +285,64 @@ def test_bootstrap_refuses_a_head_schema_missing_another_column(
         engine.dispose()
     with pytest.raises(RuntimeError, match="lacks columns: inmates.pronouns_set_by"):
         bootstrap(monkeypatch, url)
+
+
+def interrupt_on(statement_start: str):
+    """A listener failing the first statement starting with
+    ``statement_start``, as if the process died there."""
+
+    def fail(conn, cursor, statement, *args):  # pylint: disable=unused-argument
+        if statement.startswith(statement_start):
+            raise KeyboardInterrupt("interrupted")
+
+    return fail
+
+
+def test_interrupted_downgrade_changes_nothing(tmp_path: Path):
+    """A downgrade stopped between dropping its two columns leaves both
+    columns and the revision as they were: one atomic step."""
+    url = f"sqlite:///{tmp_path / 'atomic.db'}"
+    config = db_bootstrap.build_alembic_config(url)
+    command.upgrade(config, "head")
+    engine = sqlalchemy.create_engine(url)
+    listener = interrupt_on("ALTER TABLE requests DROP COLUMN unit_name")
+    sqlalchemy.event.listen(sqlalchemy.engine.Engine, "before_cursor_execute", listener)
+    try:
+        insert_filled_request(engine)
+        with pytest.raises(KeyboardInterrupt):
+            command.downgrade(config, db_bootstrap.PRE_REQUEST_UNIT_REVISION)
+    finally:
+        sqlalchemy.event.remove(
+            sqlalchemy.engine.Engine, "before_cursor_execute", listener
+        )
+    try:
+        assert COLUMNS <= columns(url)
+        assert scalar(engine, "SELECT version_num FROM alembic_version") == (
+            head_revision()
+        )
+    finally:
+        engine.dispose()
+
+
+def test_interrupted_upgrade_changes_nothing(tmp_path: Path):
+    """An upgrade stopped between adding its two columns leaves neither."""
+    url = f"sqlite:///{tmp_path / 'atomicup.db'}"
+    config = db_bootstrap.build_alembic_config(url)
+    command.upgrade(config, db_bootstrap.PRE_REQUEST_UNIT_REVISION)
+    listener = interrupt_on("ALTER TABLE requests ADD COLUMN unit_recorded")
+    sqlalchemy.event.listen(sqlalchemy.engine.Engine, "before_cursor_execute", listener)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            command.upgrade(config, "head")
+    finally:
+        sqlalchemy.event.remove(
+            sqlalchemy.engine.Engine, "before_cursor_execute", listener
+        )
+    assert not COLUMNS & columns(url)
+    engine = sqlalchemy.create_engine(url)
+    try:
+        assert scalar(engine, "SELECT version_num FROM alembic_version") == (
+            db_bootstrap.PRE_REQUEST_UNIT_REVISION
+        )
+    finally:
+        engine.dispose()

@@ -1,7 +1,7 @@
 import os
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
+from sqlalchemy import engine_from_config, event
 from sqlalchemy import pool
 
 from alembic import context
@@ -79,10 +79,27 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    sqlite = connectable.dialect.name == "sqlite"
+    if sqlite:
+        # SQLite's DDL is transactional, but the pysqlite driver only opens a
+        # transaction before INSERT/UPDATE/DELETE, so each ALTER TABLE would
+        # commit on its own and an interrupted migration could leave its
+        # columns half changed at the old revision. Take over the BEGIN, and
+        # run the whole upgrade or downgrade, revision updates included, as
+        # one transaction.
+        @event.listens_for(connectable, "connect")
+        def _no_driver_transactions(dbapi_connection, _record):
+            dbapi_connection.isolation_level = None
+
+        @event.listens_for(connectable, "begin")
+        def _begin(connection):
+            connection.exec_driver_sql("BEGIN")
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection,
+            target_metadata=target_metadata,
+            transactional_ddl=True if sqlite else None,
         )
 
         with context.begin_transaction():
