@@ -40,8 +40,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jonkensta/ibp-server" # Replace with your actual GitHub repo link
-"Bug Tracker" = "https://github.com/jonkensta/ibp-server/issues" # Replace with your actual GitHub repo link
+Homepage = "https://github.com/insidebooksproject/backend"
+"Bug Tracker" = "https://github.com/insidebooksproject/backend/issues"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

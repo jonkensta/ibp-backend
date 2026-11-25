@@ -5,8 +5,8 @@ OS Lite 64-bit, booting from a USB SSD):
 
 | Service | Image | What it does |
 |---|---|---|
-| `ibp-frontend` | `ghcr.io/jonkensta/ibp-frontend` | nginx on port 80: serves the built React app and proxies `/api/` to the backend |
-| `ibp-backend` | `ghcr.io/jonkensta/ibp-backend` | FastAPI (uvicorn) on port 8000, only reachable from the frontend container |
+| `ibp-frontend` | `ghcr.io/insidebooksproject/frontend` | nginx on port 80: serves the built React app and proxies `/api/` to the backend |
+| `ibp-backend` | `ghcr.io/insidebooksproject/backend` | FastAPI (uvicorn) on port 8000, only reachable from the frontend container |
 
 GitHub Actions builds both images for amd64 and arm64 on every push to
 `main` and on `v*` tags (`.github/workflows/docker.yml` in each repo), so
@@ -55,7 +55,7 @@ Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
          sudo install -d -o jstarr -g jstarr /srv/ibp /srv/ibp/data
          # A re-run keeps what an earlier attempt made: the checkout, the
          # edited .env and the database (which the backend may have written).
-         [ -d ~/ibp-backend ] || git clone https://github.com/jonkensta/ibp-backend.git ~/ibp-backend
+         [ -d ~/ibp-backend ] || git clone https://github.com/insidebooksproject/backend.git ~/ibp-backend
          cp ~/ibp-backend/deploy/pi/{compose.yaml,nginx.conf} /srv/ibp/
          [ -e /srv/ibp/.env ] || cp ~/ibp-backend/deploy/pi/.env.example /srv/ibp/.env
          "${EDITOR:-nano}" /srv/ibp/.env     # IBP_TAG, ISBN lookup keys
