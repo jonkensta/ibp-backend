@@ -10,7 +10,11 @@ OS Lite 64-bit, booting from a USB SSD):
 
 GitHub Actions builds both images for amd64 and arm64 on every push to
 `main` and on `v*` tags (`.github/workflows/docker.yml` in each repo), so
-nothing is built on the Pi. Production pins a release tag in `.env`.
+nothing is built on the Pi. They are public, tagged `main`, `sha-<sha>` and
+`vX.Y.Z`. Production pins a release tag in `.env`: one `IBP_TAG` selects
+both images, so both repos need the tag. Releases up to v1.0.19 exist only
+under the old names, `ghcr.io/jonkensta/ibp-backend` and `ibp-frontend` (see
+Upgrading).
 
 Access is the LAN and the tailnet only. There is no authentication and no
 HTTPS.
@@ -21,8 +25,11 @@ HTTPS.
 |---|---|
 | `/srv/ibp/compose.yaml`, `nginx.conf` | copied from this directory |
 | `/srv/ibp/.env` | `IBP_TAG=v…` and the ISBN lookup keys (from `.env.example`; mode 0600) |
+| `/srv/ibp/.env.pre-<tag>`, `compose.yaml.pre-<tag>` | the files before each upgrade, kept for a rollback |
 | `/srv/ibp/data/data.db` | the database, owned by `jstarr` (uid 1000) |
-| `~/.local/bin/ibp-backup` + timer | backups, see `scripts/backup/README.md` |
+| `~/.local/bin/ibp-backup` + timer | backups, see [`scripts/backup/`](../../scripts/backup/README.md) |
+| `~/.local/bin/ibp-label-refund` + timer | unused-label refunds, see [`scripts/label-refund/`](../../scripts/label-refund/README.md) |
+| `~/.local/bin/ibp-shipment-sync` + timer | shipment tracking, see [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md) |
 
 Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
 
@@ -72,11 +79,8 @@ Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
    it creates a fresh schema; on a migrated database it only applies pending
    alembic migrations.
 
-   GHCR packages are private when first published. Either make both
-   packages public (GitHub → Packages → package settings → visibility), or
-   `docker login ghcr.io` on the Pi with a token that has `read:packages`.
-
-4. Backups: see `scripts/backup/README.md`.
+4. Backups, refunds and the shipment sync: install each from its README
+   under `scripts/` (table above).
 
 ## Configuration
 
