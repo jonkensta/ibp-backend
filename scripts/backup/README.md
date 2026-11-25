@@ -2,15 +2,14 @@
 
 Snapshot (Mon & Fri 13:00) of the IBP database on ibp-server, uploaded to Google Drive.
 
-- `ibp-backup` — `sqlite3 .backup` → `integrity_check` → core-table check → zstd → upload to
+- `ibp-backup`: `sqlite3 .backup` → `integrity_check` → core-table check → zstd → upload to
   `gdrive:backups/ibp/`. Keeps the newest 20 on Drive and the newest 4 locally in `~/backups/ibp/`.
-- `ibp-backup.service` / `ibp-backup.timer` — systemd units.
+- `ibp-backup.service` / `ibp-backup.timer`: systemd units.
 
 The script runs on the **host**, not in a container. It reads the database straight from the
-Docker deployment's bind mount, `/srv/ibp/data/data.db` (see `deploy/pi/`). SQLite's locking
-works across the host and the container, so the online `.backup` is consistent while the app
-runs. Set `IBP_DB` to back up a different file; on the legacy Pi 3B that is
-`IBP_DB=/home/jstarr/ibp/data.db` (add `Environment=IBP_DB=…` to the service).
+Docker deployment's bind mount, `/srv/ibp/data/data.db` (see [`deploy/pi/`](../../deploy/pi/README.md)).
+SQLite's locking works across the host and the container, so the online `.backup` is consistent
+while the app runs. To back up a different file, add `Environment=IBP_DB=…` to the service.
 
 Monitoring: the script pings the self-hosted Healthchecks check `ibp-backup`
 (https://healthchecks.jstarr.me, on jstarr-beelink) on start and with its exit status plus the
@@ -57,8 +56,8 @@ it from scratch, do so on a machine with a browser and copy the file over:
 
 Anything written after the backup was taken is lost. This restores into the
 running release; to go back to an older release whose schema is behind the
-current database, use the rollback steps in the deploy README instead (the old
-release can't start on the newer schema).
+current database, use the [rollback steps](../../deploy/pi/README.md#rolling-back) in the
+deploy README instead (the old release can't start on the newer schema).
 
-A backup taken from the legacy app has the legacy schema; run it through
-`scripts/migrate.py` first (see DEPLOYMENT-PLAN).
+A backup taken from the legacy app has the legacy schema; run it through `scripts/migrate.py`
+first (see [Migrating from the legacy database](../../README.md#migrating-from-the-legacy-database)).
