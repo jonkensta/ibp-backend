@@ -221,7 +221,8 @@ Roll back by setting the previous tag and running `docker compose up -d`
 again. If the new release ran a database migration, the old backend can't
 start on the migrated database, so restore the backup taken just before the
 upgrade with the block below (writes since then are lost, but the database
-it replaces is kept in a new `data/before-rollback-…` directory). It stops
+it replaces is kept, with its SQLite side files, in a new
+`data/before-rollback-…` directory). It stops
 the shipment timer and holds the sync's run lock throughout, so no sync can
 migrate the restored database; it checks everything that can fail before
 moving any file, and it can be run again after a failure. It leaves the
@@ -264,20 +265,35 @@ timer stopped:
       check=$(sqlite3 "$staging" 'PRAGMA integrity_check;') || check="failed"
       [ "$check" = ok ] || { echo "NOT RESTORED: the backup failed its integrity check; nothing was changed; pick another backup"; exit 1; }
       # Stage the new files beside the live ones, and a new directory for
-      # the live database (never an existing one, so a re-run can't
-      # overwrite what an earlier attempt kept).
+      # the live database (never one that holds a database a re-run could
+      # overwrite). An attempt stopped part-way through the swap, after it
+      # moved data.db aside, left its directory's name in the marker: its
+      # remaining SQLite files (-wal, -shm) go to that same directory, so
+      # the kept database stays whole.
       install -m 0644 "$staging" data/data.db.restoring
       cp "$previous" .env.restoring
-      aside=data/before-rollback-$EPOCHSECONDS-$$
-      mkdir "$aside"
-      cp -p .env "$aside/.env"
-      # The swap: renames only. (An earlier attempt stopped in the middle of
-      # it may have moved the live database aside already.)
+      marker=data/.rollback-in-progress
+      aside=""
+      if [ -s "$marker" ] && [ ! -e data/data.db ]; then
+        read -r aside < "$marker"
+        if [ ! -e "$aside/data.db" ]; then aside=""; fi
+      fi
+      if [ -z "$aside" ]; then
+        aside=data/before-rollback-$EPOCHSECONDS-$$
+        mkdir "$aside"
+        cp -p .env "$aside/.env"
+        printf '%s\n' "$aside" > "$marker"
+      fi
+      # The swap: renames only, never onto a file already kept.
       for file in "" -journal -wal -shm; do
-        if [ -e "data/data.db$file" ]; then mv "data/data.db$file" "$aside/data.db$file"; fi
+        if [ -e "data/data.db$file" ]; then
+          [ ! -e "$aside/data.db$file" ] || { echo "NOT ROLLED BACK: $aside/data.db$file already exists; nothing more was moved"; exit 1; }
+          mv "data/data.db$file" "$aside/data.db$file"
+        fi
       done
       mv data/data.db.restoring data/data.db
       mv .env.restoring .env
+      rm -f "$marker"
       docker compose up -d
       docker compose ps                         # both on the old tag, healthy
       echo "ROLLED BACK to $previous_tag; the database it replaced is in /srv/ibp/$aside. The shipment timer is still stopped: start it (sudo systemctl start ibp-shipment-sync.timer) only once the old version is confirmed healthy, and first reinstall the old wrapper and units from a checkout of $previous_tag if the rollback crosses the release that changed them."
