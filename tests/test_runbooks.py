@@ -301,7 +301,8 @@ def pre_upgrade_block(readme: str) -> str:
 def test_rollback_checks_everything_before_moving_anything(tmp_path):
     """The rollback stops the timer, drains and locks, stops the
     containers and verifies a fresh staging file before the first move;
-    after the swap only starting the containers remains."""
+    after the swap only clearing its marker and starting the containers
+    remain."""
     root = sandbox(tmp_path)
     steps = run_block(root, rollback_block()).steps
     first_move = next(n for n, step in enumerate(steps) if step.startswith("mv "))
@@ -319,7 +320,11 @@ def test_rollback_checks_everything_before_moving_anything(tmp_path):
     ):
         assert needed in before, needed
     after = [step for step in steps[first_move:] if not step.startswith("mv ")]
-    assert after == ["docker compose up -d", "docker compose ps"]
+    assert after == [
+        "rm -f data/.rollback-in-progress",
+        "docker compose up -d",
+        "docker compose ps",
+    ]
     srv = root / "srv" / "ibp"
     assert (srv / "data" / "data.db").read_text() == "backup database\n"
     assert (srv / ".env").read_text() == "IBP_TAG=v0.9.0\n"
@@ -341,6 +346,31 @@ def test_rollback_run_again_keeps_the_first_kept_database(tmp_path):
     assert run_block(root, rollback_block()).status == 0
     assert (first / "data.db").read_text() == "live database\n"
     assert len(list((root / "srv" / "ibp" / "data").glob("before-rollback-*"))) == 2
+
+
+def test_rollback_stopped_mid_swap_keeps_the_database_with_its_wal(tmp_path):
+    """A failure after data.db was moved aside but before its -wal: the
+    re-run puts the -wal beside the database it belongs to, not in a second
+    directory."""
+    root = sandbox(tmp_path)
+    steps = run_block(root, rollback_block()).steps
+    root = sandbox(tmp_path / "retry")
+    wal = next(n for n, step in enumerate(steps) if "data.db-wal" in step) + 1
+    assert run_block(root, rollback_block(), wal).status != 0
+    data = root / "srv" / "ibp" / "data"
+    (first,) = data.glob("before-rollback-*")
+    assert (first / "data.db").exists() and not (first / "data.db-wal").exists()
+    assert (data / "data.db-wal").read_text() == "live wal\n"
+
+    assert run_block(root, rollback_block()).status == 0
+
+    assert list(data.glob("before-rollback-*")) == [first]
+    assert (first / "data.db").read_text() == "live database\n"
+    assert (first / "data.db-wal").read_text() == "live wal\n"
+    assert (first / ".env").read_text() == "IBP_TAG=v1.0.0\n"
+    assert (data / "data.db").read_text() == "backup database\n"
+    assert not (data / ".rollback-in-progress").exists()
+    assert not (data / "data.db-wal").exists()
 
 
 def test_rollback_holds_the_sync_lock_through_the_switch(tmp_path):
