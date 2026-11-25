@@ -266,11 +266,9 @@ places; units with no delivery line are never merged, and units at one
 street address with different display names are not one place. A
 label to one place stores its representative, the alphabetically first
 unit name. Stored labels are matched again only when read again: the daily
-run relists 35 days, and `--since YYYY-MM-DD` relists everything back to
-that date and fetches by id each stored label bought since then that the
-listing missed, updating `unit_name` on labels already stored. A `--since`
-run that fails part-way exits 1 without rebuilding the links and must be
-re-run (see [`scripts/shipment-sync/`](scripts/shipment-sync/README.md)).
+run relists 35 days, and `--since YYYY-MM-DD` reads every label back to that
+date (see [Re-evaluating every label's
+unit](scripts/shipment-sync/README.md#re-evaluating-every-labels-unit)).
 
 A label's EasyPost `reference` carries a tag from the shipping apps:
 `ibp1:req:<request code>` (an individual package, e.g.
@@ -382,31 +380,19 @@ fewer than `settle_days` days ago is `provisional`. For example:
 
 The metric reads the stored links, so after an upgrade that changes the
 link rules, rebuild them (`--rebuild-links`, see
-[`deploy/pi/README.md`](deploy/pi/README.md)) before trusting it. It is read
-in one SQL statement: the Filled requests are counted per postmark date in
-SQL, and only the linked ones are read one by one.
+[`deploy/pi/README.md`](deploy/pi/README.md#upgrading)) before trusting it.
+It is read in one SQL statement, so a sync committing meanwhile shows up
+entirely or not at all; unlinked requests are only counted, in SQL.
 
 ## Deployment
 
 Production runs on `ibp-server`, a Raspberry Pi 4B, as a Docker Compose
-stack defined in [`deploy/pi/`](deploy/pi/README.md):
-
-- `ibp-frontend`: nginx on port 80, serving the React app and proxying
-  `/api/` to the backend.
-- `ibp-backend`: this app under uvicorn on port 8000, reachable only from the
-  frontend container. Its entrypoint runs `python -m ibp.db_bootstrap`, which
-  creates the schema on an empty database or applies pending alembic
-  migrations, then starts the server.
-
-Both images are built for amd64 and arm64 by GitHub Actions
-(`.github/workflows/docker.yml`) and published to GHCR as
-`ghcr.io/insidebooksproject/backend` and `ghcr.io/insidebooksproject/frontend`, tagged
-`main`, `sha-<sha>` and `vX.Y.Z`; production pins a release tag via `IBP_TAG`
-in `/srv/ibp/.env`. The backend needs no config file there: it uses the
-image's `sample.conf` with `DATABASE_URL` pointing at `/data/data.db`, a host
-directory bind-mounted into the container. Setup, upgrades, backups and
-overriding the config are covered in
-[`deploy/pi/README.md`](deploy/pi/README.md).
+stack of two containers: `ibp-frontend` (nginx, serving the React app and
+proxying `/api/` to the backend) and `ibp-backend` (this app under uvicorn).
+The backend image's entrypoint runs `python -m ibp.db_bootstrap`, which
+creates the schema on an empty database or applies pending alembic
+migrations, then starts the server. The images, setup, upgrades, rollback
+and configuration are in [`deploy/pi/README.md`](deploy/pi/README.md).
 
 ## Migrating from the legacy database
 
