@@ -1,30 +1,29 @@
 # Inside Books Project Backend
 
-This repository contains the FastAPI backend that powers the Inside Books Project database interface. Inside Books Project is a volunteer-run organization based in Austin that sends free books and educational materials to incarcerated people throughout Texas. Volunteers correspond with individuals in prisons, locate requested books, and ship packages every week.
+This repository contains the FastAPI backend of the Inside Books Project
+database. Inside Books Project is a volunteer-run organization based in Austin
+that sends free books and educational materials to incarcerated people
+throughout Texas. The backend serves the volunteers' web app
+([`frontend`](https://github.com/insidebooksproject/frontend)), the shipping
+apps (`shippy`, `shippy-gui`) and the Book Portal extension: inmate lookups
+from TDCJ and the Federal Bureau of Prisons, book requests and comments,
+prison units, ISBN and UPC lookups, the packing station's package items, and
+EasyPost shipment tracking.
 
-The backend server makes it easier for volunteers to manage these logistics. It provides REST API endpoints for looking up Texas Department of Criminal Justice inmate data, tracking book requests, storing comments, and managing the list of prison units. The data served here is used by the web interface volunteers rely on when preparing outgoing shipments.
+## Development
 
-## Installation
-
-Use [`uv`](https://github.com/astral-sh/uv) to create and synchronize a virtual environment:
-
-```bash
-uv venv
-source .venv/bin/activate
-uv sync
-```
-
-## Running the server
-
-During development you can launch the application with FastAPI's development server which enables live reloads:
+With [`uv`](https://github.com/astral-sh/uv):
 
 ```bash
-uv run fastapi dev ibp
+uv sync                             # .venv with the dev tools
+uv run python -m ibp.db_bootstrap   # create the schema
+uv run fastapi dev ibp              # localhost:8000, reloads on changes
+uv run pytest -q
 ```
 
-It listens on [localhost:8000](http://localhost:8000) and, with the sample
-config, uses `data.db` in the project directory. Create the schema first with
-`uv run python -m ibp.db_bootstrap`.
+With the sample config the database is `data.db` in the current directory.
+CI (`.github/workflows/lint.yml`) also runs `black --check`, `pylint` and
+`mypy` on `ibp`.
 
 ## Configuration
 
@@ -65,10 +64,9 @@ UPC -> ISBN map that volunteers fill (`ibp/upcs.py`; no outside service is
 asked). `code` is the 12-digit UPC plus any 2- or 5-digit add-on (12, 14 or
 17 digits, UPC-A check digit on the first 12; anything else is a 422), with
 or without the leading 0 some scanners send (the UPC as an EAN-13), which is
-dropped (`upcs.normalize_code`). The
-12 digits identify only the publisher and price point, shared by many
-titles, and the add-on tells them apart, so a code is answered only by an
-exact match on the full code. The answer is the ISBN lookup above plus `isbn`
+dropped (`upcs.normalize_code`). The 12 digits identify only the publisher
+and price point, shared by many titles, and the add-on tells them apart, so
+a code is answered only by an exact match on the full code. The answer is the ISBN lookup above plus `isbn`
 and `upc_source` (`volunteer`). A code with no known ISBN is a 404
 `{"detail": "No ISBN known for this UPC.", "reason": "no_isbn"}`; one whose
 ISBN no provider knows is a 404 `{"detail": "Book not found.", "reason":
@@ -434,5 +432,3 @@ DATABASE_URL=sqlite+aiosqlite:///path/to/new.db \
 
 Running `python -m ibp.db_bootstrap` afterwards (as the container entrypoint
 does) is harmless; it finds the stamped schema and has nothing to do.
-
-Run the tests with `uv run pytest -q`.
