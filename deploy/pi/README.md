@@ -102,6 +102,13 @@ missing file:
 
 ## Upgrading
 
+If the release changes `deploy/pi/compose.yaml` or `nginx.conf`, just
+before the block keep the Pi's copy as `compose.yaml.pre-<new tag>` (or
+`nginx.conf.pre-<new tag>`) with `cp -p`, `diff` it with the new tag's
+file, and copy that over. The first release after v1.0.19 is one: its
+`compose.yaml` names the `ghcr.io/insidebooksproject` images, while the
+Pi's still names the old `ghcr.io/jonkensta` ones, which get no new tags.
+
 The block stops the shipment timer and holds the sync's run lock while it
 runs, so no sync can start on the new image and migrate the database before
 the backup; it starts the timer again at the end if it was running before.
@@ -215,22 +222,25 @@ Then upgrade the backend (`deploy/pi/README.md`, Upgrading: backup, new
       fi
     )
 
-The new wrapper's runs never overlap: each holds a lock
-(`~/.local/state/ibp-shipment-sync/run.lock`), and one that finds it held
-exits 75 at once ("another ibp-shipment-sync run is in progress") without
-running or pinging Healthchecks. Its container is labelled
-`ibp.job=shipment-sync` (`docker ps --filter label=ibp.job=shipment-sync`).
+The sync's run lock, which the upgrade and rollback blocks hold, is
+described in [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md).
+
+## Rolling back
 
 Roll back by setting the previous tag and running `docker compose up -d`
-again. If the new release ran a database migration, the old backend can't
-start on the migrated database, so restore the backup taken just before the
+again. If the upgrade replaced `compose.yaml` or `nginx.conf`, first put
+the saved `.pre-<new tag>` copy back (`cp -p`); a rollback to v1.0.19 or
+earlier always needs the old `compose.yaml`, since those tags exist only
+under the old image names.
+
+If the new release ran a database migration, the old backend can't start
+on the migrated database, so restore the backup taken just before the
 upgrade with the block below (writes since then are lost, but the database
 it replaces is kept, with its SQLite side files, in a new
-`data/before-rollback-…` directory). It stops
-the shipment timer and holds the sync's run lock throughout, so no sync can
-migrate the restored database; it checks everything that can fail before
-moving any file, and it can be run again after a failure. It leaves the
-timer stopped:
+`data/before-rollback-…` directory). It stops the shipment timer and holds
+the sync's run lock throughout, so no sync can migrate the restored
+database; it checks everything that can fail before moving any file, and it
+can be run again after a failure. It leaves the timer stopped:
 
     (
       set -Eeuo pipefail
