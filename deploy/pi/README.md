@@ -90,9 +90,8 @@ warnings, 24 h cache), and the database path comes from `DATABASE_URL` in
 `compose.yaml`. The return address and the unit mailroom line live in the
 database and are edited on the app's Settings page. To change any
 `sample.conf` value, mount a `server.conf` holding just the changed options
-(it is read over `sample.conf`, so anything it leaves out keeps the default)
-and point `CONF` at it; the backend refuses to start if `CONF` names a
-missing file:
+and point `CONF` at it (see Configuration in the [top-level
+README](../../README.md#configuration)):
 
     # compose.yaml, ibp-backend:
     environment:
@@ -172,11 +171,11 @@ trusting the chart, rather than waiting for the next nightly sync:
 A release that changes unit matching (`ibp/unit_places.py`,
 `ibp/unit_matching.py`, `ibp/label_reading.py`) needs every stored label
 matched again instead, which also rebuilds the links. Do it in this order
-around the plain upgrade above (it is step 5): stopping the
-timer doesn't stop a run in progress, and the old wrapper takes no lock, so
-it is replaced before the backfill. A run that fails part-way says the
-re-evaluation is incomplete and leaves the links as they were
-(`scripts/shipment-sync/README.md`).
+around the upgrade block above (it is step 5): stopping the timer doesn't
+stop a run in progress, and an older wrapper takes no lock, so the new one
+is installed before the backfill. A run that fails part-way says the
+re-evaluation is incomplete and leaves the links as they were (see
+[`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md#re-evaluating-every-labels-unit)).
 
     (
       set -Eeuo pipefail
@@ -203,8 +202,7 @@ re-evaluation is incomplete and leaves the links as they were
       sudo systemctl daemon-reload
     )
 
-Then upgrade the backend (`deploy/pi/README.md`, Upgrading: backup, new
-`IBP_TAG`, `docker compose pull`, `docker compose up -d`), and only then:
+Then run the upgrade block above (step 5), and only then:
 
     (
       set -Eeuo pipefail
