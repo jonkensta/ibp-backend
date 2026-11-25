@@ -25,7 +25,7 @@ HTTPS.
 |---|---|
 | `/srv/ibp/compose.yaml`, `nginx.conf` | copied from this directory |
 | `/srv/ibp/.env` | `IBP_TAG=v…` and the ISBN lookup keys (from `.env.example`; mode 0600) |
-| `/srv/ibp/.env.pre-<tag>`, `compose.yaml.pre-<tag>` | the files before each upgrade, kept for a rollback |
+| `/srv/ibp/.env.pre-<tag>`, `compose.yaml.pre-<tag>` | the files as they were before an upgrade replaced them, kept for a rollback |
 | `/srv/ibp/data/data.db` | the database, owned by `jstarr` (uid 1000) |
 | `~/.local/bin/ibp-backup` + timer | backups, see [`scripts/backup/`](../../scripts/backup/README.md) |
 | `~/.local/bin/ibp-label-refund` + timer | unused-label refunds, see [`scripts/label-refund/`](../../scripts/label-refund/README.md) |
