@@ -3,8 +3,8 @@
 Daily job on ibp-server that copies every EasyPost postage label and its
 USPS tracking events into the IBP database, then rebuilds the links between
 requests and labels (`shipments`, `tracking_events`, `package_shipments`;
-see "Shipment tracking" in the top-level README). GET requests only: it
-never buys, refunds or changes anything at EasyPost.
+see [Shipment tracking](../../README.md#shipment-tracking)). GET requests
+only: it never buys, refunds or changes anything at EasyPost.
 
 - `ibp-shipment-sync`: runs `python -m ibp.shipment_sync` in a one-off
   backend container (`docker compose run --rm` in `/srv/ibp`), with the key
@@ -137,8 +137,9 @@ at its first failed step, with a non-zero status):
       sudo systemctl daemon-reload
     )
 
-Then upgrade the backend (`deploy/pi/README.md`, Upgrading: backup, new
-`IBP_TAG`, `docker compose pull`, `docker compose up -d`), and only then:
+Then upgrade the backend (step 5: the upgrade block in
+[`deploy/pi/README.md`](../../deploy/pi/README.md#upgrading)), and only
+then:
 
     (
       set -Eeuo pipefail
