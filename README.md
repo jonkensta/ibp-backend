@@ -231,7 +231,7 @@ are in [`scripts/shipment-sync/`](scripts/shipment-sync/README.md).
   alone with `--rebuild-links`.
 
 A label's unit comes from its tag, else from its address
-(`ibp/unit_places.py`, `UnitMatcher` in `ibp/shipment_sync.py`). Two kinds
+(`ibp/unit_places.py`, `UnitMatcher` in `ibp/unit_matching.py`). Two kinds
 of evidence are gathered apart. By name: an address line (street1, street2
 or company, letters and digits only, any case) that is a unit's key name
 (the provider's code, e.g. `PLANE JAIL`) or its display name (the first of
