@@ -402,7 +402,7 @@ stack defined in [`deploy/pi/`](deploy/pi/README.md):
 
 Both images are built for amd64 and arm64 by GitHub Actions
 (`.github/workflows/docker.yml`) and published to GHCR as
-`ghcr.io/jonkensta/ibp-backend` and `ghcr.io/jonkensta/ibp-frontend`, tagged
+`ghcr.io/insidebooksproject/backend` and `ghcr.io/insidebooksproject/frontend`, tagged
 `main`, `sha-<sha>` and `vX.Y.Z`; production pins a release tag via `IBP_TAG`
 in `/srv/ibp/.env`. The backend needs no config file there: it uses the
 image's `sample.conf` with `DATABASE_URL` pointing at `/data/data.db`, a host

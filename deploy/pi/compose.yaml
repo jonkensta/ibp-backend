@@ -16,7 +16,7 @@ x-logging: &logging
 
 services:
   ibp-backend:
-    image: ghcr.io/jonkensta/ibp-backend:${IBP_TAG:?set IBP_TAG in .env}
+    image: ghcr.io/insidebooksproject/backend:${IBP_TAG:?set IBP_TAG in .env}
     environment:
       TZ: America/Chicago
       DATABASE_URL: sqlite+aiosqlite:////data/data.db
@@ -39,7 +39,7 @@ services:
     logging: *logging
 
   ibp-frontend:
-    image: ghcr.io/jonkensta/ibp-frontend:${IBP_TAG:?set IBP_TAG in .env}
+    image: ghcr.io/insidebooksproject/frontend:${IBP_TAG:?set IBP_TAG in .env}
     ports:
       - "80:80"
     volumes:
