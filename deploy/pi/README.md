@@ -220,8 +220,8 @@ Then run the upgrade block above (step 5), and only then:
       fi
     )
 
-The sync's run lock, which the upgrade and rollback blocks hold, is
-described in [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md).
+The sync's run lock, which the upgrade, rollback and [restore](../../scripts/backup/README.md#restore)
+blocks hold, is described in [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md).
 
 ## Rolling back
 
@@ -237,26 +237,38 @@ upgrade with the block below (writes since then are lost, but the database
 it replaces is kept, with its SQLite side files, in a new
 `data/before-rollback-…` directory). It stops the shipment timer and holds
 the sync's run lock throughout, so no sync can migrate the restored
-database; it checks everything that can fail before moving any file, and it
-can be run again after a failure. It leaves the timer stopped:
+database, and it stops the backup timer and waits for a backup in progress,
+so none has the database open while it is swapped; it checks everything
+that can fail before moving any file, and it can be run again after a
+failure. It leaves the shipment timer stopped, and starts the backup timer
+again at the end if it was running:
 
     (
       set -Eeuo pipefail
-      trap 'echo "ROLLBACK STOPPED: the step above failed; the shipment timer stays stopped" >&2' ERR
+      trap 'echo "ROLLBACK STOPPED: the step above failed; the shipment and backup timers stay stopped" >&2' ERR
       cd /srv/ibp
       # Every check that can fail comes before anything is moved.
       previous=.env.pre-<new tag>
       [ -s "$previous" ] || { echo "NOT ROLLED BACK: $previous is missing or empty; nothing was changed"; exit 1; }
       previous_tag=$(sed -n 's/^IBP_TAG=//p' "$previous")
       [ -n "$previous_tag" ] || { echo "NOT ROLLED BACK: $previous names no IBP_TAG; nothing was changed"; exit 1; }
-      # No sync may start on the new image and migrate the restored database.
-      sudo systemctl stop ibp-shipment-sync.timer
-      # Wait for a sync already running: the service (a running oneshot is
-      # "activating") and any one-off backend container (an older wrapper's has
-      # no label of its own). Each query must succeed: a failed one stops the
-      # block instead of reading as "nothing running".
+      # No sync may start on the new image and migrate the restored database,
+      # and no backup may have the database open while it is swapped. The
+      # backup timer's state is kept, once, to restore it at the end.
+      backup_was=.backup-timer-before-rollback
+      if [ ! -e "$backup_was" ]; then
+        timer_state=$(systemctl show -p ActiveState --value ibp-backup.timer)
+        printf '%s\n' "$timer_state" > "$backup_was"
+      fi
+      sudo systemctl stop ibp-shipment-sync.timer ibp-backup.timer
+      # Wait for a sync or a backup already running: the services (a running
+      # oneshot is "activating") and any one-off backend container (an older
+      # wrapper's has no label of its own). Each query must succeed: a failed
+      # one stops the block instead of reading as "nothing running".
       while :; do
         state=$(systemctl show -p ActiveState --value ibp-shipment-sync.service)
+        case "$state" in active | activating | deactivating | reloading) sleep 5; continue ;; esac
+        state=$(systemctl show -p ActiveState --value ibp-backup.service)
         case "$state" in active | activating | deactivating | reloading) sleep 5; continue ;; esac
         running=$(docker ps -q --filter label=com.docker.compose.oneoff=True --filter label=com.docker.compose.service=ibp-backend)
         if [ -z "$running" ]; then break; fi
@@ -308,5 +320,8 @@ can be run again after a failure. It leaves the timer stopped:
       rm -f "$marker"
       docker compose up -d
       docker compose ps                         # both on the old tag, healthy
+      read -r timer_state < "$backup_was"
+      if [ "$timer_state" = active ]; then sudo systemctl start ibp-backup.timer; fi
+      rm -f "$backup_was"
       echo "ROLLED BACK to $previous_tag; the database it replaced is in /srv/ibp/$aside. The shipment timer is still stopped: start it (sudo systemctl start ibp-shipment-sync.timer) only once the old version is confirmed healthy, and first reinstall the old wrapper and units from a checkout of $previous_tag if the rollback crosses the release that changed them."
     )
