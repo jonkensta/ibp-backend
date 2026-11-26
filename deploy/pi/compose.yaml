@@ -2,7 +2,7 @@
 # Install this directory as /srv/ibp; see deploy/pi/README.md.
 #
 #   /srv/ibp/compose.yaml   this file
-#   /srv/ibp/.env           IBP_TAG (and optionally IBP_UID/IBP_GID)
+#   /srv/ibp/.env           IBP_TAG, the ISBN lookup keys (optionally IBP_UID/IBP_GID)
 #   /srv/ibp/nginx.conf     frontend nginx config (HTTP only, LAN + tailnet)
 #   /srv/ibp/data/data.db   the SQLite database (backed up by ibp-backup)
 

@@ -3,8 +3,8 @@
 Daily job on ibp-server that copies every EasyPost postage label and its
 USPS tracking events into the IBP database, then rebuilds the links between
 requests and labels (`shipments`, `tracking_events`, `package_shipments`;
-see "Shipment tracking" in the top-level README). GET requests only: it
-never buys, refunds or changes anything at EasyPost.
+see [Shipment tracking](../../README.md#shipment-tracking)). GET requests
+only: it never buys, refunds or changes anything at EasyPost.
 
 - `ibp-shipment-sync`: runs `python -m ibp.shipment_sync` in a one-off
   backend container (`docker compose run --rm` in `/srv/ibp`), with the key
@@ -27,31 +27,39 @@ answer with its own id and one of EasyPost's statuses, else it is a failed
 poll and nothing stored changes. Stored evidence never goes backwards: an
 answer without a tracker, tracker status or refund status keeps the stored
 one, events are only ever added, and a label once seen scanned stays
-`ever_scanned` whatever its later status or refund. Every listing page must have its list of
-shipments and a boolean `has_more`; a page saying more follow must have a
-last shipment to page on, other than the previous page's; and a month's
-window may have at most 500 pages. Anything else fails the run rather than
-ending (or never ending) the listing as if it were complete. Only
-checked ids reach a log line.
+`ever_scanned` whatever its later status or refund. Every listing page must
+have its list of shipments and a boolean `has_more`; a page saying more
+follow must have a last shipment to page on, other than the previous
+page's; and a month's window may have at most 500 pages. Anything else
+fails the run rather than ending (or never ending) the listing as if it
+were complete. Only checked ids reach a log line.
 
 Exit status: 0 ok, 1 an EasyPost or database error (or a tracker it could
 not fetch, or a listed label it skipped) or any other failure, 2 no usable
-key, 75 another run in progress (the wrapper's lock, below). Failures, retries and
-unfetched trackers are logged as one line each with no values: a fixed
-operation (`GET shipments`, `GET shipment`, `GET tracker`, never an id or
+key, 75 another run in progress (below). Failures, retries and unfetched
+trackers are logged as one line each with no values: a fixed operation
+(`GET shipments`, `GET shipment`, `GET tracker`, never an id or
 query string) with an EasyPost error's HTTP status and code (a known code,
 else `other`), or a network error's class; a database error's class and
 SQLite's error code name (`OperationalError: SQLITE_BUSY`), never its
 message; anything else its class and the file and line in `ibp/` that
 raised it (`ValueError at ibp/shipment_sync.py:384`); never a traceback.
-An unfetched tracker's warning names the label's EasyPost id. Monitoring: pings a Healthchecks check (start,
-then the exit status with the output) if `~/.config/ibp-shipment-sync/ping-url`
-exists.
+An unfetched tracker's warning names the label's EasyPost id.
+
+Runs never overlap: the wrapper holds an exclusive lock
+(`~/.local/state/ibp-shipment-sync/run.lock`) for the whole run. A run that
+finds it held prints "another ibp-shipment-sync run is in progress" and
+exits 75 without running anything or pinging Healthchecks (the run holding
+the lock reports for itself, and the service counts 75 as success). The
+one-off container is labelled `ibp.job=shipment-sync`.
+
+Monitoring: pings a Healthchecks check (start, then the exit status with the
+output) if `~/.config/ibp-shipment-sync/ping-url` exists.
 
 ## Install
 
-Needs a backend release with `ibp.shipment_sync` deployed, and `jstarr` in
-the `docker` group (`id -nG`).
+Needs backend v1.0.16 or later deployed (the first with
+`ibp.shipment_sync`), and `jstarr` in the `docker` group (`id -nG`).
 
     (
       set -Eeuo pipefail
@@ -129,8 +137,9 @@ at its first failed step, with a non-zero status):
       sudo systemctl daemon-reload
     )
 
-Then upgrade the backend (`deploy/pi/README.md`, Upgrading: backup, new
-`IBP_TAG`, `docker compose pull`, `docker compose up -d`), and only then:
+Then upgrade the backend (step 5: the upgrade block in
+[`deploy/pi/README.md`](../../deploy/pi/README.md#upgrading)), and only
+then:
 
     (
       set -Eeuo pipefail
@@ -147,12 +156,5 @@ Then upgrade the backend (`deploy/pi/README.md`, Upgrading: backup, new
         exit 1
       fi
     )
-
-Runs never overlap: the wrapper holds an exclusive lock
-(`~/.local/state/ibp-shipment-sync/run.lock`) for the whole run. A run that
-finds it held prints "another ibp-shipment-sync run is in progress" and
-exits 75 without running anything or pinging Healthchecks (the run holding
-the lock reports for itself, and the service counts 75 as success). The
-one-off container is labelled `ibp.job=shipment-sync`.
 
 If the EasyPost key changes, update the key file (and Bitwarden).

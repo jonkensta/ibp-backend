@@ -1,7 +1,7 @@
 name: Docker image
 
-# Builds the backend image for amd64 (beelink demo, desktops) and arm64 (the
-# Raspberry Pi 4 production server) and publishes it to GHCR:
+# Builds the backend image for amd64 (desktops) and arm64 (the Raspberry Pi 4
+# production server) and publishes it to GHCR:
 #   ghcr.io/insidebooksproject/backend:main      latest commit on main
 #   ghcr.io/insidebooksproject/backend:sha-<sha> every pushed commit on main
 #   ghcr.io/insidebooksproject/backend:vX.Y.Z    release tags (production pins one)

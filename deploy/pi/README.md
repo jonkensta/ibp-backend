@@ -10,7 +10,11 @@ OS Lite 64-bit, booting from a USB SSD):
 
 GitHub Actions builds both images for amd64 and arm64 on every push to
 `main` and on `v*` tags (`.github/workflows/docker.yml` in each repo), so
-nothing is built on the Pi. Production pins a release tag in `.env`.
+nothing is built on the Pi. They are public, tagged `main`, `sha-<sha>` and
+`vX.Y.Z`. Production pins a release tag in `.env`: one `IBP_TAG` selects
+both images, so both repos need the tag. Releases up to v1.0.19 exist only
+under the old names, `ghcr.io/jonkensta/ibp-backend` and `ibp-frontend` (see
+Upgrading).
 
 Access is the LAN and the tailnet only. There is no authentication and no
 HTTPS.
@@ -21,8 +25,11 @@ HTTPS.
 |---|---|
 | `/srv/ibp/compose.yaml`, `nginx.conf` | copied from this directory |
 | `/srv/ibp/.env` | `IBP_TAG=v…` and the ISBN lookup keys (from `.env.example`; mode 0600) |
+| `/srv/ibp/.env.pre-<tag>`, `compose.yaml.pre-<tag>` | the files as they were before an upgrade replaced them, kept for a rollback |
 | `/srv/ibp/data/data.db` | the database, owned by `jstarr` (uid 1000) |
-| `~/.local/bin/ibp-backup` + timer | backups, see `scripts/backup/README.md` |
+| `~/.local/bin/ibp-backup` + timer | backups, see [`scripts/backup/`](../../scripts/backup/README.md) |
+| `~/.local/bin/ibp-label-refund` + timer | unused-label refunds, see [`scripts/label-refund/`](../../scripts/label-refund/README.md) |
+| `~/.local/bin/ibp-shipment-sync` + timer | shipment tracking, see [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md) |
 
 Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
 
@@ -72,11 +79,8 @@ Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
    it creates a fresh schema; on a migrated database it only applies pending
    alembic migrations.
 
-   GHCR packages are private when first published. Either make both
-   packages public (GitHub → Packages → package settings → visibility), or
-   `docker login ghcr.io` on the Pi with a token that has `read:packages`.
-
-4. Backups: see `scripts/backup/README.md`.
+4. Backups, refunds and the shipment sync: install each from its README
+   under `scripts/` (table above).
 
 ## Configuration
 
@@ -86,9 +90,8 @@ warnings, 24 h cache), and the database path comes from `DATABASE_URL` in
 `compose.yaml`. The return address and the unit mailroom line live in the
 database and are edited on the app's Settings page. To change any
 `sample.conf` value, mount a `server.conf` holding just the changed options
-(it is read over `sample.conf`, so anything it leaves out keeps the default)
-and point `CONF` at it; the backend refuses to start if `CONF` names a
-missing file:
+and point `CONF` at it (see Configuration in the [top-level
+README](../../README.md#configuration)):
 
     # compose.yaml, ibp-backend:
     environment:
@@ -97,6 +100,13 @@ missing file:
       - ./server.conf:/config/server.conf:ro
 
 ## Upgrading
+
+If the release changes `deploy/pi/compose.yaml` or `nginx.conf`, just
+before the block keep the Pi's copy as `compose.yaml.pre-<new tag>` (or
+`nginx.conf.pre-<new tag>`) with `cp -p`, `diff` it with the new tag's
+file, and copy that over. The first release after v1.0.19 is one: its
+`compose.yaml` names the `ghcr.io/insidebooksproject` images, while the
+Pi's still names the old `ghcr.io/jonkensta` ones, which get no new tags.
 
 The block stops the shipment timer and holds the sync's run lock while it
 runs, so no sync can start on the new image and migrate the database before
@@ -161,11 +171,11 @@ trusting the chart, rather than waiting for the next nightly sync:
 A release that changes unit matching (`ibp/unit_places.py`,
 `ibp/unit_matching.py`, `ibp/label_reading.py`) needs every stored label
 matched again instead, which also rebuilds the links. Do it in this order
-around the plain upgrade above (it is step 5): stopping the
-timer doesn't stop a run in progress, and the old wrapper takes no lock, so
-it is replaced before the backfill. A run that fails part-way says the
-re-evaluation is incomplete and leaves the links as they were
-(`scripts/shipment-sync/README.md`).
+around the upgrade block above (it is step 5): stopping the timer doesn't
+stop a run in progress, and an older wrapper takes no lock, so the new one
+is installed before the backfill. A run that fails part-way says the
+re-evaluation is incomplete and leaves the links as they were (see
+[`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md#re-evaluating-every-labels-unit)).
 
     (
       set -Eeuo pipefail
@@ -192,8 +202,7 @@ re-evaluation is incomplete and leaves the links as they were
       sudo systemctl daemon-reload
     )
 
-Then upgrade the backend (`deploy/pi/README.md`, Upgrading: backup, new
-`IBP_TAG`, `docker compose pull`, `docker compose up -d`), and only then:
+Then run the upgrade block above (step 5), and only then:
 
     (
       set -Eeuo pipefail
@@ -211,22 +220,25 @@ Then upgrade the backend (`deploy/pi/README.md`, Upgrading: backup, new
       fi
     )
 
-The new wrapper's runs never overlap: each holds a lock
-(`~/.local/state/ibp-shipment-sync/run.lock`), and one that finds it held
-exits 75 at once ("another ibp-shipment-sync run is in progress") without
-running or pinging Healthchecks. Its container is labelled
-`ibp.job=shipment-sync` (`docker ps --filter label=ibp.job=shipment-sync`).
+The sync's run lock, which the upgrade and rollback blocks hold, is
+described in [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md).
+
+## Rolling back
 
 Roll back by setting the previous tag and running `docker compose up -d`
-again. If the new release ran a database migration, the old backend can't
-start on the migrated database, so restore the backup taken just before the
+again. If the upgrade replaced `compose.yaml` or `nginx.conf`, first put
+the saved `.pre-<new tag>` copy back (`cp -p`); a rollback to v1.0.19 or
+earlier always needs the old `compose.yaml`, since those tags exist only
+under the old image names.
+
+If the new release ran a database migration, the old backend can't start
+on the migrated database, so restore the backup taken just before the
 upgrade with the block below (writes since then are lost, but the database
 it replaces is kept, with its SQLite side files, in a new
-`data/before-rollback-…` directory). It stops
-the shipment timer and holds the sync's run lock throughout, so no sync can
-migrate the restored database; it checks everything that can fail before
-moving any file, and it can be run again after a failure. It leaves the
-timer stopped:
+`data/before-rollback-…` directory). It stops the shipment timer and holds
+the sync's run lock throughout, so no sync can migrate the restored
+database; it checks everything that can fail before moving any file, and it
+can be run again after a failure. It leaves the timer stopped:
 
     (
       set -Eeuo pipefail
