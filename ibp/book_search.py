@@ -38,7 +38,7 @@ from .books import Candidate, setting
 logger = logging.getLogger(__name__)
 
 # IBP's own items with no ISBN skip the lookup. Keep in step with PRESETS
-# near the top of ibp-book-portal-extension/content.js.
+# near the top of book-portal-extension/content.js.
 PRESET_TITLES = ("Resource Guide", "Self-Care on the Inside")
 
 # Results asked of each provider query.
