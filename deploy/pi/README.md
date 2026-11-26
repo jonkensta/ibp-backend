@@ -220,8 +220,8 @@ Then run the upgrade block above (step 5), and only then:
       fi
     )
 
-The sync's run lock, which the upgrade and rollback blocks hold, is
-described in [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md).
+The sync's run lock, which the upgrade, rollback and [restore](../../scripts/backup/README.md#restore)
+blocks hold, is described in [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md).
 
 ## Rolling back
 
