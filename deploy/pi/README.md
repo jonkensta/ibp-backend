@@ -133,12 +133,11 @@ file, and copy that over. The first release after v1.0.19 is one: its
 `compose.yaml` names the `ghcr.io/insidebooksproject` images, while the
 Pi's still names the old `ghcr.io/jonkensta` ones, which get no new tags.
 
-The first release with the error logs (v1.0.22) mounts `./logs` into the
-backend. Create the directory, owned by the container's user (`IBP_UID`,
-uid 1000, `jstarr`) as `data/` is, before running the block: if it is
-missing, Docker creates it owned by root and the backend can't write it.
-
-    sudo install -d -o jstarr -g jstarr -m 0755 /srv/ibp/logs
+Since v1.0.22 the stack mounts `./logs` into the backend, so the block
+creates `/srv/ibp/logs` before it starts the new version, owned by the
+container's user (`IBP_UID`, uid 1000, `jstarr`) as `data/` is: if it were
+missing, Docker would create it owned by root and the backend couldn't
+write it. That step changes nothing on a Pi that already has it.
 
 The block stops the shipment timer and holds the sync's run lock while it
 runs, so no sync can start on the new image and migrate the database before
@@ -185,6 +184,7 @@ It keeps the first saved copy of the previous `.env` if it is run again.
       flock -n 9 || { echo "NOT UPGRADED: a shipment sync holds its run lock; wait for it to finish and run this block again"; exit 1; }
       "${EDITOR:-nano}" .env                     # new IBP_TAG
       sudo systemctl start ibp-backup.service    # a fresh backup first
+      sudo install -d -o jstarr -g jstarr -m 0755 /srv/ibp/logs
       docker compose pull
       docker compose up -d
       docker image prune -f
