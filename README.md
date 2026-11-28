@@ -5,7 +5,9 @@ database. Inside Books Project is a volunteer-run organization based in Austin
 that sends free books and educational materials to incarcerated people
 throughout Texas. The backend serves the volunteers' web app
 ([`frontend`](https://github.com/insidebooksproject/frontend)), the shipping
-apps (`shippy`, `shippy-gui`) and the Book Portal extension: inmate lookups
+apps (`shippy` and `shippy-gui`, both in
+[`shippy`](https://github.com/insidebooksproject/shippy)) and the Book Portal
+extension: inmate lookups
 from TDCJ and the Federal Bureau of Prisons, book requests and comments,
 prison units, ISBN and UPC lookups, the packing station's package items, and
 EasyPost shipment tracking.
