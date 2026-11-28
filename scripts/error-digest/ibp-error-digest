@@ -1,0 +1,1635 @@
+#!/usr/bin/env python3
+"""Weekly, redacted digest of every IBP app's warnings and errors.
+
+Runs as root on ibp-server (ibp-error-digest.timer, Thursdays 09:00) and:
+
+1. reads the last 7 days of events from
+   - /srv/ibp-logs/<station>/errors-*.jsonl (the shared JSONL format), where
+     a Windows laptop uploads,
+   - /srv/ibp-logs/<station>/<host>/, where a kiosk uploads: errors-*.jsonl,
+     print-server/errors-*.jsonl, and journal/*.jsonl (its journal export,
+     in journald's field names, and failed-units-<day>.jsonl),
+   - /srv/ibp/logs/*.jsonl (backend.jsonl, client-errors.jsonl), and
+   - the journals of the ibp-* units at warning or above, and the failed
+     units (journalctl, systemctl);
+2. groups them by fingerprint: app, exception type and the innermost frame
+   in IBP code, or for an event with no exception its message with numbers,
+   codes and quoted text replaced by placeholders;
+3. compares the groups with STATE/seen.json to mark each new, recurring,
+   growing (up by half or more on last week) or gone; groups whose
+   fingerprint is in CONFIG/muted are counted but left out of the report;
+4. checks the stations: a folder with no upload all week, and each station's
+   app versions from its "starting" lines, next to the deploy branches' and
+   the release's versions;
+5. writes DIGEST/<YYYY>-W<ww>.md and .json (root, group adm, 0640; 26 weeks
+   kept), and
+6. pings Healthchecks if CONFIG/ping-url exists; without it, no ping.
+
+Redaction: no ``data`` field, request body or raw line is ever copied. Each
+message, and the exception line of a stack, has package and request codes
+reduced to their prefix (TEX-########-#), e-mail addresses, quoted strings,
+runs of four or more digits, and anything after "address", "name" or
+"inmate" replaced by placeholders. A stack is kept as frames only
+(file:line function). The raw events stay where they are; each group names
+one of them (file:line, or a journalctl command) to look up on the Pi.
+
+Exit status: 0 the digest was written (whatever it found), 1 it could not
+be written or a source could not be read (the digest is still written if it
+can be), 2 bad arguments, 75 another run holds the lock.
+
+Python 3 standard library only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import grp
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import tomllib
+import urllib.request
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterator
+from zoneinfo import ZoneInfo
+
+TZ = ZoneInfo("America/Chicago")
+LOGS_ROOT = Path("/srv/ibp-logs")
+SERVER_LOGS = Path("/srv/ibp/logs")
+STATE_DIR = Path("/var/lib/ibp-error-digest")
+CONFIG_DIR = Path("/etc/ibp-error-digest")
+ENV_FILE = Path("/srv/ibp/.env")
+# The digest folder sits next to the station folders; it is not a station.
+DIGEST_NAME = "digest"
+# The group that may read the digests (jstarr and emilliken are in it).
+READER_GROUP = "adm"
+WINDOW = timedelta(days=7)
+KEEP_WEEKS = 26
+# Locked for the whole run, so a manual run and the timer's never overlap.
+LOCK_NAME = "run.lock"
+BUSY = 75
+# A longer line is not an event (client reports are capped at 16 KB).
+MAX_LINE = 256 * 1024
+MAX_FRAMES = 12
+MAX_TEXT = 300
+# Only this much of a message is redacted (the report keeps MAX_TEXT), and
+# of a stack this many lines of at most this many characters.
+MAX_SCAN = 4000
+MAX_STACK_LINES = 2000
+MAX_STACK_LINE = 1000
+# Times outside these years are not believed (a clock gone wrong, a bad line).
+YEARS = range(2000, 2101)
+# A kiosk station's share folder holds one folder per host (its `uname -n`),
+# with the kiosk user's logs in it, the print server's in print-server/ and
+# the journal export in journal/ (kiosk docs/apps.md, "Log upload").
+PRINT_SERVER = "print-server"
+JOURNAL = "journal"
+# The kiosk's uploader writes the failed units as journal-shaped lines.
+KIOSK_UPLOADER = "ibp-kiosk-log-upload"
+# Where the stations' apps come from: the deploy branch's version file.
+GITHUB_RAW = "https://raw.githubusercontent.com/insidebooksproject"
+DEPLOY_VERSION_FILES = {
+    "shippy": "pyproject.toml",
+    "printing": "pyproject.toml",
+    "kiosk": "launcher/pyproject.toml",
+}
+# The release (IBP_TAG) is shown next to these apps, without a verdict:
+# their own version strings need not be the tag.
+RELEASE_APPS = {"backend", "frontend", "book-portal-extension"}
+# Package directories of IBP code, for "the innermost frame in IBP code".
+IBP_PACKAGES = {"ibp", "ibp_printing", "shippy", "ibp_kiosk"}
+SITE_DIRS = {"site-packages", "dist-packages"}
+
+LEVELS = {"WARNING": 30, "ERROR": 40, "CRITICAL": 50}
+LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL", "ERR": "ERROR"}
+
+ERRORS_FILE = re.compile(r"errors-(?P<app>.+?)\.jsonl(?:\.\d+)?")
+LOG_FILE = re.compile(r"(?:printer|errors)-(?P<app>.+?)\.jsonl(?:\.\d+)?")
+SERVER_FILE = re.compile(r"(?P<stem>[\w.-]+?)\.jsonl(?:\.\d+)?")
+JOURNAL_FILE = re.compile(r"[\w.@-]+\.jsonl?(?:\.\d+)?")
+FAILED_UNITS_FILE = re.compile(r"failed-units-(?P<day>\d{4}-\d{2}-\d{2})\.jsonl")
+SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:+-]{0,63}")
+SAFE_VERSION = re.compile(r"v?\d[0-9A-Za-z.+_-]{0,39}")
+STARTING = re.compile(r"(?:[\w.-]+ ){0,3}starting")
+FINGERPRINT = re.compile(r"[0-9a-f]{12}")
+WEEK_FILE = re.compile(r"(?P<year>\d{4})-W(?P<week>\d{2})\.(?:md|json)")
+
+# Redaction.
+CODE = re.compile(r"\b(?P<prefix>TEX|FED)-(?P<id>\d{1,12})-(?P<index>\d{1,9})\b", re.I)
+EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+QUOTED = re.compile(
+    r"\"[^\"]*(?:\"|$)|(?<!\w)'[^']*(?:'|$)|“[^”]*(?:”|$)|‘[^’]*(?:’|$)|`[^`]*(?:`|$)"
+)
+KEYWORD = re.compile(r"\w*(?:address|name|inmate)\w*", re.I)
+DIGITS = re.compile(r"\d{4,}")
+
+# Stacks.
+PY_FRAME = re.compile(
+    r'^\s*File "(?P<file>[^"]+)", line (?P<line>\d+), in (?P<func>.+?)\s*$'
+)
+PY_FILE = re.compile(r'^[ \t]*File "', re.M)
+PY_CHAIN = re.compile(
+    r"^(?:During handling of the above exception|"
+    r"The above exception was the direct cause)"
+)
+EXC_LINE = re.compile(r"(?P<type>[A-Za-z_$][\w$.]*)(?::\s?(?P<message>.*))?")
+JS_CHROME = re.compile(
+    r"^\s*at (?:(?P<func>.+?) \()?(?P<url>[^\s()]+?):(?P<line>\d+):\d+\)?\s*$"
+)
+JS_FIREFOX = re.compile(r"^\s*(?P<func>[^@\s]*)@(?P<url>\S+?):(?P<line>\d+):\d+\s*$")
+JS_BUNDLE_HASH = re.compile(r"-[A-Za-z0-9_-]{8}(?=\.m?js$)")
+
+
+# --------------------------------------------------------------------------
+# Redaction and fingerprints
+
+
+def redact(text: Any, limit: int = MAX_TEXT) -> str:
+    """``text`` with the inmate data the design names replaced; one line."""
+    if not isinstance(text, str):
+        return ""
+    if len(text) > MAX_SCAN:
+        # Cut at a space, so no code or number is cut in half.
+        text = text[:MAX_SCAN]
+        space = max(text.rfind(c) for c in " \t\n")
+        text = text[:space] if space > 0 else text
+    out = CODE.sub(
+        lambda m: f"{m['prefix'].upper()}-{'#' * len(m['id'])}-{'#' * len(m['index'])}",
+        text,
+    )
+    out = EMAIL.sub("<email>", out)
+    out = QUOTED.sub("<text>", out)
+    keyword = KEYWORD.search(out)
+    if keyword:
+        rest = out[keyword.end() :]
+        out = out[: keyword.end()] + (" <redacted>" if rest.strip() else "")
+    out = DIGITS.sub("<num>", out)
+    out = " ".join(out.split())
+    if len(out) > limit:
+        out = out[: limit - 3].rstrip() + "..."
+    return out
+
+
+def normalize(redacted: str) -> str:
+    """A redacted message with what varies between occurrences removed."""
+    out = re.sub(r"\b[0-9a-fA-F]{8,}\b", "<hex>", redacted)
+    out = re.sub(r"\d+", "<n>", out)
+    out = re.sub(r"#+", "#", out)
+    return " ".join(out.split())
+
+
+def clean_name(value: Any) -> str | None:
+    if isinstance(value, str) and SAFE_NAME.fullmatch(value.strip()):
+        return value.strip()
+    return None
+
+
+def clean_version(value: Any) -> str | None:
+    if isinstance(value, str) and SAFE_VERSION.fullmatch(value.strip()):
+        return value.strip()
+    return None
+
+
+@dataclass
+class Frame:
+    file: str
+    line: int
+    func: str
+    ibp: bool
+
+    def text(self) -> str:
+        return f"{self.file}:{self.line} {self.func}"
+
+
+@dataclass
+class Stack:
+    type: str = ""
+    message: str = ""  # redacted
+    frames: list[Frame] = field(default_factory=list)  # innermost last
+
+    def innermost(self) -> Frame | None:
+        for frame in reversed(self.frames):
+            if frame.ibp:
+                return frame
+        return self.frames[-1] if self.frames else None
+
+
+def python_file(path: str) -> tuple[str, bool]:
+    """A traceback path made short and free of user folders, and whether it
+    is IBP code."""
+    parts = [p for p in re.split(r"[\\/]+", path) if p]
+    if not parts:
+        return "?", False
+    start = 0
+    for i, part in enumerate(parts[:-1]):
+        if part in SITE_DIRS:
+            start = i + 1
+    package = None
+    for i in range(start, len(parts) - 1):
+        if parts[i] in IBP_PACKAGES:
+            package = i
+    if package is not None:
+        return "/".join(parts[package:]), True
+    if parts[-1].startswith("ibp-"):
+        return parts[-1], True
+    if start:
+        return "/".join(parts[start:]), False
+    return "/".join(parts[-2:]), False
+
+
+def js_file(url: str) -> tuple[str, bool]:
+    scheme, _, rest = url.partition("://")
+    if not rest:
+        return url[-80:], False
+    path = rest.partition("/")[2].split("?")[0].split("#")[0]
+    path = JS_BUNDLE_HASH.sub("", path) or scheme
+    ibp = scheme in {"http", "https", "moz-extension"} and "node_modules" not in path
+    return path[-80:], ibp
+
+
+def safe_func(name: str) -> str:
+    name = name.strip() or "?"
+    return re.sub(r"[^\w.<>$ -]", "?", name)[:80]
+
+
+def parse_python(lines: list[str]) -> Stack:
+    start = 0
+    for i, line in enumerate(lines):
+        if PY_CHAIN.match(line):
+            start = i + 1
+    stack = Stack()
+    last_frame = None
+    for i in range(start, len(lines)):
+        match = PY_FRAME.match(lines[i])
+        if match:
+            file, ibp = python_file(match["file"])
+            stack.frames.append(
+                Frame(file, int(match["line"]), safe_func(match["func"]), ibp)
+            )
+            last_frame = i
+    after = start if last_frame is None else last_frame + 1
+    for line in lines[after:]:
+        if not line.strip() or line[:1].isspace() or line.startswith("Traceback"):
+            continue
+        match = EXC_LINE.fullmatch(line.strip())
+        if match:
+            stack.type = match["type"][:80]
+            stack.message = redact(match["message"] or "")
+        break
+    return stack
+
+
+def parse_js(lines: list[str]) -> Stack:
+    stack = Stack()
+    frames = []
+    for line in lines:
+        match = JS_CHROME.match(line) or JS_FIREFOX.match(line)
+        if match:
+            file, ibp = js_file(match["url"])
+            frames.append(
+                Frame(file, int(match["line"]), safe_func(match["func"] or ""), ibp)
+            )
+        elif not frames and not stack.type and line.strip():
+            first = EXC_LINE.fullmatch(line.strip())
+            if first and re.search(r"(Error|Exception)$", first["type"]):
+                stack.type = first["type"][:80]
+                stack.message = redact(first["message"] or "")
+    stack.frames = list(reversed(frames))  # JS lists the innermost first
+    return stack
+
+
+def parse_stack(exc: Any) -> Stack | None:
+    if not isinstance(exc, str) or not exc.strip():
+        return None
+    lines = [line[:MAX_STACK_LINE] for line in exc.splitlines()]
+    if "Traceback (most recent call last)" in exc or PY_FILE.search(exc):
+        # Python's innermost frames and exception come last, JavaScript's first.
+        return parse_python(lines[-MAX_STACK_LINES:])
+    return parse_js(lines[:MAX_STACK_LINES])
+
+
+def fingerprint(app: str, stack: Stack | None, message: str) -> str:
+    frame = stack.innermost() if stack else None
+    if stack and (stack.type or frame):
+        where = f"{frame.file}:{frame.func}" if frame else ""
+        key = f"{app}|exc|{stack.type}|{where}"
+    else:
+        key = f"{app}|msg|{normalize(message)}"
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+
+# --------------------------------------------------------------------------
+# Reading
+
+
+@dataclass
+class Event:
+    ts: datetime
+    level: str
+    app: str
+    host: str
+    message: str  # redacted
+    stack: Stack | None
+    source: str  # where the raw event is: path:line, or a journalctl command
+    version: str | None = None
+    logger: str | None = None
+    failed_unit: bool = False
+
+
+@dataclass
+class Station:
+    folder: str
+    last_upload: datetime | None = None
+    hosts: set[str] = field(default_factory=set)
+    # (folder or folder/host, app) -> (started, version)
+    versions: dict[tuple[str, str], tuple[datetime, str]] = field(default_factory=dict)
+
+    def touch(self, modified: datetime | None) -> None:
+        """Note a file of the station's modified at ``modified``."""
+        if modified and (self.last_upload is None or modified > self.last_upload):
+            self.last_upload = modified
+
+
+@dataclass
+class Run:
+    """What one run read, and what went wrong reading it (no raw content)."""
+
+    since: datetime
+    until: datetime
+    hosts_map: dict[str, str] = field(default_factory=dict)
+    events: list[Event] = field(default_factory=list)
+    stations: dict[str, Station] = field(default_factory=dict)
+    problems: list[str] = field(default_factory=list)
+    failed: bool = False  # a source could not be read
+    unreadable: Counter = field(default_factory=Counter)
+    files_read: int = 0
+
+    def add(self, event: Event | None) -> None:
+        if event is not None and self.since <= event.ts <= self.until:
+            self.events.append(event)
+
+
+def norm_level(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    level = value.strip().upper()
+    level = LEVEL_ALIASES.get(level, level)
+    return level if level in LEVELS else None
+
+
+def believable(moment: datetime) -> datetime | None:
+    """``moment`` if it is a time this job can show, else None."""
+    try:
+        if moment.astimezone(timezone.utc).year in YEARS:
+            return moment
+    except (OverflowError, ValueError):
+        pass
+    return None
+
+
+def parse_ts(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=TZ)
+    return believable(moment)
+
+
+def journal_ts(value: Any) -> datetime | None:
+    try:
+        moment = datetime.fromtimestamp(int(value) / 1_000_000, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+    return believable(moment)
+
+
+def mtime(path: Path) -> datetime | None:
+    try:
+        moment = datetime.fromtimestamp(path.lstat().st_mtime, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+    return believable(moment)
+
+
+def entries(folder: Path) -> list[os.DirEntry]:
+    try:
+        with os.scandir(folder) as found:
+            return sorted(found, key=lambda e: e.name)
+    except OSError:
+        return []
+
+
+def regular_files(folder: Path) -> Iterator[Path]:
+    """The regular files directly in ``folder``, never through a symlink."""
+    for entry in entries(folder):
+        with contextlib.suppress(OSError):
+            if entry.is_file(follow_symlinks=False):
+                yield Path(entry.path)
+
+
+def subfolders(folder: Path) -> Iterator[Path]:
+    """The folders directly in ``folder``, never through a symlink."""
+    for entry in entries(folder):
+        with contextlib.suppress(OSError):
+            if entry.is_dir(follow_symlinks=False):
+                yield Path(entry.path)
+
+
+def raw_lines(handle: Any) -> Iterator[tuple[int, bytes | None]]:
+    """(line number, line) for each line of a binary file; None for a line
+    over MAX_LINE, which is skipped without being held in memory."""
+    number = 0
+    while True:
+        raw = handle.readline(MAX_LINE + 1)
+        if not raw:
+            return
+        number += 1
+        if len(raw) > MAX_LINE:
+            while raw and not raw.endswith(b"\n"):
+                raw = handle.readline(MAX_LINE + 1)
+            yield number, None
+        else:
+            yield number, raw
+
+
+LineHandler = Callable[[int, Any], bool]
+
+
+def read_lines(run: Run, path: Path, label: str, handle: LineHandler) -> None:
+    """``handle(line number, parsed JSON)`` for each non-blank line of
+    ``path``. A line that is too long or isn't JSON, that ``handle`` turns
+    down (returns False), or that makes it raise, is counted as unreadable
+    under ``label``: no line, however malformed, stops the run."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        run.problems.append(f"{label}: could not be opened")
+        return
+    run.files_read += 1
+    try:
+        with os.fdopen(fd, "rb") as file:
+            for number, raw in raw_lines(file):
+                if raw is not None and not raw.strip():
+                    continue
+                readable = False
+                if raw is not None:
+                    try:
+                        readable = handle(number, json.loads(raw))
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        # RecursionError, a bad field type: the line, not the run.
+                        readable = False
+                if not readable:
+                    run.unreadable[label] += 1
+    except OSError:
+        run.problems.append(f"{label}: could not be read to the end")
+
+
+def malformed(obj: Any) -> bool:
+    """Whether ``obj`` isn't a shared-format event at all (no time stamp)."""
+    return not isinstance(obj, dict) or parse_ts(obj.get("ts")) is None
+
+
+def shared_event(obj: Any, source: str, app: str, host: str) -> Event | None:
+    """An event in the shared format at WARNING or above, else None."""
+    if malformed(obj):
+        return None
+    ts = parse_ts(obj.get("ts"))
+    level = norm_level(obj.get("level"))
+    if ts is None or level is None:
+        return None
+    app = clean_name(obj.get("app")) or app
+    message = redact(obj.get("msg"))
+    return Event(
+        ts=ts,
+        level=level,
+        app=app,
+        host=host,
+        message=message,
+        stack=parse_stack(obj.get("exc")),
+        source=source,
+        version=clean_version(obj.get("version")),
+        logger=clean_name(obj.get("logger")),
+    )
+
+
+def journal_text(value: Any) -> str:
+    """MESSAGE as journald's JSON gives it: a string, or bytes as numbers."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(
+        isinstance(b, int) and 0 <= b < 256 for b in value
+    ):
+        return bytes(value).decode("utf-8", errors="replace")
+    return ""
+
+
+def unit_app(unit: str) -> str:
+    return re.sub(r"\.(service|timer|socket|scope|mount|target)$", "", unit)
+
+
+def journal_unit(obj: dict) -> str | None:
+    """The unit an entry is about: UNIT on systemd's own lines about a unit
+    (whose _SYSTEMD_UNIT is init.scope), else the unit that logged it."""
+    return clean_name(obj.get("UNIT")) or clean_name(obj.get("_SYSTEMD_UNIT"))
+
+
+def journal_event(obj: dict, source: str, host: str) -> Event | None:
+    """A journal entry (journald's JSON field names) at warning or above."""
+    try:
+        priority = int(obj.get("PRIORITY", 6))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if priority > 4:
+        return None
+    ts = journal_ts(obj.get("__REALTIME_TIMESTAMP"))
+    if ts is None:
+        return None
+    unit = journal_unit(obj)
+    app = clean_name(obj.get("SYSLOG_IDENTIFIER")) or (
+        unit_app(unit) if unit else "journal"
+    )
+    if unit and app in {"systemd", "init"}:
+        app = unit_app(unit)  # systemd's own lines about a unit
+    level = "CRITICAL" if priority <= 2 else "ERROR" if priority == 3 else "WARNING"
+    return Event(
+        ts=ts,
+        level=level,
+        app=app,
+        host=host,
+        message=redact(journal_text(obj.get("MESSAGE"))),
+        stack=None,
+        source=source,
+    )
+
+
+def failed_unit_event(
+    unit: str, ts: datetime, host: str, source: str, user: bool = False
+) -> Event:
+    return Event(
+        ts=ts,
+        level="ERROR",
+        app="systemd",
+        host=host,
+        message=f"{'user unit' if user else 'unit'} failed: {unit}",
+        stack=None,
+        source=source,
+        failed_unit=True,
+    )
+
+
+def failed_unit_record(obj: dict) -> tuple[str, str] | None:
+    """("UNIT" or "USER_UNIT", unit) if ``obj`` is a kiosk's failed-unit line:
+    SYSLOG_IDENTIFIER ibp-kiosk-log-upload, MESSAGE "<unit> failed", and the
+    unit in UNIT (a system unit) or USER_UNIT (the kiosk user's)."""
+    if obj.get("SYSLOG_IDENTIFIER") != KIOSK_UPLOADER:
+        return None
+    message = journal_text(obj.get("MESSAGE")).strip()
+    for kind in ("UNIT", "USER_UNIT"):
+        unit = clean_name(obj.get(kind))
+        if unit and message == f"{unit} failed":
+            return kind, unit
+    return None
+
+
+def real_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
+
+
+def read_station(run: Run, folder: Path) -> None:
+    """A station's share folder. A Windows laptop uploads its logs into the
+    folder itself; a kiosk into <host>/, with <host>/print-server/ and
+    <host>/journal/ (its journal export)."""
+    station = run.stations.setdefault(folder.name, Station(folder.name))
+    read_log_folder(run, folder, station, folder.name, folder.name, folder.name)
+    for sub in subfolders(folder):
+        host = clean_name(sub.name)
+        if host is None or host in {JOURNAL, PRINT_SERVER}:
+            run.problems.append(
+                f"{folder.name}: a folder that is not a host's, not read"
+            )
+            continue
+        station.hosts.add(host)
+        where = f"{folder.name}/{host}"
+        read_log_folder(run, sub, station, host, where, where)
+        if real_dir(sub / PRINT_SERVER):
+            read_log_folder(
+                run, sub / PRINT_SERVER, station, host, f"{where}/{PRINT_SERVER}", where
+            )
+        if real_dir(sub / JOURNAL):
+            read_journal_export(run, sub / JOURNAL, station, host, f"{where}/{JOURNAL}")
+
+
+def read_log_folder(
+    run: Run,
+    folder: Path,
+    station: Station,
+    host: str,
+    label: str,
+    where: str,
+) -> None:
+    """The errors-*.jsonl and printer-*.jsonl files directly in ``folder``:
+    events from the first, versions from the starting lines of both. Events
+    are shown as from ``host``, problems under ``label``, versions under
+    ``where``."""
+    margin = run.since - timedelta(days=1)
+    for path in regular_files(folder):
+        modified = mtime(path)
+        station.touch(modified)
+        file_label = f"{label}/{path.name}"
+        errors = ERRORS_FILE.fullmatch(path.name)
+        log = LOG_FILE.fullmatch(path.name)
+        if errors and modified and modified >= margin:
+            read_lines(
+                run,
+                path,
+                file_label,
+                shared_line(run, station, path, errors["app"], host),
+            )
+        if log:
+            read_starting_lines(run, path, file_label, station, where, log["app"])
+
+
+def shared_line(
+    run: Run, station: Station, path: Path, app: str, host: str
+) -> LineHandler:
+    def handle(number: int, obj: Any) -> bool:
+        if malformed(obj):
+            return False
+        inner = clean_name(obj.get("host"))
+        if inner:
+            station.hosts.add(inner)
+        run.add(shared_event(obj, f"{path}:{number}", app, host))
+        return True
+
+    return handle
+
+
+def read_starting_lines(
+    run: Run, path: Path, label: str, station: Station, where: str, app: str
+) -> None:
+    """Each app's latest "starting" line in ``path`` ("shippy starting",
+    "label watcher starting"): its version, from ``version`` or
+    ``data.version``. Nothing else is taken from the file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        run.problems.append(f"{label}: could not be opened")
+        return
+    try:
+        with os.fdopen(fd, "rb") as file:
+            for _, raw in raw_lines(file):
+                if raw is None or b"starting" not in raw:
+                    continue
+                with contextlib.suppress(Exception):
+                    starting_line(json.loads(raw), station, where, app)
+    except OSError:
+        run.problems.append(f"{label}: could not be read to the end")
+
+
+def starting_line(obj: Any, station: Station, where: str, app: str) -> None:
+    if not isinstance(obj, dict) or not isinstance(obj.get("msg"), str):
+        return
+    if not STARTING.fullmatch(obj["msg"].strip()):
+        return
+    ts = parse_ts(obj.get("ts"))
+    raw_data = obj.get("data")
+    data = raw_data if isinstance(raw_data, dict) else {}
+    version = clean_version(obj.get("version")) or clean_version(data.get("version"))
+    name = clean_name(obj.get("app")) or app
+    if ts is None or version is None:
+        return
+    inner = clean_name(obj.get("host"))
+    if inner and station.folder != "ibp-server":  # not a container id
+        station.hosts.add(inner)
+    current = station.versions.get((where, name))
+    if current is None or ts > current[0]:
+        station.versions[(where, name)] = (ts, version)
+
+
+def read_journal_export(
+    run: Run, folder: Path, station: Station, host: str, label: str
+) -> None:
+    """A kiosk's journal export: journal-<day>.jsonl, journal entries at
+    warning or above in journald's field names, and failed-units-<day>.jsonl,
+    the units failed at the day's last upload, one journal-shaped line each.
+    A failed unit counts once per host, unit and day."""
+    margin = run.since - timedelta(days=1)
+    seen_failed: set[tuple[str, str, date]] = set()
+    for path in regular_files(folder):
+        modified = mtime(path)
+        station.touch(modified)
+        if not JOURNAL_FILE.fullmatch(path.name) or not modified or modified < margin:
+            continue
+        day = None
+        named = FAILED_UNITS_FILE.fullmatch(path.name)
+        if named:
+            with contextlib.suppress(ValueError):
+                day = date.fromisoformat(named["day"])
+        read_lines(
+            run,
+            path,
+            f"{label}/{path.name}",
+            journal_line(run, station, path, host, (day, modified, seen_failed)),
+        )
+
+
+def journal_line(
+    run: Run,
+    station: Station,
+    path: Path,
+    host: str,
+    context: tuple[date | None, datetime, set[tuple[str, str, date]]],
+) -> LineHandler:
+    file_day, modified, seen_failed = context
+
+    def handle(number: int, obj: Any) -> bool:
+        if not isinstance(obj, dict):
+            return False
+        source = f"{path}:{number}"
+        inner = clean_name(obj.get("_HOSTNAME"))
+        if inner:
+            station.hosts.add(inner)
+        failed = failed_unit_record(obj)
+        if failed:
+            kind, unit = failed
+            ts = journal_ts(obj.get("__REALTIME_TIMESTAMP")) or modified
+            key = (kind, unit, file_day or ts.astimezone(TZ).date())
+            if key not in seen_failed:
+                seen_failed.add(key)
+                run.add(
+                    failed_unit_event(unit, ts, host, source, user=kind == "USER_UNIT")
+                )
+            return True
+        if "MESSAGE" not in obj or journal_ts(obj.get("__REALTIME_TIMESTAMP")) is None:
+            return False
+        run.add(journal_event(obj, source, host))
+        return True
+
+    return handle
+
+
+def read_stations(run: Run, root: Path) -> None:
+    if not root.is_dir():
+        run.problems.append(f"{root}: not there")
+        return
+    try:
+        with os.scandir(root) as found:
+            folders = sorted(found, key=lambda e: e.name)
+    except OSError:
+        run.problems.append(f"{root}: could not be listed")
+        run.failed = True
+        return
+    for entry in folders:
+        if entry.name == DIGEST_NAME or entry.name.startswith("."):
+            continue
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        if clean_name(entry.name) is None:
+            run.problems.append(f"{root}: a folder with an unusual name, not read")
+            continue
+        read_station(run, Path(entry.path))
+
+
+def read_server_logs(run: Run, folder: Path) -> None:
+    """backend.jsonl and client-errors.jsonl (and their rotated copies)."""
+    if not folder.is_dir():
+        run.problems.append(f"{folder}: not there (backend before v1.0.22?)")
+        return
+    station = run.stations.setdefault("ibp-server", Station("ibp-server"))
+    margin = run.since - timedelta(days=1)
+    for path in regular_files(folder):
+        match = SERVER_FILE.fullmatch(path.name)
+        if not match:
+            continue
+        stem = match["stem"]
+        read_starting_lines(run, path, path.name, station, "ibp-server", stem)
+        modified = mtime(path)
+        if modified is None or modified < margin:
+            continue
+        read_lines(run, path, path.name, server_line(run, path, stem))
+
+
+def server_line(run: Run, path: Path, stem: str) -> LineHandler:
+    clients = stem.startswith("client-errors")
+
+    def handle(number: int, obj: Any) -> bool:
+        if malformed(obj):
+            return False
+        host = "ibp-server"
+        if clients:
+            address = obj.get("host")
+            if not isinstance(address, str):
+                address = None
+            host = (
+                (address and run.hosts_map.get(address)) or clean_name(address) or "?"
+            )
+        run.add(shared_event(obj, f"{path}:{number}", stem, host))
+        return True
+
+    return handle
+
+
+Command = Callable[[list[str]], subprocess.CompletedProcess]
+
+
+def run_command(argv: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        argv, capture_output=True, text=True, check=False, timeout=300
+    )
+
+
+def read_pi_journal(run: Run, command: Command) -> None:
+    """The ibp-* units' journal entries at warning or above, and the failed
+    units, on this machine."""
+    argv = [
+        "journalctl",
+        "--no-pager",
+        "-o",
+        "json",
+        "-p",
+        "warning",
+        "--since",
+        f"@{int(run.since.timestamp())}",
+        "--until",
+        f"@{int(run.until.timestamp()) + 1}",
+        "-u",
+        "ibp-*",
+    ]
+    try:
+        result = command(argv)
+    except (OSError, subprocess.SubprocessError) as err:
+        run.problems.append(
+            f"Pi journal: journalctl could not run ({type(err).__name__})"
+        )
+        run.failed = True
+        result = None
+    if result is not None and result.returncode != 0:
+        run.problems.append(f"Pi journal: journalctl exited {result.returncode}")
+        run.failed = True
+    elif result is not None:
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                pi_journal_line(run, json.loads(line))
+            except Exception:  # pylint: disable=broad-exception-caught
+                run.unreadable["Pi journal"] += 1
+    try:
+        failed = command(
+            ["systemctl", "--failed", "--plain", "--no-legend", "--no-pager"]
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        run.problems.append(
+            f"failed units: systemctl could not run ({type(err).__name__})"
+        )
+        run.failed = True
+        return
+    if failed.returncode != 0:
+        run.problems.append(f"failed units: systemctl exited {failed.returncode}")
+        run.failed = True
+        return
+    for line in failed.stdout.splitlines():
+        words = line.split()
+        failed_name = clean_name(words[0].lstrip("●*")) if words else None
+        if failed_name:
+            run.add(
+                failed_unit_event(
+                    failed_name,
+                    run.until,
+                    "ibp-server",
+                    f"systemctl status {failed_name}",
+                )
+            )
+
+
+def pi_journal_line(run: Run, obj: Any) -> None:
+    if not isinstance(obj, dict):
+        return
+    unit = journal_unit(obj) or "?"
+    ts = journal_ts(obj.get("__REALTIME_TIMESTAMP"))
+    seconds = int(ts.timestamp()) if ts else 0
+    source = (
+        f"journalctl -u {unit} -o verbose --since @{seconds} --until @{seconds + 1}"
+    )
+    run.add(journal_event(obj, source, "ibp-server"))
+
+
+def read_hosts_map(path: Path) -> dict[str, str]:
+    """address -> host name, one ``<address> <name>`` per line."""
+    hosts: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return hosts
+    for line in text.splitlines():
+        words = line.split("#", 1)[0].split()
+        if len(words) >= 2 and clean_name(words[1]):
+            hosts[words[0]] = words[1]
+    return hosts
+
+
+def read_muted(path: Path, problems: list[str]) -> dict[str, str]:
+    """fingerprint -> reason, one ``<fingerprint> <reason>`` per line."""
+    muted: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return muted
+    except (OSError, ValueError):
+        problems.append(f"{path}: could not be read")
+        return muted
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fp, _, reason = line.strip().partition(" ")
+        if FINGERPRINT.fullmatch(fp):
+            muted[fp] = " ".join(reason.split())[:200] or "muted"
+        else:
+            problems.append(f"{path}:{number}: not a fingerprint")
+    return muted
+
+
+def read_release(env_file: Path) -> str | None:
+    """IBP_TAG from the deploy's .env; no other line is looked at."""
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return None
+    for line in lines:
+        if line.startswith("IBP_TAG="):
+            return clean_version(line[len("IBP_TAG=") :].strip().strip("'\"")) or None
+    return None
+
+
+Fetch = Callable[[str], bytes]
+
+
+def fetch_url(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=15) as response:
+        return response.read(1_000_000)
+
+
+def deploy_versions(fetch: Fetch | None) -> dict[str, str]:
+    """repo -> the version on its deploy branch, for those that answer."""
+    versions: dict[str, str] = {}
+    if fetch is None:
+        return versions
+    for repo, path in DEPLOY_VERSION_FILES.items():
+        try:
+            data = tomllib.loads(fetch(f"{GITHUB_RAW}/{repo}/deploy/{path}").decode())
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Offline, an HTTP error, a cut-off answer: "unknown", not a failure.
+            continue
+        project = data.get("project")
+        version = clean_version(
+            project.get("version") if isinstance(project, dict) else None
+        )
+        if version:
+            versions[repo] = version
+    return versions
+
+
+def app_repo(app: str) -> str | None:
+    if app in {"shippy", "shippy-gui"}:
+        return "shippy"
+    if app in {"watcher", "diag", "print-server", "server"} or app.startswith(
+        ("ibp-print", "ibp-label")
+    ):
+        return "printing"
+    if app.startswith(("ibp-kiosk", "kiosk")):
+        return "kiosk"
+    return None
+
+
+# --------------------------------------------------------------------------
+# Grouping and comparing
+
+
+@dataclass
+class Group:
+    fingerprint: str
+    app: str
+    level: str = "WARNING"
+    count: int = 0
+    hosts: Counter = field(default_factory=Counter)
+    versions: set[str] = field(default_factory=set)
+    first: datetime | None = None
+    last: datetime | None = None
+    message: str = ""
+    logger: str | None = None
+    stack: Stack | None = None
+    source: str = ""
+    status: str = ""
+    last_week: int = 0
+    first_seen: str = ""
+    failed_unit: bool = False
+
+    def add(self, event: Event) -> None:
+        self.count += 1
+        self.hosts[event.host] += 1
+        if event.version:
+            self.versions.add(event.version)
+        if LEVELS[event.level] > LEVELS[self.level]:
+            self.level = event.level
+        if self.first is None or event.ts < self.first:
+            self.first = event.ts
+        if self.last is None or event.ts >= self.last:
+            self.last = event.ts
+            self.message = event.message
+            self.logger = event.logger
+            self.stack = event.stack
+            self.source = event.source
+        self.failed_unit = self.failed_unit or event.failed_unit
+
+
+def group_events(events: list[Event]) -> dict[str, Group]:
+    groups: dict[str, Group] = {}
+    for event in events:
+        fp = fingerprint(event.app, event.stack, event.message)
+        groups.setdefault(fp, Group(fp, event.app)).add(event)
+    return groups
+
+
+def week_label(day: date) -> str:
+    year, week, _ = day.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def week_monday(label: str) -> date | None:
+    match = re.fullmatch(r"(\d{4})-W(\d{2})", label)
+    if not match:
+        return None
+    try:
+        return date.fromisocalendar(int(match[1]), int(match[2]), 1)
+    except ValueError:
+        return None
+
+
+def load_seen(path: Path, problems: list[str]) -> dict[str, dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, RecursionError):
+        problems.append(f"{path}: unreadable; every group counts as new")
+        return {}
+    seen = data.get("fingerprints") if isinstance(data, dict) else None
+    if not isinstance(seen, dict):
+        return {}
+    return {
+        fp: entry
+        for fp, entry in seen.items()
+        if FINGERPRINT.fullmatch(str(fp)) and isinstance(entry, dict)
+    }
+
+
+def weeks_of(entry: dict) -> dict[str, int]:
+    weeks = entry.get("weeks")
+    if not isinstance(weeks, dict):
+        return {}
+    return {w: n for w, n in weeks.items() if isinstance(n, int) and week_monday(w)}
+
+
+def compare(
+    groups: dict[str, Group], seen: dict[str, dict], this_week: str, last_week: str
+) -> list[dict]:
+    """Set each group's status from ``seen``; return the gone groups' entries."""
+    for fp, group in groups.items():
+        weeks = weeks_of(seen.get(fp, {}))
+        before = {w: n for w, n in weeks.items() if w < this_week and n > 0}
+        group.last_week = weeks.get(last_week, 0)
+        first_seen = seen.get(fp, {}).get("first_seen")
+        group.first_seen = first_seen if isinstance(first_seen, str) and before else ""
+        if not group.first_seen:
+            group.first_seen = iso(group.first)
+        if not before:
+            group.status = "new"
+        elif group.last_week and group.count >= 1.5 * group.last_week:
+            group.status = "growing"
+        else:
+            group.status = "recurring"
+    gone = []
+    for fp, entry in seen.items():
+        if fp in groups:
+            continue
+        count = weeks_of(entry).get(last_week, 0)
+        if count > 0:
+            gone.append({**safe_seen(entry), "fingerprint": fp, "last_week": count})
+    return gone
+
+
+def safe_seen(entry: dict) -> dict:
+    """The fields of a seen.json entry the report shows (all redacted)."""
+    return {
+        "app": clean_name(entry.get("app")) or "?",
+        "level": norm_level(entry.get("level")) or "WARNING",
+        "message": redact(entry.get("message")),
+        "last_seen": str(entry.get("last_seen") or ""),
+    }
+
+
+def update_seen(
+    seen: dict[str, dict], groups: dict[str, Group], this_week: str, oldest: str
+) -> dict[str, dict]:
+    """``seen`` with this week's counts (a re-run replaces them) and weeks
+    before ``oldest`` dropped, with any entry left with no weeks."""
+    out: dict[str, dict] = {}
+    for fp, entry in seen.items():
+        weeks = {w: n for w, n in weeks_of(entry).items() if oldest <= w != this_week}
+        if weeks:
+            out[fp] = {**entry, "weeks": weeks}
+    for fp, group in groups.items():
+        entry = out.get(fp, {})
+        weeks = dict(weeks_of(entry))
+        weeks[this_week] = group.count
+        previous = parse_ts(entry.get("last_seen"))
+        latest = max(t for t in (group.last, previous) if t) if group.last else previous
+        out[fp] = {
+            "app": group.app,
+            "level": group.level,
+            "message": group.message,
+            "first_seen": entry.get("first_seen") or group.first_seen,
+            "last_seen": iso(latest),
+            "weeks": dict(sorted(weeks.items())),
+        }
+    return dict(sorted(out.items()))
+
+
+# --------------------------------------------------------------------------
+# The report
+
+
+STATUS_ORDER = {"new": 0, "growing": 1, "recurring": 2}
+
+
+def iso(moment: datetime | None) -> str:
+    return moment.astimezone(TZ).isoformat(timespec="seconds") if moment else ""
+
+
+def group_json(group: Group) -> dict:
+    stack = group.stack
+    return {
+        "fingerprint": group.fingerprint,
+        "status": group.status,
+        "app": group.app,
+        "level": group.level,
+        "count": group.count,
+        "last_week": group.last_week,
+        "hosts": dict(sorted(group.hosts.items())),
+        "versions": sorted(group.versions),
+        "first_seen": group.first_seen,
+        "first_this_week": iso(group.first),
+        "last_seen": iso(group.last),
+        "message": group.message,
+        "logger": group.logger,
+        "exception": (
+            {"type": stack.type, "message": stack.message}
+            if stack and stack.type
+            else None
+        ),
+        "frames": [f.text() for f in stack.frames[-MAX_FRAMES:]] if stack else [],
+        "raw_event": group.source,
+    }
+
+
+def headline(week: str, counts: Counter) -> str:
+    news = [f"{counts[s]} {s}" for s in ("new", "growing") if counts[s]]
+    if news:
+        return f"# IBP error digest {week}: {', '.join(news)} - run /ibp-errors"
+    return f"# IBP error digest {week}: nothing new or growing"
+
+
+def build_report(
+    run: Run,
+    groups: dict[str, Group],
+    gone: list[dict],
+    muted: dict[str, str],
+    week: str,
+    expected: dict[str, str],
+    release: str | None,
+) -> dict:
+    shown = sorted(
+        (g for g in groups.values() if g.fingerprint not in muted),
+        key=lambda g: (STATUS_ORDER.get(g.status, 9), -g.count, g.app, g.fingerprint),
+    )
+    hidden = [g for g in groups.values() if g.fingerprint in muted]
+    counts = Counter(g.status for g in shown)
+    gone = [g for g in gone if g["fingerprint"] not in muted]
+    stations = []
+    versions = []
+    for name, station in sorted(run.stations.items()):
+        stale = station.last_upload is None or station.last_upload < run.since
+        if name != "ibp-server":
+            stations.append(
+                {
+                    "folder": name,
+                    "hosts": sorted(station.hosts),
+                    "last_upload": iso(station.last_upload),
+                    "stale": stale,
+                }
+            )
+        for (where, app), (started, version) in sorted(station.versions.items()):
+            repo = app_repo(app)
+            want = expected.get(repo) if repo else None
+            if app in RELEASE_APPS:
+                verdict = f"release {release}" if release else "release unknown"
+            elif want is None:
+                verdict = "unknown"
+            else:
+                verdict = (
+                    "current" if version.lstrip("v") == want.lstrip("v") else "old"
+                )
+            versions.append(
+                {
+                    "folder": where,
+                    "app": app,
+                    "version": version,
+                    "started": iso(started),
+                    "expected": want or (release if app in RELEASE_APPS else None),
+                    "status": verdict,
+                }
+            )
+    return {
+        "headline": headline(week, counts),
+        "week": week,
+        "generated": iso(run.until),
+        "window": {"since": iso(run.since), "until": iso(run.until)},
+        "summary": {
+            "events": sum(g.count for g in groups.values()),
+            "groups": len(shown),
+            "new": counts["new"],
+            "growing": counts["growing"],
+            "recurring": counts["recurring"],
+            "gone": len(gone),
+            "muted_groups": len(hidden),
+            "muted_events": sum(g.count for g in hidden),
+            "files_read": run.files_read,
+            "unreadable_lines": sum(run.unreadable.values()),
+        },
+        "groups": [group_json(g) for g in shown],
+        "gone": sorted(gone, key=lambda g: (g["app"], g["fingerprint"])),
+        "muted": [
+            {
+                "fingerprint": g.fingerprint,
+                "app": g.app,
+                "count": g.count,
+                "reason": muted[g.fingerprint],
+            }
+            for g in sorted(hidden, key=lambda g: (-g.count, g.fingerprint))
+        ],
+        "stations": stations,
+        "versions": versions,
+        "unreadable": dict(sorted(run.unreadable.items())),
+        "problems": run.problems,
+    }
+
+
+def code(text: Any) -> str:
+    """``text`` as inline Markdown code."""
+    text = str(text).replace("`", "'")
+    return f"`{text}`" if text else "-"
+
+
+def render_markdown(report: dict) -> str:
+    s = report["summary"]
+    out = [
+        report["headline"],
+        "",
+        f"Week {report['week']}: {report['window']['since']} to {report['window']['until']}"
+        f" (America/Chicago). {s['events']} events in {s['groups']} groups"
+        f" ({s['new']} new, {s['growing']} growing, {s['recurring']} recurring,"
+        f" {s['gone']} gone); {s['muted_groups']} muted groups ({s['muted_events']} events);"
+        f" {s['files_read']} files read, {s['unreadable_lines']} unreadable lines.",
+        "",
+        "Messages are redacted; raw events stay on ibp-server (`raw`).",
+        "",
+        "## Groups",
+        "",
+    ]
+    if not report["groups"]:
+        out += ["None.", ""]
+    for g in report["groups"]:
+        hosts = ", ".join(f"{h} x{n}" for h, n in g["hosts"].items())
+        out += [
+            f"### {g['status']}: {g['app']} {g['level']} x{g['count']} `{g['fingerprint']}`",
+            "",
+            f"- message: {code(g['message'])}",
+        ]
+        if g["exception"]:
+            exc = g["exception"]
+            line = f"{exc['type']}: {exc['message']}" if exc["message"] else exc["type"]
+            out.append(f"- exception: {code(line)}")
+        out += [
+            f"- logger: {code(g['logger'] or '')}",
+            f"- hosts: {hosts}",
+            f"- versions: {', '.join(g['versions']) or '-'}",
+            f"- first seen {g['first_seen']}, this week {g['first_this_week']}"
+            f" to {g['last_seen']}; last week x{g['last_week']}",
+            f"- raw: {code(g['raw_event'])}",
+        ]
+        if g["frames"]:
+            out += ["- stack (most recent call last):", ""]
+            out += [f"      {frame}" for frame in g["frames"]]
+        out.append("")
+    if report["gone"]:
+        out += ["## Gone (seen last week, not this week)", ""]
+        out += [
+            f"- {g['app']} {g['level']} `{g['fingerprint']}` x{g['last_week']} last week:"
+            f" {code(g['message'])}"
+            for g in report["gone"]
+        ]
+        out.append("")
+    if report["muted"]:
+        out += ["## Muted", ""]
+        out += [
+            f"- `{m['fingerprint']}` {m['app']} x{m['count']}: {m['reason']}"
+            for m in report["muted"]
+        ]
+        out.append("")
+    out += ["## Stations", ""]
+    if report["stations"]:
+        out += ["| Folder | Hosts | Last upload | |", "|---|---|---|---|"]
+        out += [
+            f"| {st['folder']} | {', '.join(st['hosts']) or '-'} | {st['last_upload'] or 'never'}"
+            f" | {'**no upload all week**' if st['stale'] else 'ok'} |"
+            for st in report["stations"]
+        ]
+    else:
+        out.append("No station folders.")
+    out.append("")
+    out += ["## Versions (latest starting line)", ""]
+    if report["versions"]:
+        out += [
+            "| Folder | App | Version | Started | Expected | |",
+            "|---|---|---|---|---|---|",
+        ]
+        out += [
+            f"| {v['folder']} | {v['app']} | {v['version']} | {v['started']}"
+            f" | {v['expected'] or '-'} | {'**old**' if v['status'] == 'old' else v['status']} |"
+            for v in report["versions"]
+        ]
+    else:
+        out.append("No starting lines found.")
+    out.append("")
+    if report["unreadable"] or report["problems"]:
+        out += ["## Problems reading the logs", ""]
+        out += [
+            f"- {label}: {n} unreadable lines"
+            for label, n in report["unreadable"].items()
+        ]
+        out += [f"- {p}" for p in report["problems"]]
+        out.append("")
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# Writing
+
+
+def atomic_write(path: Path, text: str, mode: int, gid: int | None) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, mode)
+        if gid is not None:
+            os.chown(tmp, -1, gid)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+
+
+def prune_digests(folder: Path, oldest: date) -> list[str]:
+    removed = []
+    for path in regular_files(folder):
+        match = WEEK_FILE.fullmatch(path.name)
+        if not match:
+            continue
+        monday = week_monday(f"{match['year']}-W{match['week']}")
+        if monday and monday < oldest:
+            path.unlink()
+            removed.append(path.name)
+    return removed
+
+
+def take_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    handle = open(path, "a+", encoding="utf-8")  # pylint: disable=consider-using-with
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
+def ping(url: str | None, suffix: str, body: str = "") -> None:
+    if not url:
+        return
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(url + suffix, data=body.encode()[-10000:]),
+            timeout=15,
+        )
+    except Exception as err:  # pylint: disable=broad-exception-caught
+        # http.client's errors (a cut-off answer) aren't OSErrors.
+        print(f"healthchecks ping failed: {type(err).__name__}", file=sys.stderr)
+
+
+def read_ping_url(config: Path) -> str | None:
+    try:
+        url = (config / "ping-url").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+    return url if url.startswith(("https://", "http://")) else None
+
+
+@dataclass
+class Options:
+    logs_root: Path = LOGS_ROOT
+    server_logs: Path = SERVER_LOGS
+    digest_dir: Path | None = None
+    state_dir: Path = STATE_DIR
+    config_dir: Path = CONFIG_DIR
+    env_file: Path = ENV_FILE
+    group: str = READER_GROUP
+    now: datetime | None = None
+    journal: bool = True
+    dry_run: bool = False
+
+
+def digest(
+    opts: Options,
+    command: Command = run_command,
+    fetch: Fetch | None = fetch_url,
+) -> tuple[int, dict, str]:
+    """One run: read, group, compare, write. Returns (exit status, report,
+    Markdown)."""
+    now = (opts.now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    run = Run(since=now - WINDOW, until=now)
+    run.hosts_map = read_hosts_map(opts.config_dir / "hosts")
+    read_stations(run, opts.logs_root)
+    read_server_logs(run, opts.server_logs)
+    if opts.journal:
+        read_pi_journal(run, command)
+    muted = read_muted(opts.config_dir / "muted", run.problems)
+
+    today = now.astimezone(TZ).date()
+    week = week_label(today)
+    last_week = week_label(today - timedelta(days=7))
+    oldest_monday = date.fromisocalendar(*today.isocalendar()[:2], 1) - timedelta(
+        weeks=KEEP_WEEKS - 1
+    )
+    oldest = week_label(oldest_monday)
+
+    seen_path = opts.state_dir / "seen.json"
+    seen = load_seen(seen_path, run.problems)
+    groups = group_events(run.events)
+    gone = compare(groups, seen, week, last_week)
+    report = build_report(
+        run,
+        groups,
+        gone,
+        muted,
+        week,
+        deploy_versions(fetch),
+        read_release(opts.env_file),
+    )
+    markdown = render_markdown(report)
+    if opts.dry_run:
+        return (1 if run.failed else 0), report, markdown
+
+    digest_dir = opts.digest_dir or opts.logs_root / DIGEST_NAME
+    gid = None
+    if opts.group:
+        try:
+            gid = grp.getgrnam(opts.group).gr_gid
+        except KeyError:
+            run.problems.append(
+                f"group {opts.group}: not there; digests readable by root only"
+            )
+    mode = 0o640 if gid is not None else 0o600
+    digest_dir.mkdir(parents=True, exist_ok=True, mode=0o750)
+    atomic_write(digest_dir / f"{week}.md", markdown + "\n", mode, gid)
+    atomic_write(
+        digest_dir / f"{week}.json", json.dumps(report, indent=2) + "\n", mode, gid
+    )
+    opts.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    state = {"version": 1, "fingerprints": update_seen(seen, groups, week, oldest)}
+    atomic_write(seen_path, json.dumps(state, indent=1) + "\n", 0o600, None)
+    prune_digests(digest_dir, oldest_monday)
+    return (1 if run.failed else 0), report, markdown
+
+
+def summary_lines(report: dict) -> list[str]:
+    s = report["summary"]
+    lines = [
+        report["headline"].lstrip("# "),
+        f"{s['events']} events, {s['groups']} groups: {s['new']} new, {s['growing']} growing,"
+        f" {s['recurring']} recurring, {s['gone']} gone, {s['muted_groups']} muted",
+    ]
+    stale = [st["folder"] for st in report["stations"] if st["stale"]]
+    if stale:
+        lines.append(f"no upload all week: {', '.join(stale)}")
+    lines += [f"problem: {p}" for p in report["problems"]]
+    return lines
+
+
+def parse_args(argv: list[str] | None) -> tuple[Options, bool]:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the digest; write nothing, ping nothing",
+    )
+    ap.add_argument("--now", help="run as of this ISO time (default: now)")
+    ap.add_argument("--logs-root", type=Path, default=LOGS_ROOT)
+    ap.add_argument("--server-logs", type=Path, default=SERVER_LOGS)
+    ap.add_argument("--digest-dir", type=Path, help="default: LOGS_ROOT/digest")
+    ap.add_argument("--state-dir", type=Path, default=STATE_DIR)
+    ap.add_argument("--config-dir", type=Path, default=CONFIG_DIR)
+    ap.add_argument("--env-file", type=Path, default=ENV_FILE)
+    ap.add_argument(
+        "--group",
+        default=READER_GROUP,
+        help="group that may read the digests ('' for none)",
+    )
+    ap.add_argument(
+        "--no-journal",
+        action="store_true",
+        help="skip this machine's journal and failed units",
+    )
+    ap.add_argument(
+        "--offline",
+        action="store_true",
+        help="don't look up the deploy branches' versions",
+    )
+    args = ap.parse_args(argv)
+    now = None
+    if args.now:
+        now = parse_ts(args.now)
+        if now is None:
+            ap.error(f"--now: not an ISO time: {args.now}")
+    opts = Options(
+        logs_root=args.logs_root,
+        server_logs=args.server_logs,
+        digest_dir=args.digest_dir,
+        state_dir=args.state_dir,
+        config_dir=args.config_dir,
+        env_file=args.env_file,
+        group=args.group,
+        now=now,
+        journal=not args.no_journal,
+        dry_run=args.dry_run,
+    )
+    return opts, args.offline
+
+
+def main(argv: list[str] | None = None) -> int:
+    opts, offline = parse_args(argv)
+    fetch = None if offline else fetch_url
+    if opts.dry_run:
+        code_, _, markdown = digest(opts, fetch=fetch)
+        print(markdown)
+        return code_
+    lock = take_lock(opts.state_dir / LOCK_NAME)
+    if lock is None:
+        print(
+            "another ibp-error-digest run is in progress; not started", file=sys.stderr
+        )
+        return BUSY
+    ping_url = read_ping_url(opts.config_dir)
+    ping(ping_url, "/start")
+    try:
+        code_, report, _ = digest(opts, fetch=fetch)
+        lines = summary_lines(report)
+    except Exception as err:  # report any failure to Healthchecks
+        code_ = 1
+        lines = [f"FAILED: {type(err).__name__}"]
+        print(f"FAILED: {type(err).__name__}: {err}", file=sys.stderr)
+    for line in lines:
+        print(line, flush=True)
+    ping(ping_url, f"/{code_}", "\n".join(lines))
+    lock.close()
+    return code_
+
+
+if __name__ == "__main__":
+    sys.exit(main())
