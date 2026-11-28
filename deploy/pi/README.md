@@ -27,12 +27,19 @@ HTTPS.
 | `/srv/ibp/.env` | `IBP_TAG=v…` and the ISBN lookup keys (from `.env.example`; mode 0600) |
 | `/srv/ibp/.env.pre-<tag>`, `compose.yaml.pre-<tag>` | the files as they were before an upgrade replaced them, kept for a rollback |
 | `/srv/ibp/data/data.db` | the database, owned by `jstarr` (uid 1000), in WAL mode |
+| `/srv/ibp/logs/` | the error logs, owned by `jstarr` (uid 1000) like `data/`: `backend.jsonl` (the backend's own WARNING and above) and `client-errors.jsonl` (the browser reports, `POST /api/client-errors`), each rotated at 5 MiB with 4 old files kept. Not under `data/`, so the backups stay the database only |
 | `/srv/ibp/data/data.db-wal`, `data.db-shm` | the database's write-ahead log and its index, there while anything has it open: part of the database, so `data.db` is never copied, moved or replaced without them while they exist (see below) |
 | `~/.local/bin/ibp-backup` + timer | backups, see [`scripts/backup/`](../../scripts/backup/README.md) |
 | `~/.local/bin/ibp-label-refund` + timer | unused-label refunds, see [`scripts/label-refund/`](../../scripts/label-refund/README.md) |
 | `~/.local/bin/ibp-shipment-sync` + timer | shipment tracking, see [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md) |
 
 Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
+The backend also writes its WARNING and above, and the frontend's and the
+Book Portal extension's error reports, to `/srv/ibp/logs/` as JSON lines in
+the shared event format (see Error logs in the [top-level
+README](../../README.md#error-logs)). If that directory is missing or not
+writable by the container's user, the backend still starts, says so on
+stderr, and writes the browser reports to stderr instead.
 
 The backend and a sync's one-off container write the same file. Every
 connection either makes (the bootstrap and its migrations too) uses WAL
@@ -77,7 +84,7 @@ WAL doesn't work over a network filesystem, so `data/` must never be on one
        (
          set -Eeuo pipefail
          trap 'echo "SETUP STOPPED: fix the failed step and run this block again" >&2' ERR
-         sudo install -d -o jstarr -g jstarr /srv/ibp /srv/ibp/data
+         sudo install -d -o jstarr -g jstarr /srv/ibp /srv/ibp/data /srv/ibp/logs
          # A re-run keeps what an earlier attempt made: the checkout, the
          # edited .env and the database (which the backend may have written).
          [ -d ~/ibp-backend ] || git clone https://github.com/insidebooksproject/backend.git ~/ibp-backend
@@ -125,6 +132,13 @@ before the block keep the Pi's copy as `compose.yaml.pre-<new tag>` (or
 file, and copy that over. The first release after v1.0.19 is one: its
 `compose.yaml` names the `ghcr.io/insidebooksproject` images, while the
 Pi's still names the old `ghcr.io/jonkensta` ones, which get no new tags.
+
+The first release with the error logs (v1.0.22) mounts `./logs` into the
+backend. Create the directory, owned by the container's user (`IBP_UID`,
+uid 1000, `jstarr`) as `data/` is, before running the block: if it is
+missing, Docker creates it owned by root and the backend can't write it.
+
+    sudo install -d -o jstarr -g jstarr -m 0755 /srv/ibp/logs
 
 The block stops the shipment timer and holds the sync's run lock while it
 runs, so no sync can start on the new image and migrate the database before
