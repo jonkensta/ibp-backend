@@ -343,39 +343,59 @@ def station_logs(tree, folder="IBP_LAPTOP"):
     write_jsonl(
         base / "printer-watcher.jsonl",
         [
-            event(
-                NOW - timedelta(days=20),
-                level="INFO",
-                msg="label watcher starting",
-                data={"version": "0.4.0"},
-            ),
-            event(
-                NOW - timedelta(days=2),
-                level="INFO",
-                msg="label watcher starting",
-                data={"version": "0.5.0"},
-            ),
+            watcher_starting(NOW - timedelta(days=20), "0.4.0"),
+            watcher_starting(NOW - timedelta(days=2), "0.5.0"),
             event(
                 NOW - timedelta(days=1),
                 level="INFO",
                 msg="printing starting soon",
+                app="watcher",
                 data={"version": "9.9.9"},
             ),
         ],
     )
     write_jsonl(
         base / "printer-shippy.jsonl",
-        [
-            event(
-                NOW - timedelta(days=4),
-                level="INFO",
-                msg="starting",
-                app="shippy",
-                version="0.1.0",
-            )
-        ],
+        [shippy_starting(NOW - timedelta(days=4), "shippy", "0.1.0")],
     )
     return base
+
+
+def watcher_starting(ts, version):
+    """ibp-printing's label watcher: app "watcher", the version in data."""
+    return event(
+        ts,
+        level="INFO",
+        msg="label watcher starting",
+        app="watcher",
+        logger="ibp_printing.apps.watcher",
+        data={
+            "version": version,
+            "argv": ["ibp-label-watcher"],
+            "config_file": "C:\\Users\\insid\\watcher.toml",
+            "state_dir": "C:\\Users\\insid\\state",
+        },
+    )
+
+
+def shippy_starting(ts, app, version):
+    """shippy's start_logging: app and version at the top and in data."""
+    return event(
+        ts,
+        level="INFO",
+        msg=f"{app} starting",
+        app=app,
+        version=version,
+        logger="shippy.startup",
+        data={
+            "app": app,
+            "version": version,
+            "argv": [app, "--request", "TEX-01234567-2"],
+            "python": "3.12.7",
+            "platform": "win32",
+            "error_log": f"errors-{app}.jsonl",
+        },
+    )
 
 
 def test_run_writes_a_redacted_digest(tree):
@@ -466,11 +486,69 @@ def test_missing_folders_still_give_a_digest(tree):
     assert (tree["digest"] / "2026-W48.md").exists()
 
 
-def test_kiosk_journal_export(tree):
-    journal = tree["root"] / "ibp-bilbo" / "journal"
-    usec = lambda moment: str(int(moment.timestamp() * 1_000_000))  # noqa: E731
+def usec(moment):
+    return str(int(moment.timestamp() * 1_000_000))
+
+
+def failed_unit_line(moment, unit, kind="UNIT"):
+    """A failed-units-<day>.jsonl line as ibp-kiosk-log-upload writes it."""
+    return {
+        "__REALTIME_TIMESTAMP": usec(moment),
+        "_HOSTNAME": "ibp-bilbo",
+        "SYSLOG_IDENTIFIER": "ibp-kiosk-log-upload",
+        "PRIORITY": "3",
+        "MESSAGE": f"{unit} failed",
+        kind: unit,
+    }
+
+
+def kiosk_host(tree, station="IBP_KIOSK1", host="ibp-bilbo"):
+    """A kiosk's upload: <share>/<host>/ inside the station's folder."""
+    return tree["root"] / station / host
+
+
+def test_kiosk_station_layout(tree):
+    host = kiosk_host(tree)
     write_jsonl(
-        journal / "entries.jsonl",
+        host / "errors-shippy.jsonl",
+        [
+            event(
+                NOW - timedelta(days=1),
+                msg="printer BOB offline",
+                app="shippy",
+                host="ibp-bilbo",
+            )
+        ],
+    )
+    write_jsonl(
+        host / "printer-watcher.jsonl",
+        [{**watcher_starting(NOW - timedelta(days=3), "0.4.0"), "host": "ibp-bilbo"}],
+    )
+    write_jsonl(
+        host / "print-server" / "errors-print-server.jsonl",
+        [
+            event(
+                NOW - timedelta(hours=6),
+                msg="DYMO not found",
+                app="print-server",
+                host="ibp-bilbo",
+            )
+        ],
+    )
+    write_jsonl(
+        host / "print-server" / "printer-print-server.jsonl",
+        [
+            # The print server's starting line has no version: no row.
+            event(
+                NOW - timedelta(days=2),
+                level="INFO",
+                msg="print server starting",
+                host="ibp-bilbo",
+            )
+        ],
+    )
+    write_jsonl(
+        host / "journal" / "journal-2026-11-25.jsonl",
         [
             {
                 "__REALTIME_TIMESTAMP": usec(NOW - timedelta(days=1)),
@@ -491,38 +569,238 @@ def test_kiosk_journal_export(tree):
                 "_SYSTEMD_UNIT": "ibp-kiosk-update.service",
                 "MESSAGE": "update check slow",
             },
+            {
+                # The uploader's own warning: not a failed unit.
+                "__REALTIME_TIMESTAMP": usec(NOW - timedelta(days=2)),
+                "PRIORITY": "4",
+                "SYSLOG_IDENTIFIER": "ibp-kiosk-log-upload",
+                "MESSAGE": "journal export failed; going on with the upload",
+            },
             "garbage",
         ],
     )
-    write_jsonl(
-        journal / "failed-units.jsonl",
-        [
-            [{"unit": "ibp-kiosk-log-upload.service", "active": "failed"}],
-            {
-                "unit": "ibp-kiosk-log-upload.service",
-                "ts": (NOW - timedelta(hours=3)).isoformat(),
-            },
-            {
-                "unit": "ibp-kiosk-log-upload.service",
-                "ts": (NOW - timedelta(days=2)).isoformat(),
-            },
-            {"nothing": "here"},
-        ],
-    )
-    _, report, _ = run(tree)
+    _, report, markdown = run(tree)
     apps = groups_by_app(report)
+    assert apps["shippy"]["hosts"] == {"ibp-bilbo": 1}
+    assert apps["shippy"]["raw_event"].endswith(
+        "IBP_KIOSK1/ibp-bilbo/errors-shippy.jsonl:1"
+    )
+    assert apps["print-server"]["hosts"] == {"ibp-bilbo": 1}
     assert apps["ibp-kiosk"]["level"] == "ERROR"
     assert apps["ibp-kiosk"]["message"] == "tile portal failed for inmate <redacted>"
-    assert apps["ibp-kiosk"]["hosts"] == {"ibp-bilbo": 1}
     assert apps["ibp-kiosk-update"]["level"] == "WARNING"
-    # Repeated failed-unit snapshots count once per day.
-    assert apps["systemd"]["count"] == 2
-    assert apps["systemd"]["message"] == "unit failed: ibp-kiosk-log-upload.service"
+    assert apps["ibp-kiosk-log-upload"]["level"] == "WARNING"
+    assert "systemd" not in apps
     assert report["unreadable"] == {
-        "ibp-bilbo/journal/entries.jsonl": 1,
-        "ibp-bilbo/journal/failed-units.jsonl": 1,
+        "IBP_KIOSK1/ibp-bilbo/journal/journal-2026-11-25.jsonl": 1
     }
-    assert [s["hosts"] for s in report["stations"]] == [["ibp-bilbo"]]
+    assert report["stations"] == [
+        {
+            "folder": "IBP_KIOSK1",
+            "hosts": ["ibp-bilbo"],
+            "last_upload": digest.iso(NOW),
+            "stale": False,
+        }
+    ]
+    assert [
+        (v["folder"], v["app"], v["version"], v["status"]) for v in report["versions"]
+    ] == [("IBP_KIOSK1/ibp-bilbo", "watcher", "0.4.0", "old")]
+    assert "IBP_KIOSK1 | ibp-bilbo" in markdown
+
+
+def test_kiosk_failed_units_count_once_a_day_while_failed(tree):
+    journal = kiosk_host(tree) / "journal"
+    days = {day: NOW - timedelta(days=day) for day in range(9)}
+
+    def failed_file(day, lines):
+        moment = days[day]
+        name = f"failed-units-{moment.astimezone(timezone.utc).date()}.jsonl"
+        return write_jsonl(journal / name, lines, mtime=moment)
+
+    # The update has been failed for three days; the label watcher (a user
+    # unit) only today, listed twice; yesterday nothing had failed (an empty
+    # file); the day before, the older format's "no failed units" line.
+    for day in (0, 1, 3, 4):
+        lines = [failed_unit_line(days[day], "ibp-kiosk-update.service")]
+        if day == 0:
+            lines += [
+                failed_unit_line(days[0], "ibp-label-watcher.service", "USER_UNIT")
+            ] * 2
+        if day == 1:
+            lines = []
+        failed_file(day, lines)
+    failed_file(
+        2,
+        [
+            {
+                "__REALTIME_TIMESTAMP": usec(days[2]),
+                "_HOSTNAME": "ibp-bilbo",
+                "SYSLOG_IDENTIFIER": "ibp-kiosk-log-upload",
+                "PRIORITY": "6",
+                "MESSAGE": "no failed units",
+            }
+        ],
+    )
+    # Before the week: not counted, and the file isn't read.
+    failed_file(8, [failed_unit_line(days[8], "ibp-kiosk-update.service")])
+    _, report, _ = run(tree)
+    failed = {g["message"]: g for g in report["groups"] if g["app"] == "systemd"}
+    assert set(failed) == {
+        "unit failed: ibp-kiosk-update.service",
+        "user unit failed: ibp-label-watcher.service",
+    }
+    assert failed["unit failed: ibp-kiosk-update.service"]["count"] == 3
+    assert failed["unit failed: ibp-kiosk-update.service"]["hosts"] == {"ibp-bilbo": 3}
+    assert failed["user unit failed: ibp-label-watcher.service"]["count"] == 1
+    assert report["summary"]["events"] == 4
+    assert report["unreadable"] == {}
+
+
+def test_station_folder_layouts_side_by_side(tree):
+    station_logs(tree)  # a laptop: files in the folder itself
+    write_jsonl(
+        kiosk_host(tree) / "journal" / f"failed-units-{NOW.date()}.jsonl",
+        [failed_unit_line(NOW - timedelta(hours=1), "ibp-kiosk-update.service")],
+    )
+    (tree["root"] / "IBP_KIOSK1" / "linked").symlink_to(tree["root"] / "IBP_LAPTOP")
+    _, report, _ = run(tree)
+    assert [s["folder"] for s in report["stations"]] == ["IBP_KIOSK1", "IBP_LAPTOP"]
+    assert groups_by_app(report)["systemd"]["hosts"] == {"ibp-bilbo": 1}
+    # The laptop's events are counted once: the symlink isn't followed.
+    assert report["summary"]["events"] == 4
+
+
+# --------------------------------------------------------------------------
+# Malformed input never stops a run
+
+
+def test_bad_lines_and_field_types_are_unreadable_not_fatal(tree):
+    deep = "[" * 100_000 + "]" * 100_000
+    base = tree["root"] / "IBP_LAPTOP"
+    write_jsonl(
+        base / "errors-shippy.jsonl",
+        [
+            deep,
+            "x" * (digest.MAX_LINE + 10),  # too long: skipped, not held
+            event(NOW - timedelta(hours=1), msg={"not": "text"}, exc=5, level=3),
+            event(NOW - timedelta(hours=1), msg=["a"], exc={"b": 1}, logger=[1]),
+            json.dumps({"ts": "9999-12-31T23:59:59-12:00", "level": "ERROR"}),
+            json.dumps({"ts": ["2026-11-25"], "level": "ERROR"}),
+            event(NOW - timedelta(hours=2), msg="still read"),
+        ],
+    )
+    write_jsonl(
+        base / "printer-shippy.jsonl",
+        [
+            deep.replace("[", '[ "starting", ', 1),
+            event(NOW, level="INFO", msg="shippy starting", data=["x"], version=7),
+            json.dumps(
+                {
+                    "ts": "0001-01-01T00:00:00+05:00",
+                    "msg": "shippy starting",
+                    "version": "0.1.0",
+                }
+            ),
+            shippy_starting(NOW - timedelta(days=1), "shippy", "0.2.0"),
+        ],
+    )
+    journal = kiosk_host(tree) / "journal"
+    write_jsonl(
+        journal / "journal-2026-11-25.jsonl",
+        [
+            deep,
+            '{"MESSAGE": "x", "PRIORITY": 1e400, "__REALTIME_TIMESTAMP": "'
+            + usec(NOW)
+            + '"}',
+            {"MESSAGE": "x", "PRIORITY": "3", "__REALTIME_TIMESTAMP": "9" * 30},
+            {
+                "MESSAGE": "x",
+                "PRIORITY": "3",
+                "__REALTIME_TIMESTAMP": usec(NOW),
+                "SYSLOG_IDENTIFIER": ["ibp-kiosk"],
+                "_HOSTNAME": {"a": 1},
+            },
+        ],
+    )
+    write_jsonl(
+        journal / f"failed-units-{NOW.date()}.jsonl",
+        [
+            {
+                "SYSLOG_IDENTIFIER": "ibp-kiosk-log-upload",
+                "PRIORITY": "3",
+                "MESSAGE": ["?"],
+                "UNIT": {"a": 1},
+                "__REALTIME_TIMESTAMP": usec(NOW),
+            },
+            [1, 2],
+        ],
+    )
+    write_jsonl(
+        tree["server"] / "client-errors.jsonl",
+        [
+            event(NOW - timedelta(hours=1), app="frontend", host=["192.0.2.1"]),
+            event(NOW - timedelta(hours=1), app="frontend", host={"a": 1}),
+            deep,
+        ],
+    )
+    system = FakeSystem(
+        entries=[{"MESSAGE": "x", "PRIORITY": 1e300, "__REALTIME_TIMESTAMP": usec(NOW)}]
+    )
+    system.entries.append(["not", "an", "entry"])
+    status, report, _ = run(tree, system=system)
+    assert status == 0
+    assert report["unreadable"] == {
+        "IBP_KIOSK1/ibp-bilbo/journal/failed-units-2026-11-26.jsonl": 1,
+        "IBP_KIOSK1/ibp-bilbo/journal/journal-2026-11-25.jsonl": 2,
+        "IBP_LAPTOP/errors-shippy.jsonl": 4,
+        "client-errors.jsonl": 1,
+    }
+    apps = groups_by_app(report)
+    assert apps["frontend"]["hosts"] == {"?": 2}
+    assert apps["frontend"]["count"] == 2
+    shippy = [g for g in report["groups"] if g["app"] == "shippy"]
+    # Level 3 isn't a level: read, but not an event.
+    assert sum(g["count"] for g in shippy) == 2
+    assert {g["message"] for g in shippy} >= {"still read", ""}
+    # The kiosk's lines with odd field types still count, under safe names.
+    assert apps["journal"]["count"] == 1
+    assert apps["ibp-kiosk-log-upload"]["count"] == 1
+    versions = {(v["folder"], v["app"]): v["version"] for v in report["versions"]}
+    assert versions == {("IBP_LAPTOP", "shippy"): "0.2.0"}
+
+
+def test_long_messages_and_stacks_are_cut_before_redaction(tree):
+    message = "a" * 50_000 + " TEX-01234567-2 " + "Jane " * 1000
+    assert digest.redact(message).startswith("aaa")
+    assert len(digest.redact(message)) <= digest.MAX_TEXT
+    cut = digest.redact("word " * 799 + "TEX-01234567-2", limit=10_000)
+    assert "0123" not in cut
+    stack = PY_TRACE.format(line=1, message="x") + "\n" + " " * 20_000 + "y"
+    assert digest.parse_stack(stack) is not None
+
+
+def test_deploy_versions_survive_any_fetch_error():
+    import http.client  # pylint: disable=import-outside-toplevel
+
+    def broken(url):
+        if "/shippy/" in url:
+            raise http.client.IncompleteRead(b"[proj")
+        if "/printing/" in url:
+            return b"\xff\xfe not toml"
+        return b"project = 5\n"
+
+    assert not digest.deploy_versions(broken)
+
+
+def test_ping_survives_any_error(monkeypatch, capsys):
+    import http.client  # pylint: disable=import-outside-toplevel
+
+    def broken(*_, **__):
+        raise http.client.BadStatusLine("")
+
+    monkeypatch.setattr(digest.urllib.request, "urlopen", broken)
+    digest.ping("https://hc.example/ping/abc", "/0", "body")
+    assert "healthchecks ping failed: BadStatusLine" in capsys.readouterr().err
 
 
 def test_server_logs_and_client_addresses(tree):

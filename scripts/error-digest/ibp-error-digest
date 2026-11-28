@@ -4,9 +4,11 @@
 Runs as root on ibp-server (ibp-error-digest.timer, Thursdays 09:00) and:
 
 1. reads the last 7 days of events from
-   - /srv/ibp-logs/<station>/errors-*.jsonl (the shared JSONL format),
-   - /srv/ibp-logs/<station>/journal/*.jsonl (a kiosk's journal export, in
-     journald's field names, and its failed units),
+   - /srv/ibp-logs/<station>/errors-*.jsonl (the shared JSONL format), where
+     a Windows laptop uploads,
+   - /srv/ibp-logs/<station>/<host>/, where a kiosk uploads: errors-*.jsonl,
+     print-server/errors-*.jsonl, and journal/*.jsonl (its journal export,
+     in journald's field names, and failed-units-<day>.jsonl),
    - /srv/ibp/logs/*.jsonl (backend.jsonl, client-errors.jsonl), and
    - the journals of the ibp-* units at warning or above, and the failed
      units (journalctl, systemctl);
@@ -52,7 +54,6 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-import urllib.error
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass, field
@@ -80,6 +81,20 @@ BUSY = 75
 MAX_LINE = 256 * 1024
 MAX_FRAMES = 12
 MAX_TEXT = 300
+# Only this much of a message is redacted (the report keeps MAX_TEXT), and
+# of a stack this many lines of at most this many characters.
+MAX_SCAN = 4000
+MAX_STACK_LINES = 2000
+MAX_STACK_LINE = 1000
+# Times outside these years are not believed (a clock gone wrong, a bad line).
+YEARS = range(2000, 2101)
+# A kiosk station's share folder holds one folder per host (its `uname -n`),
+# with the kiosk user's logs in it, the print server's in print-server/ and
+# the journal export in journal/ (kiosk docs/apps.md, "Log upload").
+PRINT_SERVER = "print-server"
+JOURNAL = "journal"
+# The kiosk's uploader writes the failed units as journal-shaped lines.
+KIOSK_UPLOADER = "ibp-kiosk-log-upload"
 # Where the stations' apps come from: the deploy branch's version file.
 GITHUB_RAW = "https://raw.githubusercontent.com/insidebooksproject"
 DEPLOY_VERSION_FILES = {
@@ -101,6 +116,7 @@ ERRORS_FILE = re.compile(r"errors-(?P<app>.+?)\.jsonl(?:\.\d+)?")
 LOG_FILE = re.compile(r"(?:printer|errors)-(?P<app>.+?)\.jsonl(?:\.\d+)?")
 SERVER_FILE = re.compile(r"(?P<stem>[\w.-]+?)\.jsonl(?:\.\d+)?")
 JOURNAL_FILE = re.compile(r"[\w.@-]+\.jsonl?(?:\.\d+)?")
+FAILED_UNITS_FILE = re.compile(r"failed-units-(?P<day>\d{4}-\d{2}-\d{2})\.jsonl")
 SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:+-]{0,63}")
 SAFE_VERSION = re.compile(r"v?\d[0-9A-Za-z.+_-]{0,39}")
 STARTING = re.compile(r"(?:[\w.-]+ ){0,3}starting")
@@ -120,6 +136,7 @@ DIGITS = re.compile(r"\d{4,}")
 PY_FRAME = re.compile(
     r'^\s*File "(?P<file>[^"]+)", line (?P<line>\d+), in (?P<func>.+?)\s*$'
 )
+PY_FILE = re.compile(r'^[ \t]*File "', re.M)
 PY_CHAIN = re.compile(
     r"^(?:During handling of the above exception|"
     r"The above exception was the direct cause)"
@@ -140,6 +157,11 @@ def redact(text: Any, limit: int = MAX_TEXT) -> str:
     """``text`` with the inmate data the design names replaced; one line."""
     if not isinstance(text, str):
         return ""
+    if len(text) > MAX_SCAN:
+        # Cut at a space, so no code or number is cut in half.
+        text = text[:MAX_SCAN]
+        space = max(text.rfind(c) for c in " \t\n")
+        text = text[:space] if space > 0 else text
     out = CODE.sub(
         lambda m: f"{m['prefix'].upper()}-{'#' * len(m['id'])}-{'#' * len(m['index'])}",
         text,
@@ -288,12 +310,11 @@ def parse_js(lines: list[str]) -> Stack:
 def parse_stack(exc: Any) -> Stack | None:
     if not isinstance(exc, str) or not exc.strip():
         return None
-    lines = exc.splitlines()
-    if "Traceback (most recent call last)" in exc or any(
-        PY_FRAME.match(l) for l in lines
-    ):
-        return parse_python(lines)
-    return parse_js(lines)
+    lines = [line[:MAX_STACK_LINE] for line in exc.splitlines()]
+    if "Traceback (most recent call last)" in exc or PY_FILE.search(exc):
+        # Python's innermost frames and exception come last, JavaScript's first.
+        return parse_python(lines[-MAX_STACK_LINES:])
+    return parse_js(lines[:MAX_STACK_LINES])
 
 
 def fingerprint(app: str, stack: Stack | None, message: str) -> str:
@@ -329,8 +350,13 @@ class Station:
     folder: str
     last_upload: datetime | None = None
     hosts: set[str] = field(default_factory=set)
-    # app -> (started, version)
-    versions: dict[str, tuple[datetime, str]] = field(default_factory=dict)
+    # (folder or folder/host, app) -> (started, version)
+    versions: dict[tuple[str, str], tuple[datetime, str]] = field(default_factory=dict)
+
+    def touch(self, modified: datetime | None) -> None:
+        """Note a file of the station's modified at ``modified``."""
+        if modified and (self.last_upload is None or modified > self.last_upload):
+            self.last_upload = modified
 
 
 @dataclass
@@ -360,6 +386,16 @@ def norm_level(value: Any) -> str | None:
     return level if level in LEVELS else None
 
 
+def believable(moment: datetime) -> datetime | None:
+    """``moment`` if it is a time this job can show, else None."""
+    try:
+        if moment.astimezone(timezone.utc).year in YEARS:
+            return moment
+    except (OverflowError, ValueError):
+        pass
+    return None
+
+
 def parse_ts(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
@@ -369,54 +405,96 @@ def parse_ts(value: Any) -> datetime | None:
         return None
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=TZ)
-    return moment
+    return believable(moment)
 
 
 def journal_ts(value: Any) -> datetime | None:
     try:
-        return datetime.fromtimestamp(int(value) / 1_000_000, tz=timezone.utc)
+        moment = datetime.fromtimestamp(int(value) / 1_000_000, tz=timezone.utc)
     except (TypeError, ValueError, OverflowError, OSError):
         return None
+    return believable(moment)
 
 
 def mtime(path: Path) -> datetime | None:
     try:
-        return datetime.fromtimestamp(path.lstat().st_mtime, tz=timezone.utc)
-    except OSError:
+        moment = datetime.fromtimestamp(path.lstat().st_mtime, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
         return None
+    return believable(moment)
+
+
+def entries(folder: Path) -> list[os.DirEntry]:
+    try:
+        with os.scandir(folder) as found:
+            return sorted(found, key=lambda e: e.name)
+    except OSError:
+        return []
 
 
 def regular_files(folder: Path) -> Iterator[Path]:
     """The regular files directly in ``folder``, never through a symlink."""
-    try:
-        entries = sorted(os.scandir(folder), key=lambda e: e.name)
-    except OSError:
-        return
-    for entry in entries:
-        if entry.is_file(follow_symlinks=False):
-            yield Path(entry.path)
+    for entry in entries(folder):
+        with contextlib.suppress(OSError):
+            if entry.is_file(follow_symlinks=False):
+                yield Path(entry.path)
 
 
-def read_lines(run: Run, path: Path, label: str) -> Iterator[tuple[int, Any]]:
-    """(line number, parsed JSON) for each non-blank line of ``path``; lines
-    that aren't JSON are counted as unreadable under ``label``."""
+def subfolders(folder: Path) -> Iterator[Path]:
+    """The folders directly in ``folder``, never through a symlink."""
+    for entry in entries(folder):
+        with contextlib.suppress(OSError):
+            if entry.is_dir(follow_symlinks=False):
+                yield Path(entry.path)
+
+
+def raw_lines(handle: Any) -> Iterator[tuple[int, bytes | None]]:
+    """(line number, line) for each line of a binary file; None for a line
+    over MAX_LINE, which is skipped without being held in memory."""
+    number = 0
+    while True:
+        raw = handle.readline(MAX_LINE + 1)
+        if not raw:
+            return
+        number += 1
+        if len(raw) > MAX_LINE:
+            while raw and not raw.endswith(b"\n"):
+                raw = handle.readline(MAX_LINE + 1)
+            yield number, None
+        else:
+            yield number, raw
+
+
+LineHandler = Callable[[int, Any], bool]
+
+
+def read_lines(run: Run, path: Path, label: str, handle: LineHandler) -> None:
+    """``handle(line number, parsed JSON)`` for each non-blank line of
+    ``path``. A line that is too long or isn't JSON, that ``handle`` turns
+    down (returns False), or that makes it raise, is counted as unreadable
+    under ``label``: no line, however malformed, stops the run."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         run.problems.append(f"{label}: could not be opened")
         return
     run.files_read += 1
-    with os.fdopen(fd, "rb") as handle:
-        for number, raw in enumerate(handle, 1):
-            if not raw.strip():
-                continue
-            if len(raw) > MAX_LINE:
-                run.unreadable[label] += 1
-                continue
-            try:
-                yield number, json.loads(raw)
-            except ValueError:
-                run.unreadable[label] += 1
+    try:
+        with os.fdopen(fd, "rb") as file:
+            for number, raw in raw_lines(file):
+                if raw is not None and not raw.strip():
+                    continue
+                readable = False
+                if raw is not None:
+                    try:
+                        readable = handle(number, json.loads(raw))
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        # RecursionError, a bad field type: the line, not the run.
+                        readable = False
+                if not readable:
+                    run.unreadable[label] += 1
+    except OSError:
+        run.problems.append(f"{label}: could not be read to the end")
 
 
 def malformed(obj: Any) -> bool:
@@ -472,7 +550,7 @@ def journal_event(obj: dict, source: str, host: str) -> Event | None:
     """A journal entry (journald's JSON field names) at warning or above."""
     try:
         priority = int(obj.get("PRIORITY", 6))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if priority > 4:
         return None
@@ -497,135 +575,210 @@ def journal_event(obj: dict, source: str, host: str) -> Event | None:
     )
 
 
-def failed_unit_event(unit: str, ts: datetime, host: str, source: str) -> Event:
+def failed_unit_event(
+    unit: str, ts: datetime, host: str, source: str, user: bool = False
+) -> Event:
     return Event(
         ts=ts,
         level="ERROR",
         app="systemd",
         host=host,
-        message=f"unit failed: {unit}",
+        message=f"{'user unit' if user else 'unit'} failed: {unit}",
         stack=None,
         source=source,
         failed_unit=True,
     )
 
 
+def failed_unit_record(obj: dict) -> tuple[str, str] | None:
+    """("UNIT" or "USER_UNIT", unit) if ``obj`` is a kiosk's failed-unit line:
+    SYSLOG_IDENTIFIER ibp-kiosk-log-upload, MESSAGE "<unit> failed", and the
+    unit in UNIT (a system unit) or USER_UNIT (the kiosk user's)."""
+    if obj.get("SYSLOG_IDENTIFIER") != KIOSK_UPLOADER:
+        return None
+    message = journal_text(obj.get("MESSAGE")).strip()
+    for kind in ("UNIT", "USER_UNIT"):
+        unit = clean_name(obj.get(kind))
+        if unit and message == f"{unit} failed":
+            return kind, unit
+    return None
+
+
+def real_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
+
+
 def read_station(run: Run, folder: Path) -> None:
+    """A station's share folder. A Windows laptop uploads its logs into the
+    folder itself; a kiosk into <host>/, with <host>/print-server/ and
+    <host>/journal/ (its journal export)."""
     station = run.stations.setdefault(folder.name, Station(folder.name))
+    read_log_folder(run, folder, station, folder.name, folder.name, folder.name)
+    for sub in subfolders(folder):
+        host = clean_name(sub.name)
+        if host is None or host in {JOURNAL, PRINT_SERVER}:
+            run.problems.append(
+                f"{folder.name}: a folder that is not a host's, not read"
+            )
+            continue
+        station.hosts.add(host)
+        where = f"{folder.name}/{host}"
+        read_log_folder(run, sub, station, host, where, where)
+        if real_dir(sub / PRINT_SERVER):
+            read_log_folder(
+                run, sub / PRINT_SERVER, station, host, f"{where}/{PRINT_SERVER}", where
+            )
+        if real_dir(sub / JOURNAL):
+            read_journal_export(run, sub / JOURNAL, station, host, f"{where}/{JOURNAL}")
+
+
+def read_log_folder(
+    run: Run,
+    folder: Path,
+    station: Station,
+    host: str,
+    label: str,
+    where: str,
+) -> None:
+    """The errors-*.jsonl and printer-*.jsonl files directly in ``folder``:
+    events from the first, versions from the starting lines of both. Events
+    are shown as from ``host``, problems under ``label``, versions under
+    ``where``."""
     margin = run.since - timedelta(days=1)
     for path in regular_files(folder):
         modified = mtime(path)
-        if modified and (station.last_upload is None or modified > station.last_upload):
-            station.last_upload = modified
-        label = f"{folder.name}/{path.name}"
+        station.touch(modified)
+        file_label = f"{label}/{path.name}"
         errors = ERRORS_FILE.fullmatch(path.name)
         log = LOG_FILE.fullmatch(path.name)
         if errors and modified and modified >= margin:
-            for number, obj in read_lines(run, path, label):
-                if malformed(obj):
-                    run.unreadable[label] += 1
-                    continue
-                inner = clean_name(obj.get("host"))
-                if inner:
-                    station.hosts.add(inner)
-                event = shared_event(
-                    obj, f"{path}:{number}", errors["app"], folder.name
-                )
-                run.add(event)
+            read_lines(
+                run,
+                path,
+                file_label,
+                shared_line(run, station, path, errors["app"], host),
+            )
         if log:
-            read_starting_lines(run, path, label, station, log["app"])
-    journal = folder / "journal"
-    if journal.is_dir() and not journal.is_symlink():
-        for path in regular_files(journal):
-            modified = mtime(path)
-            if modified and (
-                station.last_upload is None or modified > station.last_upload
-            ):
-                station.last_upload = modified
-            if JOURNAL_FILE.fullmatch(path.name) and modified and modified >= margin:
-                read_journal_export(
-                    run, path, f"{folder.name}/journal/{path.name}", station
-                )
+            read_starting_lines(run, path, file_label, station, where, log["app"])
+
+
+def shared_line(
+    run: Run, station: Station, path: Path, app: str, host: str
+) -> LineHandler:
+    def handle(number: int, obj: Any) -> bool:
+        if malformed(obj):
+            return False
+        inner = clean_name(obj.get("host"))
+        if inner:
+            station.hosts.add(inner)
+        run.add(shared_event(obj, f"{path}:{number}", app, host))
+        return True
+
+    return handle
 
 
 def read_starting_lines(
-    run: Run, path: Path, label: str, station: Station, app: str
+    run: Run, path: Path, label: str, station: Station, where: str, app: str
 ) -> None:
-    """Each app's latest "starting" line in ``path``: its version."""
+    """Each app's latest "starting" line in ``path`` ("shippy starting",
+    "label watcher starting"): its version, from ``version`` or
+    ``data.version``. Nothing else is taken from the file."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         run.problems.append(f"{label}: could not be opened")
         return
-    with os.fdopen(fd, "rb") as handle:
-        for raw in handle:
-            if b"starting" not in raw or len(raw) > MAX_LINE:
-                continue
-            try:
-                obj = json.loads(raw)
-            except ValueError:
-                continue
-            if not isinstance(obj, dict) or not isinstance(obj.get("msg"), str):
-                continue
-            if not STARTING.fullmatch(obj["msg"].strip()):
-                continue
-            ts = parse_ts(obj.get("ts"))
-            raw_data = obj.get("data")
-            data = raw_data if isinstance(raw_data, dict) else {}
-            version = clean_version(obj.get("version")) or clean_version(
-                data.get("version")
-            )
-            name = clean_name(obj.get("app")) or app
-            if ts is None or version is None:
-                continue
-            inner = clean_name(obj.get("host"))
-            if inner and station.folder != "ibp-server":  # not a container id
-                station.hosts.add(inner)
-            current = station.versions.get(name)
-            if current is None or ts > current[0]:
-                station.versions[name] = (ts, version)
+    try:
+        with os.fdopen(fd, "rb") as file:
+            for _, raw in raw_lines(file):
+                if raw is None or b"starting" not in raw:
+                    continue
+                with contextlib.suppress(Exception):
+                    starting_line(json.loads(raw), station, where, app)
+    except OSError:
+        run.problems.append(f"{label}: could not be read to the end")
 
 
-def failed_units_in(obj: Any) -> list[tuple[str, Any]]:
-    """(unit, timestamp field) for each failed-unit record in ``obj``: a
-    ``systemctl --failed -o json`` row ({"unit": ...}), a record with "unit"
-    or "UNIT" and no MESSAGE, or a list of them."""
-    if isinstance(obj, list):
-        return [item for entry in obj for item in failed_units_in(entry)]
-    if not isinstance(obj, dict) or "MESSAGE" in obj:
-        return []
-    unit = clean_name(obj.get("unit")) or clean_name(obj.get("UNIT"))
-    if not unit:
-        return []
-    return [(unit, obj.get("ts") or obj.get("__REALTIME_TIMESTAMP"))]
+def starting_line(obj: Any, station: Station, where: str, app: str) -> None:
+    if not isinstance(obj, dict) or not isinstance(obj.get("msg"), str):
+        return
+    if not STARTING.fullmatch(obj["msg"].strip()):
+        return
+    ts = parse_ts(obj.get("ts"))
+    raw_data = obj.get("data")
+    data = raw_data if isinstance(raw_data, dict) else {}
+    version = clean_version(obj.get("version")) or clean_version(data.get("version"))
+    name = clean_name(obj.get("app")) or app
+    if ts is None or version is None:
+        return
+    inner = clean_name(obj.get("host"))
+    if inner and station.folder != "ibp-server":  # not a container id
+        station.hosts.add(inner)
+    current = station.versions.get((where, name))
+    if current is None or ts > current[0]:
+        station.versions[(where, name)] = (ts, version)
 
 
-def read_journal_export(run: Run, path: Path, label: str, station: Station) -> None:
-    modified = mtime(path) or run.until
-    # One failed-unit event per station, unit and day: the export repeats
-    # the list every 15 minutes.
-    seen_failed: set[tuple[str, date]] = set()
-    for number, obj in read_lines(run, path, label):
-        source = f"{path}:{number}"
-        if isinstance(obj, dict) and "MESSAGE" in obj:
-            inner = clean_name(obj.get("_HOSTNAME"))
-            if inner:
-                station.hosts.add(inner)
-            event = journal_event(obj, source, station.folder)
-            if event is None and journal_ts(obj.get("__REALTIME_TIMESTAMP")) is None:
-                run.unreadable[label] += 1
-            run.add(event)
+def read_journal_export(
+    run: Run, folder: Path, station: Station, host: str, label: str
+) -> None:
+    """A kiosk's journal export: journal-<day>.jsonl, journal entries at
+    warning or above in journald's field names, and failed-units-<day>.jsonl,
+    the units failed at the day's last upload, one journal-shaped line each.
+    A failed unit counts once per host, unit and day."""
+    margin = run.since - timedelta(days=1)
+    seen_failed: set[tuple[str, str, date]] = set()
+    for path in regular_files(folder):
+        modified = mtime(path)
+        station.touch(modified)
+        if not JOURNAL_FILE.fullmatch(path.name) or not modified or modified < margin:
             continue
-        units = failed_units_in(obj)
-        if not units:
-            run.unreadable[label] += 1
-        for unit, stamp in units:
-            ts = parse_ts(stamp) or journal_ts(stamp) or modified
-            day = ts.astimezone(TZ).date()
-            if (unit, day) in seen_failed:
-                continue
-            seen_failed.add((unit, day))
-            run.add(failed_unit_event(unit, ts, station.folder, source))
+        day = None
+        named = FAILED_UNITS_FILE.fullmatch(path.name)
+        if named:
+            with contextlib.suppress(ValueError):
+                day = date.fromisoformat(named["day"])
+        read_lines(
+            run,
+            path,
+            f"{label}/{path.name}",
+            journal_line(run, station, path, host, (day, modified, seen_failed)),
+        )
+
+
+def journal_line(
+    run: Run,
+    station: Station,
+    path: Path,
+    host: str,
+    context: tuple[date | None, datetime, set[tuple[str, str, date]]],
+) -> LineHandler:
+    file_day, modified, seen_failed = context
+
+    def handle(number: int, obj: Any) -> bool:
+        if not isinstance(obj, dict):
+            return False
+        source = f"{path}:{number}"
+        inner = clean_name(obj.get("_HOSTNAME"))
+        if inner:
+            station.hosts.add(inner)
+        failed = failed_unit_record(obj)
+        if failed:
+            kind, unit = failed
+            ts = journal_ts(obj.get("__REALTIME_TIMESTAMP")) or modified
+            key = (kind, unit, file_day or ts.astimezone(TZ).date())
+            if key not in seen_failed:
+                seen_failed.add(key)
+                run.add(
+                    failed_unit_event(unit, ts, host, source, user=kind == "USER_UNIT")
+                )
+            return True
+        if "MESSAGE" not in obj or journal_ts(obj.get("__REALTIME_TIMESTAMP")) is None:
+            return False
+        run.add(journal_event(obj, source, host))
+        return True
+
+    return handle
 
 
 def read_stations(run: Run, root: Path) -> None:
@@ -633,7 +786,8 @@ def read_stations(run: Run, root: Path) -> None:
         run.problems.append(f"{root}: not there")
         return
     try:
-        folders = sorted(os.scandir(root), key=lambda e: e.name)
+        with os.scandir(root) as found:
+            folders = sorted(found, key=lambda e: e.name)
     except OSError:
         run.problems.append(f"{root}: could not be listed")
         run.failed = True
@@ -641,8 +795,12 @@ def read_stations(run: Run, root: Path) -> None:
     for entry in folders:
         if entry.name == DIGEST_NAME or entry.name.startswith("."):
             continue
-        if entry.is_dir(follow_symlinks=False):
-            read_station(run, Path(entry.path))
+        if not entry.is_dir(follow_symlinks=False):
+            continue
+        if clean_name(entry.name) is None:
+            run.problems.append(f"{root}: a folder with an unusual name, not read")
+            continue
+        read_station(run, Path(entry.path))
 
 
 def read_server_logs(run: Run, folder: Path) -> None:
@@ -657,20 +815,31 @@ def read_server_logs(run: Run, folder: Path) -> None:
         if not match:
             continue
         stem = match["stem"]
-        read_starting_lines(run, path, path.name, station, stem)
+        read_starting_lines(run, path, path.name, station, "ibp-server", stem)
         modified = mtime(path)
         if modified is None or modified < margin:
             continue
-        clients = stem.startswith("client-errors")
-        for number, obj in read_lines(run, path, path.name):
-            if malformed(obj):
-                run.unreadable[path.name] += 1
-                continue
-            host = "ibp-server"
-            if clients:
-                address = obj.get("host")
-                host = run.hosts_map.get(address) or clean_name(address) or "?"
-            run.add(shared_event(obj, f"{path}:{number}", stem, host))
+        read_lines(run, path, path.name, server_line(run, path, stem))
+
+
+def server_line(run: Run, path: Path, stem: str) -> LineHandler:
+    clients = stem.startswith("client-errors")
+
+    def handle(number: int, obj: Any) -> bool:
+        if malformed(obj):
+            return False
+        host = "ibp-server"
+        if clients:
+            address = obj.get("host")
+            if not isinstance(address, str):
+                address = None
+            host = (
+                (address and run.hosts_map.get(address)) or clean_name(address) or "?"
+            )
+        run.add(shared_event(obj, f"{path}:{number}", stem, host))
+        return True
+
+    return handle
 
 
 Command = Callable[[list[str]], subprocess.CompletedProcess]
@@ -715,20 +884,9 @@ def read_pi_journal(run: Run, command: Command) -> None:
             if not line.strip():
                 continue
             try:
-                obj = json.loads(line)
-            except ValueError:
+                pi_journal_line(run, json.loads(line))
+            except Exception:  # pylint: disable=broad-exception-caught
                 run.unreadable["Pi journal"] += 1
-                continue
-            if not isinstance(obj, dict):
-                continue
-            unit = journal_unit(obj) or "?"
-            usec = obj.get("__REALTIME_TIMESTAMP")
-            seconds = int(str(usec)) // 1_000_000 if str(usec).isdigit() else 0
-            source = (
-                f"journalctl -u {unit} -o verbose "
-                f"--since @{seconds} --until @{seconds + 1}"
-            )
-            run.add(journal_event(obj, source, "ibp-server"))
     try:
         failed = command(
             ["systemctl", "--failed", "--plain", "--no-legend", "--no-pager"]
@@ -757,12 +915,24 @@ def read_pi_journal(run: Run, command: Command) -> None:
             )
 
 
+def pi_journal_line(run: Run, obj: Any) -> None:
+    if not isinstance(obj, dict):
+        return
+    unit = journal_unit(obj) or "?"
+    ts = journal_ts(obj.get("__REALTIME_TIMESTAMP"))
+    seconds = int(ts.timestamp()) if ts else 0
+    source = (
+        f"journalctl -u {unit} -o verbose --since @{seconds} --until @{seconds + 1}"
+    )
+    run.add(journal_event(obj, source, "ibp-server"))
+
+
 def read_hosts_map(path: Path) -> dict[str, str]:
     """address -> host name, one ``<address> <name>`` per line."""
     hosts: dict[str, str] = {}
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         return hosts
     for line in text.splitlines():
         words = line.split("#", 1)[0].split()
@@ -778,7 +948,7 @@ def read_muted(path: Path, problems: list[str]) -> dict[str, str]:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return muted
-    except OSError:
+    except (OSError, ValueError):
         problems.append(f"{path}: could not be read")
         return muted
     for number, line in enumerate(text.splitlines(), 1):
@@ -796,7 +966,7 @@ def read_release(env_file: Path) -> str | None:
     """IBP_TAG from the deploy's .env; no other line is looked at."""
     try:
         lines = env_file.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except (OSError, ValueError):
         return None
     for line in lines:
         if line.startswith("IBP_TAG="):
@@ -820,7 +990,8 @@ def deploy_versions(fetch: Fetch | None) -> dict[str, str]:
     for repo, path in DEPLOY_VERSION_FILES.items():
         try:
             data = tomllib.loads(fetch(f"{GITHUB_RAW}/{repo}/deploy/{path}").decode())
-        except (OSError, ValueError, urllib.error.URLError):
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Offline, an HTTP error, a cut-off answer: "unknown", not a failure.
             continue
         project = data.get("project")
         version = clean_version(
@@ -912,7 +1083,7 @@ def load_seen(path: Path, problems: list[str]) -> dict[str, dict]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         problems.append(f"{path}: unreadable; every group counts as new")
         return {}
     seen = data.get("fingerprints") if isinstance(data, dict) else None
@@ -1070,7 +1241,7 @@ def build_report(
                     "stale": stale,
                 }
             )
-        for app, (started, version) in sorted(station.versions.items()):
+        for (where, app), (started, version) in sorted(station.versions.items()):
             repo = app_repo(app)
             want = expected.get(repo) if repo else None
             if app in RELEASE_APPS:
@@ -1083,7 +1254,7 @@ def build_report(
                 )
             versions.append(
                 {
-                    "folder": name,
+                    "folder": where,
                     "app": app,
                     "version": version,
                     "started": iso(started),
@@ -1275,14 +1446,15 @@ def ping(url: str | None, suffix: str, body: str = "") -> None:
             urllib.request.Request(url + suffix, data=body.encode()[-10000:]),
             timeout=15,
         )
-    except OSError as err:
+    except Exception as err:  # pylint: disable=broad-exception-caught
+        # http.client's errors (a cut-off answer) aren't OSErrors.
         print(f"healthchecks ping failed: {type(err).__name__}", file=sys.stderr)
 
 
 def read_ping_url(config: Path) -> str | None:
     try:
         url = (config / "ping-url").read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, ValueError):
         return None
     return url if url.startswith(("https://", "http://")) else None
 

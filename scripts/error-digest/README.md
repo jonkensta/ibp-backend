@@ -17,17 +17,28 @@ changes nothing but its own digest and state folders.
 
 ## What it reads
 
+Each station's Samba share is its own folder, `/srv/ibp-logs/<station>/`.
+A Windows laptop uploads into the folder itself (`IBP_LAPTOP/errors-shippy.jsonl`);
+a kiosk into a folder named after its host (`uname -n`), with the print
+server's logs and its journal export below it (kiosk `docs/apps.md`, "Log
+upload"). Events from a laptop are shown as from the station folder, a
+kiosk's as from its host.
+
 | Source | Format |
 |---|---|
-| `/srv/ibp-logs/<station>/errors-*.jsonl` (and rotated `.1`...) | the shared JSONL format (`ts`, `level`, `app`, `version`, `host`, `logger`, `msg`, `exc`, `data`) |
-| `/srv/ibp-logs/<station>/journal/*.jsonl` | a kiosk's journal export: entries in journald's field names (`__REALTIME_TIMESTAMP`, `PRIORITY`, `MESSAGE`, `SYSLOG_IDENTIFIER`, `_SYSTEMD_UNIT`), and failed-unit records: `systemctl --failed -o json` rows (`{"unit": ...}`, one per line or a JSON array), each with an optional `ts` |
-| `/srv/ibp-logs/<station>/{printer,errors}-*.jsonl` | only the `starting` lines, for each station's app versions |
+| `<station>/errors-*.jsonl` (and rotated `.1`...), and a kiosk's `<station>/<host>/errors-*.jsonl` and `<station>/<host>/print-server/errors-*.jsonl` | the shared JSONL format (`ts`, `level`, `app`, `version`, `host`, `logger`, `msg`, `exc`, `data`) |
+| `<station>/<host>/journal/journal-<day>.jsonl` | a kiosk's journal entries at warning or above, in journald's field names (`__REALTIME_TIMESTAMP`, `PRIORITY`, `MESSAGE`, `SYSLOG_IDENTIFIER`, `_SYSTEMD_UNIT`, `UNIT`, ...) |
+| `<station>/<host>/journal/failed-units-<day>.jsonl` | the units failed at the kiosk's last upload that day (UTC), rewritten at every upload; empty or missing when none is. One journal-shaped line per unit: `SYSLOG_IDENTIFIER` `ibp-kiosk-log-upload`, `PRIORITY` `3`, `MESSAGE` `<unit> failed`, `UNIT` (system) or `USER_UNIT` (the kiosk user's), `__REALTIME_TIMESTAMP`. Each becomes one event a day, app `systemd`, `unit failed: <unit>` or `user unit failed: <unit>`, so a unit that stays failed counts every day the station runs |
+| the same folders' `{printer,errors}-*.jsonl` | only the `<app> starting` lines (`shippy starting`, `label watcher starting`), and of those only `ts`, `app`, `host` and the version (`version`, or `data.version`), for each station's (a kiosk: each host's) app versions. The print server's starting line has no version |
 | `/srv/ibp/logs/*.jsonl` | `backend.jsonl` (host `ibp-server`) and `client-errors.jsonl` (host: the client address, named by `/etc/ibp-error-digest/hosts`) |
 | `journalctl -u 'ibp-*' -p warning` | the Pi's own jobs (backup, refunds, sync, this one), and `systemctl --failed` |
 
-Events below WARNING are skipped. A line that isn't JSON, or a JSON value
-that isn't an event (no time stamp), is counted as unreadable, by file, in
-the report; it never stops a run. A folder that isn't there is noted, not
+Events below WARNING are skipped. A line that isn't JSON, is over 256 KB,
+is nested too deep to parse, isn't an event (no time stamp, or one outside
+2000-2100), or has a field of a type that trips the reader, is counted as
+unreadable, by file, in the report; no line stops a run. Only the first
+4000 characters of a message are redacted (and at most 300 kept), and a
+stack's lines are cut to 1000 characters. A folder that isn't there is noted, not
 an error (`/srv/ibp/logs` exists from backend v1.0.22). Files are never
 read through a symlink, and a file not modified since a day before the
 week began is not read for events (its lines are older). `digest/` is not
