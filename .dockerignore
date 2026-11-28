@@ -28,6 +28,8 @@ dist/
 # Database files (should be mounted as volume)
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 data.old.db
 
 # Editor files
