@@ -22,8 +22,9 @@ uv run pytest -q
 ```
 
 With the sample config the database is `data.db` in the current directory.
-CI (`.github/workflows/lint.yml`) also runs `black --check`, `pylint` and
-`mypy` on `ibp`.
+CI runs the tests (`.github/workflows/tests.yml`) and `black --check`,
+`pylint` and `mypy` on `ibp` (`.github/workflows/lint.yml`) on every push and
+pull request.
 
 ## Configuration
 

@@ -1,0 +1,34 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Match the Docker image and the lint job (python3.13).
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+
+      # The runbook tests run README shell blocks with stand-ins for docker,
+      # systemctl, sqlite3 and zstd; they need only bash, flock and timeout,
+      # which the runner has. No test reaches the network.
+      - name: Run the tests
+        run: uv run pytest -q
