@@ -1,0 +1,27 @@
+[Unit]
+Description=Weekly digest of IBP errors (/srv/ibp-logs/digest)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# 75: another run (say a manual one) holds the lock; not a failure.
+SuccessExitStatus=75
+# Root, because jstarr can't read the stations' folders; the whole file
+# system is read-only to it but the digest and state folders.
+User=root
+ExecStart=/usr/local/bin/ibp-error-digest
+ProtectSystem=strict
+ReadWritePaths=/srv/ibp-logs/digest
+StateDirectory=ibp-error-digest
+StateDirectoryMode=0700
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+TimeoutStartSec=30min
+Nice=10

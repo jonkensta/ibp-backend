@@ -31,6 +31,7 @@ HTTPS.
 | `~/.local/bin/ibp-backup` + timer | backups, see [`scripts/backup/`](../../scripts/backup/README.md) |
 | `~/.local/bin/ibp-label-refund` + timer | unused-label refunds, see [`scripts/label-refund/`](../../scripts/label-refund/README.md) |
 | `~/.local/bin/ibp-shipment-sync` + timer | shipment tracking, see [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md) |
+| `/usr/local/bin/ibp-error-digest` + timer (root) | weekly redacted error digest in `/srv/ibp-logs/digest/`, see [`scripts/error-digest/`](../../scripts/error-digest/README.md) |
 
 Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
 
