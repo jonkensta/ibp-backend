@@ -301,8 +301,9 @@ def pre_upgrade_block(readme: str) -> str:
 def test_rollback_checks_everything_before_moving_anything(tmp_path):
     """The rollback stops the timer, drains and locks, stops the
     containers and verifies a fresh staging file before the first move;
-    after the swap only clearing its marker and starting the containers
-    remain."""
+    after the swap only clearing its marker, starting the containers and
+    clearing the backup timer's saved state remain (the timer was not
+    running, so it is not started)."""
     root = sandbox(tmp_path)
     steps = run_block(root, rollback_block()).steps
     first_move = next(n for n, step in enumerate(steps) if step.startswith("mv "))
@@ -324,6 +325,7 @@ def test_rollback_checks_everything_before_moving_anything(tmp_path):
         "rm -f data/.rollback-in-progress",
         "docker compose up -d",
         "docker compose ps",
+        "rm -f .backup-timer-before-rollback",
     ]
     srv = root / "srv" / "ibp"
     assert (srv / "data" / "data.db").read_text() == "backup database\n"
