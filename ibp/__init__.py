@@ -3,6 +3,7 @@
 from . import (
     api,
     book_api,
+    client_errors,
     metrics_api,
     models,
     package_api,
