@@ -189,15 +189,18 @@ def api_db(
 
     from ibp import api, books, providers
     from ibp.base import app
-    from ibp.db import Base
+    from ibp.db import Base, use_sqlite_pragmas
 
+    # WAL and the busy timeout, as in production.
     path = tmp_path / "api.db"
     sync_engine = create_engine(f"sqlite:///{path}")
+    use_sqlite_pragmas(sync_engine)
     Base.metadata.create_all(sync_engine)
 
     async_engine = create_async_engine(
         f"sqlite+aiosqlite:///{path}", poolclass=NullPool
     )
+    use_sqlite_pragmas(async_engine)
     async_session = async_sessionmaker(
         autocommit=False, autoflush=False, bind=async_engine, class_=AsyncSession
     )

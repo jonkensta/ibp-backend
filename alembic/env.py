@@ -7,6 +7,7 @@ from sqlalchemy import pool
 from alembic import context
 
 # Import application models for autogenerate support
+from ibp.db import use_sqlite_pragmas
 from ibp.models import Base
 
 # this is the Alembic Config object, which provides
@@ -79,6 +80,8 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    # WAL and a busy timeout, as for the app's own connections.
+    use_sqlite_pragmas(connectable)
     sqlite = connectable.dialect.name == "sqlite"
     if sqlite:
         # SQLite's DDL is transactional, but the pysqlite driver only opens a

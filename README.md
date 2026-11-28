@@ -395,6 +395,12 @@ creates the schema on an empty database or applies pending alembic
 migrations, then starts the server. The images, setup, upgrades, rollback
 and configuration are in [`deploy/pi/README.md`](deploy/pi/README.md).
 
+Every SQLite connection (the server, the shipment sync, the bootstrap and
+alembic) uses WAL and a 10 s busy timeout (`ibp/db.py`), since the server
+and a sync's one-off container write the same file. While the database is
+open, `data.db-wal` and `data.db-shm` sit beside it and are part of it:
+copy it with `sqlite3 .backup`, never with `cp` alone.
+
 ## Migrating from the legacy database
 
 `scripts/migrate.py` imports the legacy Flask app's SQLite database into a new,

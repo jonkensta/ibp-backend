@@ -578,11 +578,12 @@ def read_key(key_file: Optional[str]) -> str:
 def build_sessions() -> sessionmaker:
     """Synchronous sessions on the configured database."""
     # pylint: disable=import-outside-toplevel
+    from .db import build_sync_engine
     from .db_bootstrap import get_sync_database_url
 
     # Keep row values out of error messages, which reach Healthchecks.
     return sessionmaker(
-        bind=sa.create_engine(get_sync_database_url(), hide_parameters=True)
+        bind=build_sync_engine(get_sync_database_url(), hide_parameters=True)
     )
 
 
