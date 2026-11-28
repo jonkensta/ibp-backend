@@ -5,6 +5,10 @@
 #   /srv/ibp/.env           IBP_TAG, the ISBN lookup keys (optionally IBP_UID/IBP_GID)
 #   /srv/ibp/nginx.conf     frontend nginx config (HTTP only, LAN + tailnet)
 #   /srv/ibp/data/data.db   the SQLite database (backed up by ibp-backup)
+#   /srv/ibp/logs/          backend.jsonl and client-errors.jsonl, the error
+#                           logs (not under data/: backups hold the database
+#                           only). Create it, owned like data/, before the
+#                           first start; see README.md (Upgrading).
 
 name: ibp
 
@@ -24,11 +28,15 @@ services:
       ISBNDB_KEY: ${ISBNDB_KEY:-}
       GOOGLE_BOOKS_KEY: ${GOOGLE_BOOKS_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # The host name in the backend's own error log events (backend.jsonl).
+      IBP_LOG_HOST: ibp-server
     # Own the database as the host user, so host-side tools (ibp-backup,
     # sqlite3) and the container agree on file ownership.
     user: "${IBP_UID:-1000}:${IBP_GID:-1000}"
     volumes:
       - ./data:/data
+      # The error logs (IBP_LOG_DIR=/logs, set in the image).
+      - ./logs:/logs
     healthcheck:
       test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8000/api/health"]
       interval: 30s

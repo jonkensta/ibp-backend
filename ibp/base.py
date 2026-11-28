@@ -123,12 +123,30 @@ config = read_server_config()
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Configure logging when the application starts."""
+    """Configure logging when the application starts.
+
+    Besides the configured log (stderr by default), WARNING and above go to
+    ``backend.jsonl`` in the log directory (``ibp/error_log.py``); if that
+    can't be written, the backend starts anyway and says so on stderr.
+    """
+    # pylint: disable=import-outside-toplevel,cyclic-import
+    from .error_log import build_backend_handler, client_error_log, get_version
+
     handlers = list(build_log_handlers())
+    json_handler, json_problem = build_backend_handler()
+    if json_handler is not None:
+        handlers.append(json_handler)
     configure_root_logger(handlers)
     configure_external_loggers(handlers)
-    logging.getLogger(__name__).info("Starting IBP Application")
-    yield
+    log = logging.getLogger(__name__)
+    if json_problem:
+        log.warning("%s", json_problem)
+    log.info("Starting IBP Application %s", get_version())
+    client_error_log.open()
+    try:
+        yield
+    finally:
+        client_error_log.close()
 
 
 app = FastAPI(

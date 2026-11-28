@@ -94,6 +94,35 @@ item's transaction, and the item saves even if they can't happen. The
 response's `remembered` lists what was saved: `"isbn"`, `"upc"`, both or
 neither.
 
+## Error logs
+
+Every IBP app writes its warnings and errors in one JSON-lines event format
+(`ts` with its UTC offset, `level`, `app`, `version`, `host`, `logger`,
+`msg`, `exc`, `data`), which a weekly digest on `ibp-server` reads (design:
+`docs/error-reporting.md` in the IBP meta repo). The backend writes two
+such files to its log directory, `[logging] log_dir` (`IBP_LOG_DIR`; the
+image sets `/logs`, mounted from `/srv/ibp/logs` on the Pi; a dev run uses
+`logs/` in the project directory). Each rotates at 5 MiB and keeps 4 old
+files (`ibp/error_log.py`):
+
+- `backend.jsonl`: the backend's own WARNING and above, `app` `backend`.
+  The usual log (stderr, for `docker compose logs`) is unchanged.
+  `version` is `IBP_VERSION`, set when the image is built (`vX.Y.Z` for a
+  release, `sha-<commit>` for a build of `main`, `dev` otherwise); `host`
+  is `IBP_LOG_HOST` (`ibp-server` in the Pi's compose file) or the
+  machine's name.
+- `client-errors.jsonl`: errors the browser code reports with
+  `POST /client-errors` (`ibp/client_errors.py`). The body is one event
+  without `ts` and `host`, which the backend adds (`host` is the client
+  address from nginx's `X-Real-IP`); `level`, `app` and `msg` are required
+  and `app` is `frontend` or `book-portal-extension`, else it is a 422. A
+  body over 16 KiB is a 413. Each address may send 30 a minute; the rest
+  are dropped with a 429, and one WARNING per address and minute says how
+  many. A report that is taken is a 204.
+
+If the directory can't be written, the backend still starts: it says so on
+stderr, and writes the browser reports to stderr instead.
+
 ## Inmate search
 
 `GET /inmates?query=` searches by name or inmate ID. It first asks the
