@@ -2,14 +2,21 @@
 
 Snapshot (Mon & Fri 13:00) of the IBP database on ibp-server, uploaded to Google Drive.
 
-- `ibp-backup`: `sqlite3 .backup` → `integrity_check` → core-table check → zstd → upload to
-  `gdrive:backups/ibp/`. Keeps the newest 20 on Drive and the newest 4 locally in `~/backups/ibp/`.
+- `ibp-backup`: `sqlite3 .backup` → rollback-journal mode → `integrity_check` → core-table
+  check → zstd → upload to `gdrive:backups/ibp/`. Keeps the newest 20 on Drive and the newest 4
+  locally in `~/backups/ibp/`.
 - `ibp-backup.service` / `ibp-backup.timer`: systemd units.
 
 The script runs on the **host**, not in a container. It reads the database straight from the
 Docker deployment's bind mount, `/srv/ibp/data/data.db` (see [`deploy/pi/`](../../deploy/pi/README.md)).
-SQLite's locking works across the host and the container, so the online `.backup` is consistent
-while the app runs. To back up a different file, add `Environment=IBP_DB=…` to the service.
+SQLite's locking, and the WAL index `data.db-shm` beside the database, work across the host and
+the containers (one host, a local disk), so the online `.backup` is consistent while the app runs:
+it reads the database and its write-ahead log `data.db-wal` as one snapshot, without holding up
+the app's writes. The live database is in WAL mode (see the [deploy README](../../deploy/pi/README.md#layout-on-the-pi));
+the snapshot is switched to a rollback journal, so each backup is one self-contained file, and
+the backend switches a restored one back to WAL as it starts. Never copy the live `data.db` with
+`cp`: without its `-wal` it lacks the latest writes. To back up a different file, add
+`Environment=IBP_DB=…` to the service.
 
 Monitoring: the script pings the self-hosted Healthchecks check `ibp-backup`
 (https://healthchecks.jstarr.me, on jstarr-beelink) on start and with its exit status plus the
@@ -56,6 +63,8 @@ run in progress, and holds the sync's run lock (see
 database while it is swapped; the label refund job never opens it. The live
 database is kept, with its SQLite side files, in a new
 `data/before-restore-…` directory; keep it until the restore is verified.
+The side files (`data.db-wal`, `-shm`) belong to the live database: left
+beside the restored one, SQLite would apply that WAL to it and corrupt it.
 
 The block starts the timers that were running again at the end, once the
 backend answers on the restored database. If it stops before the live

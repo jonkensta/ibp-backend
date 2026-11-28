@@ -12,6 +12,7 @@ package-lock.json
 npm-debug.log
 data.db
 data.db.*
+data.db-*
 build
 ibp_server.egg-info
 

@@ -26,12 +26,30 @@ HTTPS.
 | `/srv/ibp/compose.yaml`, `nginx.conf` | copied from this directory |
 | `/srv/ibp/.env` | `IBP_TAG=v…` and the ISBN lookup keys (from `.env.example`; mode 0600) |
 | `/srv/ibp/.env.pre-<tag>`, `compose.yaml.pre-<tag>` | the files as they were before an upgrade replaced them, kept for a rollback |
-| `/srv/ibp/data/data.db` | the database, owned by `jstarr` (uid 1000) |
+| `/srv/ibp/data/data.db` | the database, owned by `jstarr` (uid 1000), in WAL mode |
+| `/srv/ibp/data/data.db-wal`, `data.db-shm` | the database's write-ahead log and its index, there while anything has it open: part of the database, so `data.db` is never copied, moved or replaced without them while they exist (see below) |
 | `~/.local/bin/ibp-backup` + timer | backups, see [`scripts/backup/`](../../scripts/backup/README.md) |
 | `~/.local/bin/ibp-label-refund` + timer | unused-label refunds, see [`scripts/label-refund/`](../../scripts/label-refund/README.md) |
 | `~/.local/bin/ibp-shipment-sync` + timer | shipment tracking, see [`scripts/shipment-sync/`](../../scripts/shipment-sync/README.md) |
 
 Logs: `docker compose logs -f` (rotated by Docker: 3 × 10 MB per container).
+
+The backend and a sync's one-off container write the same file. Every
+connection either makes (the bootstrap and its migrations too) uses WAL
+and a 10 s busy timeout (`ibp/db.py`): readers and the writer don't block
+each other, and a second writer waits instead of failing with "database is
+locked". WAL is recorded in `data.db`, so the backend's first start on a
+release that sets it switches the database over, and an older release
+rolled back onto it keeps using WAL. Writes sit in
+`data.db-wal` until SQLite copies them into `data.db`; the last connection
+to close does that and removes both side files, but a container killed
+mid-run leaves them, holding writes `data.db` lacks. So `ibp-backup` copies
+the database with `sqlite3 .backup`, which reads the WAL too, and the
+restore and rollback blocks move all the files together with the backend
+stopped. The containers and host-side `sqlite3` share the memory-mapped
+`data.db-shm` because they run on one host with `data/` on its local disk;
+WAL doesn't work over a network filesystem, so `data/` must never be on one
+(no Samba share exposes it).
 
 ## Setup
 
@@ -234,8 +252,9 @@ under the old image names.
 If the new release ran a database migration, the old backend can't start
 on the migrated database, so restore the backup taken just before the
 upgrade with the block below (writes since then are lost, but the database
-it replaces is kept, with its SQLite side files, in a new
-`data/before-rollback-…` directory). It stops the shipment timer and holds
+it replaces is kept, with its SQLite side files, which must not stay
+beside the restored database, in a new `data/before-rollback-…`
+directory). It stops the shipment timer and holds
 the sync's run lock throughout, so no sync can migrate the restored
 database, and it stops the backup timer and waits for a backup in progress,
 so none has the database open while it is swapped; it checks everything

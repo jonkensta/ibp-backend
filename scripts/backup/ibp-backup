@@ -24,8 +24,17 @@ hc() {
 main() {
     [ -f "$DB" ] || { echo "database not found: $DB" >&2; exit 1; }
     mkdir -p "$LOCAL_DIR"
-    # Consistent online copy (takes a read lock; safe while the app is running)
+    # Consistent online copy, WAL included (a read transaction; safe while the
+    # app is running, whose writes it doesn't hold up)
     sqlite3 "$DB" ".timeout 30000" ".backup '$SNAP'"
+    # The copy is in WAL mode like the live database; switch it to a rollback
+    # journal, so each backup is one self-contained file that opens anywhere,
+    # read-only too. The backend switches a restored one back to WAL.
+    mode=$(sqlite3 "$SNAP" "PRAGMA journal_mode=DELETE;")
+    if [ "$mode" != "delete" ]; then
+        echo "snapshot did not leave WAL mode: $mode" >&2
+        exit 1
+    fi
     result=$(sqlite3 "$SNAP" "PRAGMA integrity_check;")
     if [ "$result" != "ok" ]; then
         echo "integrity_check failed on snapshot: $result" >&2

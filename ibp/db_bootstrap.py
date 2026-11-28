@@ -33,6 +33,7 @@ from alembic import command
 from alembic.config import Config
 
 from . import models
+from .db import build_sync_engine
 from .shipment_links import UNSCANNED
 from .base import config as server_config
 
@@ -97,7 +98,7 @@ def build_alembic_config(url: str) -> Config:
 
 def inspect_database(url: str) -> tuple[set[str], set[str]]:
     """Return (table names, columns as ``table.column``) of the database."""
-    engine = sa.create_engine(url)
+    engine = build_sync_engine(url)
     try:
         with engine.connect() as connection:
             inspector = sa.inspect(connection)
@@ -115,7 +116,7 @@ def inspect_database(url: str) -> tuple[set[str], set[str]]:
 def seed_shipping_settings(url: str) -> None:
     """Insert the default shipping settings row if it is missing."""
     table = models.Base.metadata.tables[models.ShippingSettings.__tablename__]
-    engine = sa.create_engine(url)
+    engine = build_sync_engine(url)
     try:
         with engine.begin() as connection:
             exists = connection.execute(
@@ -139,7 +140,7 @@ def backfill_ever_scanned(url: str) -> int:
     unscanned: sa.BindParameter = sa.bindparam(
         "unscanned", sorted(UNSCANNED), expanding=True
     )
-    engine = sa.create_engine(url)
+    engine = build_sync_engine(url)
     try:
         with engine.begin() as connection:
             return connection.execute(
@@ -317,7 +318,7 @@ def refuse_lost_scans(url: str) -> None:
     the links they are the evidence for. An empty ``shipments`` loses
     nothing, so the column is restored then.
     """
-    engine = sa.create_engine(url)
+    engine = build_sync_engine(url)
     try:
         with engine.connect() as connection:
             stored = connection.execute(

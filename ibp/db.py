@@ -4,10 +4,16 @@ import urllib.parse
 
 from typing import Any
 
-from sqlalchemy import MetaData
+import sqlalchemy as sa
+from sqlalchemy import MetaData, event
 
 # pylint: disable=no-name-in-module
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase
 
 from .base import config
@@ -46,14 +52,54 @@ def get_engine_kwargs(scheme: str) -> dict[str, Any]:
     return engine_kwargs[scheme]
 
 
-def build_engine():
-    """Build an async engine."""
+# How long a SQLite connection waits for another one's lock (the server, a
+# shipment sync's one-off container, a backup) before it fails with
+# "database is locked".
+SQLITE_BUSY_TIMEOUT_MS = 10_000
+
+
+def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+    """Set the busy timeout, then WAL, on a new SQLite connection.
+
+    The timeout comes first, so switching an existing database to WAL (which
+    needs it to itself for a moment) waits for other connections too. WAL is
+    recorded in the file, so once the database uses it this is a no-op. In
+    WAL, readers and the writer don't block each other.
+    """
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA journal_mode = WAL")
+    finally:
+        cursor.close()
+
+
+def use_sqlite_pragmas(engine: sa.Engine | AsyncEngine) -> None:
+    """Give every connection ``engine`` makes WAL and a busy timeout, if it
+    is a SQLite engine (any other is left alone)."""
+    if isinstance(engine, AsyncEngine):
+        engine = engine.sync_engine
+    if engine.dialect.name == "sqlite":
+        event.listen(engine, "connect", _set_sqlite_pragmas)
+
+
+def build_sync_engine(url: str, **kwargs: Any) -> sa.Engine:
+    """A synchronous engine on ``url``, with the SQLite pragmas."""
+    engine = sa.create_engine(url, **kwargs)
+    use_sqlite_pragmas(engine)
+    return engine
+
+
+def build_engine() -> AsyncEngine:
+    """Build an async engine on the configured database."""
     uri = config.get("database", "uri")
     parsed = urllib.parse.urlparse(uri)
     mapped_scheme = map_engine_scheme(parsed.scheme)
     uri = uri.replace(f"{parsed.scheme}://", f"{mapped_scheme}://", 1)
     engine_kwargs = get_engine_kwargs(mapped_scheme)
-    return create_async_engine(uri, **engine_kwargs)
+    engine = create_async_engine(uri, **engine_kwargs)
+    use_sqlite_pragmas(engine)
+    return engine
 
 
 def build_async_sessionmaker():
