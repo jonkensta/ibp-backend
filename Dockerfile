@@ -45,6 +45,17 @@ ENV PATH="/app/.venv/bin:$PATH" \
 # the container as that dir's owner (see deploy/pi/compose.yaml).
 RUN mkdir -p /data && chmod 0777 /data
 
+# Error logs (backend.jsonl, client-errors.jsonl; see ibp/error_log.py).
+# Production bind-mounts /srv/ibp/logs here, owned like data/.
+RUN mkdir -p /logs && chmod 0777 /logs
+ENV IBP_LOG_DIR=/logs
+
+# The release the image is built from (vX.Y.Z, or sha-<commit> for a build
+# of main), written into every error log event. Last, so a new value doesn't
+# rebuild the layers above.
+ARG IBP_VERSION=dev
+ENV IBP_VERSION=$IBP_VERSION
+
 # Expose port
 EXPOSE 8000
 

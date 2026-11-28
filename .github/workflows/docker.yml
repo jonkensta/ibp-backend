@@ -43,9 +43,21 @@ jobs:
             type=sha,format=short
             type=semver,pattern=v{{version}}
 
+      # The version the backend writes into its error log events: the tag
+      # for a release, sha-<short commit> (as the image tag) otherwise.
+      - id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: docker/build-push-action@v6
         with:
           context: .
+          build-args: |
+            IBP_VERSION=${{ steps.version.outputs.version }}
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
